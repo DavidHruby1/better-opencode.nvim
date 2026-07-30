@@ -18,4 +18,4 @@ XDG_CONFIG_HOME="$temporary/config" \
   nvim --headless -u NONE \
   -c "set rtp+=$PWD" \
   -c "luafile tests/e2e/smoke.lua" \
-  -c qa
+  -c 'qa!'
