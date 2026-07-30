@@ -24,7 +24,7 @@ assert(runtime.profile.version == vim.env.OPENCODE_VERSION)
 local context = require("opencode.context").new(capture, runtime)
 local job, dispatch_error, dispatch_done
 require("opencode.api.prompt")
-  .prompt("Read @this and explain what the function returns. Do not modify any file.", context)
+  .prompt("Read @this and explain what the function returns. Do not modify any file.", context, { mode = "plan" })
   :next(function(value)
     job, dispatch_done = value, true
   end)
