@@ -20,8 +20,13 @@ end
 
 ---Opens the managed Build input, or an explicit read-only Plan input.
 ---@param default? string
----@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean }
+---@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean, new_session?: boolean }
 function M.ask(default, opts)
+  local runtime = require("opencode.runtime").current()
+  if runtime and runtime.prompt_locked then
+    notify_error({ error_class = "interaction_locked" })
+    return
+  end
   if opts and opts.mode and opts.mode ~= "plan" and opts.mode ~= "build" then
     notify_error({ error_class = "mode_unavailable" })
     return
@@ -38,8 +43,13 @@ end
 
 ---Dispatches a managed Build directly, or an explicit read-only Plan.
 ---@param text string
----@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean }
+---@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean, new_session?: boolean }
 function M.prompt(text, opts)
+  local runtime = require("opencode.runtime").current()
+  if runtime and runtime.prompt_locked then
+    notify_error({ error_class = "interaction_locked" })
+    return
+  end
   if opts and opts.mode and opts.mode ~= "plan" and opts.mode ~= "build" then
     notify_error({ error_class = "mode_unavailable" })
     return
@@ -58,14 +68,24 @@ function M.select()
     notify_error({ error_class = "runtime_not_ready" })
     return
   end
+  if runtime.interaction_locked then
+    notify_error({ error_class = "interaction_locked" })
+    return
+  end
   vim.ui.select(
-    { "Ask Build", "Ask Plan", "Toggle sidebar", "Focus sidebar" },
+    { "Ask Build", "Ask Plan", "New Build session", "Sessions", "Cancel all", "Toggle sidebar", "Focus sidebar" },
     { prompt = "OpenCode" },
     function(choice)
       if choice == "Ask Build" then
         M.ask()
       elseif choice == "Ask Plan" then
         M.ask(nil, { mode = "plan" })
+      elseif choice == "New Build session" then
+        M.ask(nil, { mode = "build", new_session = true })
+      elseif choice == "Sessions" then
+        require("opencode.ui.select_session").show(runtime)
+      elseif choice == "Cancel all" then
+        require("opencode.job").cancel_all(runtime)
       end
       if choice == "Toggle sidebar" then
         runtime.sidebar:toggle()
@@ -82,7 +102,17 @@ end
 ---@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean }
 ---@return string
 function M.operator(text, opts)
+  local runtime = require("opencode.runtime").current()
+  if runtime and (runtime.prompt_locked or runtime.interaction_locked) then
+    notify_error({ error_class = "interaction_locked" })
+    return ""
+  end
   _G.opencode_build_operator = function(kind)
+    local active = require("opencode.runtime").current()
+    if active and (active.prompt_locked or active.interaction_locked) then
+      notify_error({ error_class = "interaction_locked" })
+      return
+    end
     local from, to = vim.api.nvim_buf_get_mark(0, "["), vim.api.nvim_buf_get_mark(0, "]")
     start_context({ from = from, to = to, kind = kind })
       :next(function(context)
@@ -97,7 +127,10 @@ end
 M.format = require("opencode.context").format
 M.statusline = function()
   local runtime = require("opencode.runtime").current()
-  return runtime and ("OpenCode " .. runtime.state) or ""
+  if not runtime then
+    return ""
+  end
+  return string.format("OpenCode %s (%d)", runtime.state, #require("opencode.ui.status").jobs(runtime))
 end
 
 return M

@@ -42,6 +42,9 @@ end
 
 ---Shows the right sidebar without changing current source focus.
 function Sidebar:show()
+  if self.runtime.interaction_locked then
+    return
+  end
   local width = math.floor(vim.o.columns * require("opencode.config").opts.sidebar.width)
   if self.win and vim.api.nvim_win_is_valid(self.win) then
     vim.api.nvim_win_set_width(self.win, width)
@@ -63,6 +66,9 @@ function Sidebar:hide()
 end
 
 function Sidebar:toggle()
+  if self.runtime.interaction_locked then
+    return
+  end
   if self.win and vim.api.nvim_win_is_valid(self.win) then
     self:hide()
   else
@@ -71,6 +77,9 @@ function Sidebar:toggle()
 end
 
 function Sidebar:focus()
+  if self.runtime.interaction_locked then
+    return
+  end
   self:show()
   if self.win then
     vim.api.nvim_set_current_win(self.win)
