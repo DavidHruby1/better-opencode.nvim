@@ -9,8 +9,9 @@ end
 
 T["JSONC preserves comment-like strings"] = function()
   local guard = require("opencode.runtime.config_guard")
-  local value = assert(guard.decode([[{"url":"https://x/y",/* c */"mcp":{"x":{"enabled":false}},}]]))
+  local value = assert(guard.decode([[{"url":"https://x/y","literal":",}",/* c */"mcp":{"x":{"enabled":false}},}]]))
   eq(value.url, "https://x/y")
+  eq(value.literal, ",}")
   eq(guard.validate(value), true)
 end
 
@@ -33,16 +34,79 @@ T["permission profile keeps hard denies last"] = function()
   eq(require("opencode.session").verify_permissions(rules), true)
 end
 
-T["Session errors terminate the correlated Plan once"] = function()
+T["Session errors terminate only an exactly correlated Plan"] = function()
   local runtime = require("opencode.runtime").new("/root")
   local session = { id = "ses_1", active_job_key = "ses_1:msg_1" }
-  local job = { key = session.active_job_key, state = "running" }
+  local job = { key = session.active_job_key, state = "running", user_message_id = "msg_1" }
   runtime.sessions[session.id] = session
   runtime.jobs[job.key] = job
-  runtime:route_event({ type = "session.error", properties = { sessionID = session.id } })
+  runtime:route_event({ type = "session.error", properties = { sessionID = session.id, messageID = "msg_1" } })
   eq(job.state, "error")
   runtime:route_event({ type = "session.error", properties = { sessionID = session.id } })
   eq(job.state, "error")
+end
+
+T["managed Session ownership, availability, and short IDs are derived"] = function()
+  local sessions = require("opencode.session")
+  local runtime = require("opencode.runtime").new("/tmp")
+  local owned = {
+    id = "ses_12345678same-tail",
+    directory = "/tmp",
+    metadata = sessions.metadata(runtime.root_hash),
+  }
+  eq(sessions.managed(owned, runtime, true), true)
+  owned.metadata.contract_version = 1
+  eq(sessions.managed(owned, runtime, true), false)
+  owned.metadata.contract_version = 2
+  owned.time = { archived = 1 }
+  eq(sessions.managed(owned, runtime, true), false)
+  owned.time = nil
+  local other = { id = "ses_87654321same-tail" }
+  sessions.assign_short_ids({ owned, other })
+  eq(owned.short_id ~= other.short_id, true)
+  local session = { id = owned.id, active_job_key = "job" }
+  runtime.jobs.job = { key = "job", session_id = owned.id, state = "conflict" }
+  eq(sessions.availability(runtime, session, "idle"), "active")
+  runtime.jobs.job.state, session.active_job_key = "completed", nil
+  eq(sessions.availability(runtime, session, "idle"), "reusable")
+  eq(sessions.availability(runtime, session, "busy"), "blocked")
+  eq({ runtime.prompt_locked, runtime.reconciliation_required }, { true, true })
+end
+
+T["assistant routing keeps old turn identity during Session reuse"] = function()
+  local runtime = require("opencode.runtime").new("/root")
+  local old = require("opencode.job").new("ses_1", { root = "/root", buf = 1, path = "/root/a", mode = "plan" })
+  local current = require("opencode.job").new("ses_1", { root = "/root", buf = 1, path = "/root/a", mode = "plan" })
+  old.state = "completed"
+  runtime.jobs[old.key], runtime.jobs[current.key] = old, current
+  runtime.sessions.ses_1 = { id = "ses_1", active_job_key = current.key }
+  runtime:route_event({
+    type = "message.updated",
+    properties = { info = { id = "msg_assistant_old", role = "assistant", sessionID = "ses_1", parentID = old.user_message_id } },
+  })
+  runtime:route_event({
+    type = "message.updated",
+    properties = {
+      info = { id = "msg_assistant_new", role = "assistant", sessionID = "ses_1", parentID = current.user_message_id },
+    },
+  })
+  runtime:route_event({
+    type = "message.part.updated",
+    properties = { part = { sessionID = "ses_1", messageID = "msg_assistant_old" } },
+  })
+  eq(runtime.assistant_jobs["ses_1:msg_assistant_new"], current.key)
+  eq(current.late_event_count, nil)
+  eq(old.late_event_count, 2)
+  eq(current.state, "running")
+end
+
+T["part before assistant bootstrap closes the prompt gate"] = function()
+  local runtime = require("opencode.runtime").new("/root")
+  runtime:route_event({
+    type = "message.part.updated",
+    properties = { part = { sessionID = "ses_1", messageID = "msg_unknown" } },
+  })
+  eq({ runtime.prompt_locked, runtime.reconciliation_required, runtime.correlation.unknown }, { true, true, 1 })
 end
 
 T["byte coordinates round trip only at UTF-8 boundaries"] = function()
@@ -145,6 +209,154 @@ T["merge backend reports clean, conflict, and process failure"] = function()
   eq(results.clean, { kind = "clean", text = "A\nB" })
   eq(results.conflict.kind, "conflict")
   eq(results.error.error_class, "merge_process")
+end
+
+T["Job transition matrix requires kinds and keeps terminal transitions idempotent"] = function()
+  local jobs = require("opencode.job")
+  local session = { active_job_key = "job" }
+  local job = { key = "job", root = "/root", state = "running" }
+  eq(jobs.transition(job, "waiting_user", { session = session }), false)
+  eq(jobs.transition(job, "waiting_user", { session = session, waiting_kind = "question" }), true)
+  eq(job.waiting_kind, "question")
+  eq(jobs.transition(job, "running", { session = session }), true)
+  eq(job.waiting_kind, nil)
+  eq(jobs.transition(job, "pending_apply", { session = session }), true)
+  eq(jobs.transition(job, "conflict", { session = session, conflict_kind = "agent" }), false)
+  eq(
+    jobs.transition(job, "conflict", {
+      session = session,
+      conflict_kind = "agent",
+      conflict_payload = { base = "private" },
+    }),
+    true
+  )
+  eq(jobs.transition(job, "completed", { session = session }), true)
+  eq(job.conflict_payload, nil)
+  eq(jobs.transition(job, "completed", { session = session }), true)
+  eq(jobs.transition(job, "running", { session = session }), false)
+end
+
+T["Job transition matrix covers every state pair"] = function()
+  local jobs = require("opencode.job")
+  local states =
+    { "running", "waiting_user", "pending_apply", "conflict", "completed", "cancelled", "error", "scope_violation" }
+  local allowed = {
+    running = {
+      waiting_user = true,
+      pending_apply = true,
+      completed = true,
+      cancelled = true,
+      error = true,
+      scope_violation = true,
+    },
+    waiting_user = { running = true },
+    pending_apply = { completed = true, conflict = true, cancelled = true, error = true, scope_violation = true },
+    conflict = { completed = true, cancelled = true, error = true },
+  }
+  for _, from in ipairs(states) do
+    for _, to in ipairs(states) do
+      local session = { active_job_key = "job" }
+      local job =
+        { key = "job", root = "/root", state = from, waiting_kind = from == "waiting_user" and "question" or nil }
+      if from == "conflict" then
+        job.conflict_kind, job.conflict_payload = "agent", { private = true }
+      end
+      local attrs = { session = session }
+      if to == "waiting_user" then
+        attrs.waiting_kind = "question"
+      elseif to == "conflict" then
+        attrs.conflict_kind, attrs.conflict_payload = "agent", { private = true }
+      end
+      local expected = (from == to and jobs.terminal(from) or allowed[from] and allowed[from][to]) == true
+      eq(jobs.transition(job, to, attrs), expected, from .. " -> " .. to)
+      eq(job.state, expected and to or from, from .. " -> " .. to)
+    end
+  end
+end
+
+T["stale remote reply cannot resume a waiting Job"] = function()
+  package.loaded["opencode.interaction"] = nil
+  local runtime = require("opencode.runtime").new("/root")
+  local session = { id = "ses_1", active_job_key = "job" }
+  local job =
+    { key = "job", root = "/root", session_id = session.id, state = "waiting_user", waiting_kind = "question" }
+  runtime.sessions[session.id], runtime.jobs[job.key] = session, job
+  require("opencode.events").route(runtime, {
+    type = "question.replied",
+    properties = { sessionID = session.id, requestID = "stale" },
+  })
+  eq(job.state, "waiting_user")
+  eq(job.waiting_kind, "question")
+end
+
+T["permission policy fails closed and limits persistent approval"] = function()
+  local policy = require("opencode.events").permission_policy
+  for _, name in ipairs({ "edit", "write", "apply_patch", "bash", "task", "external_directory", "custom" }) do
+    eq(policy(name), "hard_reject", name)
+  end
+  eq(policy("read"), "ask_once")
+  eq(policy("webfetch"), "ask_once_always")
+end
+
+T["interaction queue deduplicates remote identity in FIFO order"] = function()
+  package.loaded["opencode.interaction"] = nil
+  local interactions = require("opencode.interaction")
+  local first = interactions.enqueue({
+    kind = "question",
+    root = "/root",
+    session_id = "ses_1",
+    job_key = "job_1",
+    request_id = "req_1",
+    payload = {},
+  })
+  local duplicate, added = interactions.enqueue({
+    kind = "question",
+    root = "/root",
+    session_id = "ses_1",
+    job_key = "job_1",
+    request_id = "req_1",
+    payload = {},
+  })
+  local second = interactions.enqueue({
+    kind = "permission",
+    root = "/root",
+    session_id = "ses_2",
+    job_key = "job_2",
+    request_id = "req_2",
+    payload = {},
+  })
+  eq(duplicate.id, first.id)
+  eq(added, false)
+  eq({ interactions.queue[1].id, interactions.queue[2].id }, { first.id, second.id })
+  interactions.remove_by_job("/root", "job_1")
+  eq(#interactions.queue, 1)
+end
+
+T["cancel one is local and isolated even when abort fails"] = function()
+  package.loaded["opencode.interaction"] = nil
+  local Promise = require("opencode.promise")
+  local runtime = require("opencode.runtime").new("/root")
+  runtime.client = {
+    abort = function(_, id)
+      eq(id, "ses_a")
+      return Promise.reject({ error_class = "http" })
+    end,
+  }
+  local a = { key = "job_a", root = "/root", session_id = "ses_a", state = "running", mode = "plan" }
+  local b = { key = "job_b", root = "/root", session_id = "ses_b", state = "running", mode = "plan" }
+  runtime.sessions.ses_a = { id = "ses_a", active_job_key = a.key }
+  runtime.sessions.ses_b = { id = "ses_b", active_job_key = b.key }
+  runtime.jobs[a.key], runtime.jobs[b.key] = a, b
+  local report
+  require("opencode.job").cancel(runtime, a.key):next(function(value)
+    report = value
+  end)
+  eq(vim.wait(100, function()
+    return report ~= nil
+  end), true)
+  eq({ a.state, b.state, report.cancelled, report.errors }, { "cancelled", "running", 1, 1 })
+  eq(runtime.sessions.ses_a.active_job_key, nil)
+  eq(runtime.sessions.ses_b.active_job_key, b.key)
 end
 
 return T
