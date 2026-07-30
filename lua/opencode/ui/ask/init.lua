@@ -1,16 +1,31 @@
 local M = { contexts = {} }
 
----Opens a history-free Plan input with visible root and active location.
+---Opens a history-free Plan or Build input with visible root and effective scope.
 ---The context is keyed by input buffer so completion never depends on global current editor state.
 ---@param default? string
 ---@param context table
+---@param mode? "plan"|"build"
+---@param workflow_opts? table
 ---@return Promise<string>
-function M.ask(default, context)
+function M.ask(default, context, mode, workflow_opts)
   local config = require("opencode.config")
   local location = require("opencode.context.builtins").this(context)
+  mode = mode or "build"
+  local scope_kind = ""
+  if mode == "build" then
+    local base = { text = table.concat(vim.api.nvim_buf_get_lines(context.buf, 0, -1, false), "\n") }
+    local scope = require("opencode.scope").resolve(context, base, workflow_opts and workflow_opts.scope)
+    scope_kind = " | " .. (scope and scope.kind or "unsupported")
+  end
   local opts = {
     default = default,
-    prompt = string.format("Plan | %s | %s: ", vim.fs.basename(context.root), location),
+    prompt = string.format(
+      "%s | %s | %s%s: ",
+      mode == "build" and "Build" or "Plan",
+      context.root,
+      location,
+      scope_kind
+    ),
     highlight = function(text)
       return context:render(text).input:input_highlight()
     end,

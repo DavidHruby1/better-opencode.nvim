@@ -192,7 +192,36 @@ function Runtime:start()
     end)
 end
 
----Routes only events correlated to a registered local Plan Job.
+local function finish_build(runtime, session, job, messages)
+  local structured = {}
+  for _, message in ipairs(messages or {}) do
+    local info = message.info or message
+    if info.role == "assistant" and info.parentID == job.user_message_id and type(info.structured) == "table" then
+      table.insert(structured, { id = info.id, value = info.structured })
+    end
+  end
+  if #structured ~= 1 then
+    require("opencode.job").transition(job, session, "error")
+    return
+  end
+  local validated, err = require("opencode.proposal").validate(structured[1].value, job)
+  if not validated then
+    require("opencode.job").transition(
+      job,
+      session,
+      err and err.error_class == "scope_violation" and "scope_violation" or "error"
+    )
+    return
+  end
+  job.structured_assistant_message_id = structured[1].id
+  job.proposal, job.theirs = validated.proposal, validated.theirs
+  require("opencode.job").transition(job, session, "pending_apply")
+  if job.auto_apply then
+    require("opencode.apply").start(job, runtime)
+  end
+end
+
+---Routes only events correlated to a registered local Plan or Build Job.
 ---@param event table
 function Runtime:route_event(event)
   local properties = event.properties or {}
@@ -202,6 +231,14 @@ function Runtime:route_event(event)
     local job = session and self.jobs[session.active_job_key]
     if job then
       require("opencode.job").finish(job, session, "error")
+    end
+    return
+  end
+  if event.type == "file.edited" then
+    local session = self.sessions[properties.sessionID]
+    local job = session and self.jobs[session.active_job_key]
+    if job and job.mode == "build" and job.state == "running" then
+      require("opencode.job").transition(job, session, "error")
     end
     return
   end
@@ -225,6 +262,10 @@ function Runtime:route_event(event)
   self.client
     :messages(session_id)
     :next(function(messages)
+      if job.mode == "build" then
+        finish_build(self, session, job, messages)
+        return
+      end
       local found = false
       for _, message in ipairs(messages or {}) do
         local message_info = message.info or message

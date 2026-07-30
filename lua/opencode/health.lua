@@ -8,11 +8,21 @@ function M.check()
   else
     vim.health.error("Neovim 0.11.0 or newer is required")
   end
-  for _, executable in ipairs({ "opencode", "curl" }) do
+  for _, executable in ipairs({ "opencode", "curl", "git" }) do
     if vim.fn.executable(executable) == 1 then
       vim.health.ok(executable .. " available")
     else
       vim.health.error(executable .. " is required")
+    end
+  end
+  if vim.fn.executable("git") == 1 then
+    local probe = vim
+      .system({ "git", "merge-file", "-p", "--diff3", "/dev/null", "/dev/null", "/dev/null" }, { text = true })
+      :wait()
+    if probe.code == 0 then
+      vim.health.ok("git merge-file -p --diff3 available")
+    else
+      vim.health.error("git merge-file file-operand mode unavailable")
     end
   end
   if vim.fn.executable("opencode") == 1 then

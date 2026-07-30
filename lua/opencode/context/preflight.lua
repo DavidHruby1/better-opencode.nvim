@@ -5,15 +5,11 @@ local function logical(buf)
 end
 
 local function disk_logical(buf)
-  local path = vim.api.nvim_buf_get_name(buf)
-  local raw = table.concat(vim.fn.readfile(path, "b"), "\n")
-  if vim.bo[buf].fileformat == "dos" then
-    raw = raw:gsub("\r\n", "\n")
-  end
-  if vim.bo[buf].endofline and raw:sub(-1) == "\n" then
-    raw = raw:sub(1, -2)
-  end
-  return raw
+  local raw = assert(require("opencode.snapshot").read_raw(vim.api.nvim_buf_get_name(buf)))
+  return require("opencode.snapshot").decode_disk(raw, {
+    fileformat = vim.bo[buf].fileformat,
+    endofline = vim.bo[buf].endofline,
+  })
 end
 
 ---Prompts once for the snapshotted dirty file set, then writes it in deterministic order.

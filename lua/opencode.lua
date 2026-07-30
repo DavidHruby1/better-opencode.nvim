@@ -18,34 +18,35 @@ local function start_context(range)
   end)
 end
 
----Opens the managed read-only Plan input.
+---Opens the managed Build input, or an explicit read-only Plan input.
 ---@param default? string
----@param opts? { mode?: "plan" }
+---@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean }
 function M.ask(default, opts)
-  if opts and opts.mode and opts.mode ~= "plan" then
+  if opts and opts.mode and opts.mode ~= "plan" and opts.mode ~= "build" then
     notify_error({ error_class = "mode_unavailable" })
     return
   end
+  local mode = (opts and opts.mode) or "build"
   start_context()
     :next(function(context)
-      return require("opencode.ui.ask").ask(default, context):next(function(input)
-        return require("opencode.api.prompt").prompt(input, context)
+      return require("opencode.ui.ask").ask(default, context, mode, opts):next(function(input)
+        return require("opencode.api.prompt").prompt(input, context, opts)
       end)
     end)
     :catch(notify_error)
 end
 
----Dispatches a managed read-only Plan directly.
+---Dispatches a managed Build directly, or an explicit read-only Plan.
 ---@param text string
----@param opts? { mode?: "plan" }
+---@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean }
 function M.prompt(text, opts)
-  if opts and opts.mode and opts.mode ~= "plan" then
+  if opts and opts.mode and opts.mode ~= "plan" and opts.mode ~= "build" then
     notify_error({ error_class = "mode_unavailable" })
     return
   end
   start_context()
     :next(function(context)
-      return require("opencode.api.prompt").prompt(text, context)
+      return require("opencode.api.prompt").prompt(text, context, opts)
     end)
     :catch(notify_error)
 end
@@ -57,33 +58,39 @@ function M.select()
     notify_error({ error_class = "runtime_not_ready" })
     return
   end
-  vim.ui.select({ "Ask Plan", "Toggle sidebar", "Focus sidebar" }, { prompt = "OpenCode" }, function(choice)
-    if choice == "Ask Plan" then
-      M.ask(nil, { mode = "plan" })
+  vim.ui.select(
+    { "Ask Build", "Ask Plan", "Toggle sidebar", "Focus sidebar" },
+    { prompt = "OpenCode" },
+    function(choice)
+      if choice == "Ask Build" then
+        M.ask()
+      elseif choice == "Ask Plan" then
+        M.ask(nil, { mode = "plan" })
+      end
+      if choice == "Toggle sidebar" then
+        runtime.sidebar:toggle()
+      end
+      if choice == "Focus sidebar" then
+        runtime.sidebar:focus()
+      end
     end
-    if choice == "Toggle sidebar" then
-      runtime.sidebar:toggle()
-    end
-    if choice == "Focus sidebar" then
-      runtime.sidebar:focus()
-    end
-  end)
+  )
 end
 
----Creates an operator range and sends it through the Plan workflow.
+---Creates an operator range and sends it through the Build workflow by default.
 ---@param text string
----@param opts? { mode?: "plan" }
+---@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean }
 ---@return string
 function M.operator(text, opts)
-  _G.opencode_plan_operator = function(kind)
+  _G.opencode_build_operator = function(kind)
     local from, to = vim.api.nvim_buf_get_mark(0, "["), vim.api.nvim_buf_get_mark(0, "]")
     start_context({ from = from, to = to, kind = kind })
       :next(function(context)
-        return require("opencode.api.prompt").prompt(text, context)
+        return require("opencode.api.prompt").prompt(text, context, opts)
       end)
       :catch(notify_error)
   end
-  vim.o.operatorfunc = "v:lua.opencode_plan_operator"
+  vim.o.operatorfunc = "v:lua.opencode_build_operator"
   return "g@"
 end
 
