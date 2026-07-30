@@ -9,7 +9,7 @@
 | Aktualizováno | 30. 7. 2026 |
 | Produktový kontrakt | `docs/PRD.md` |
 | Ověření | `docs/ACCEPTANCE.md` |
-| OpenCode baseline | `v1.18.9`, commit `4da7bb44c84e013fa53e9c5d02ac753d1435c81a` |
+| OpenCode baselines | `v1.17.3` (`8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74`) a `v1.18.9` (`4da7bb44c84e013fa53e9c5d02ac753d1435c81a`) |
 | Upstream plugin baseline | commit `7749a034db61258ece828df70a89ff31bb27ff47` |
 
 Tento dokument uzavírá implementační rozhodnutí pro verzi 2.0. Neobsahuje volby, které má implementátor rozhodnout podle osobní preference. Změna zde uvedeného kontraktu vyžaduje současnou změnu PRD a acceptance scénářů.
@@ -59,15 +59,20 @@ Minimální editor baseline je Neovim `0.11.0`. `snacks.nvim` s aktivním `input
 
 ### Pin
 
-Implementace podporuje pouze OpenCode `v1.18.9` s commitem `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`. Runtime před prvním promptem:
+Implementace podporuje pouze dva explicitní OpenCode compatibility profily:
+
+- `v1.17.3`, commit `8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74`,
+- `v1.18.9`, commit `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`.
+
+Nejde o semver rozsah ani best-effort legacy fallback. Každý profil má vlastní neměnný `/doc` fixture a contract suite. Runtime před prvním promptem:
 
 1. zavolá `GET /global/health`,
-2. ověří přesnou verzi `1.18.9`,
+2. ověří přesnou verzi `1.17.3` nebo `1.18.9` a vybere odpovídající compatibility profil,
 3. načte `GET /doc`,
-4. ověří přítomnost všech operací uvedených níže,
+4. ověří přítomnost a očekávané request/response schema všech operací daného profilu uvedených níže,
 5. při neshodě skončí fail-closed compatibility chybou.
 
-Žádný best-effort fallback na legacy payload nebo endpoint není povolen. Upgrade OpenCode vyžaduje nový ověřený baseline a contract fixtures.
+Žádný best-effort fallback na neznámý payload nebo endpoint není povolen. Rozdíl mezi dvěma podporovanými profily smí řešit pouze explicitní, contract-testovaný adapter vybraný podle přesné health verze. Upgrade OpenCode vyžaduje nový ověřený baseline a contract fixture.
 
 ### Použité endpointy
 
@@ -78,6 +83,8 @@ Implementace podporuje pouze OpenCode `v1.18.9` s commitem `4da7bb44c84e013fa53e
 | Routed path identity | `GET /path` |
 | Effective config | `GET /config` |
 | Instance SSE | `GET /event` |
+| Agent inventory | `GET /agent` |
+| Session inventory | `GET /session` |
 | Vytvoření Session | `POST /session` |
 | Session permission/profile metadata | `PATCH /session/:sessionID` |
 | Session statusy | `GET /session/status` |
@@ -115,7 +122,7 @@ Plugin vytvoří OpenCode-kompatibilní user `messageID` ve formátu `msg_<ULID>
 }
 ```
 
-OpenCode `v1.18.9` přijímá user `messageID` začínající `msg`, podporuje `format.type = json_schema` a uloží validní výsledek do structured části nové assistant message. Assistant message má vlastní ID a `parentID` rovný pluginem dodanému user message ID. Deprecated prompt field `tools` se nepoužije, protože mění Session permissions nepřesným wildcard způsobem.
+Oba podporované OpenCode profily přijímají user `messageID` začínající `msg`, podporují `format.type = json_schema` a uloží validní výsledek do structured části nové assistant message. Assistant message má vlastní ID a `parentID` rovný pluginem dodanému user message ID. Deprecated prompt field `tools` se nepoužije, protože mění Session permissions nepřesným wildcard způsobem.
 
 Plugin neposkytuje vlastní model picker. U nové Session nechá model vyřešit pinovaný OpenCode default; u reusable Session ponechá její uložený model. `agent` se naopak posílá explicitně pro každý Job, takže Plan-to-Build přechod nemění model ani transcript.
 
@@ -224,9 +231,9 @@ Každá plugin Session se vytvoří nebo okamžitě patchne s pravidly aplikovan
 
 Session-level pravidla v pinované verzi převažují nad permissive Build defaults. Initial wildcard deny blokuje neznámé tools; následující pravidla otevírají pouze známé read-only schopnosti, user interaction a interní `StructuredOutput` tool. Závěrečné hard deny zakážou `edit`, `write`, `apply_patch`, shell side effects, subagenty a přístup mimo root. Build zůstává primary agentem, ale modifikuje kód pouze proposalem, který aplikuje Neovim plugin.
 
-Pinovaná permission implementace uchovává Server-wide `always` approvals za Session rules. Bezpečnost proto nesmí stát pouze na výsledku `Permission.evaluate`: wildcard deny a explicitní hard deny musí způsobit, že zakázané a neznámé tools nejsou vůbec součástí resolved model tool surface. Plugin-owned Server začíná s prázdným approval state a permanentně input-locked TUI nemůže založit unmanaged approval. Managed dialog smí nabídnout `always` pouze pro permission, jejíž tool je v explicitním allowlistu; `read` a `external_directory` se omezí na `once` nebo `reject`, aby approval nemohl přepsat path-level deny.
+Oba podporované profily před odesláním requestu do LLM filtrují finální modelovou tool mapu přes `Permission.disabled` nad sloučenými agent a Session rules. Initial wildcard deny proto odstraní neznámé/custom/MCP tools a explicitní hard deny odstraní `edit`, `write`, `apply_patch`, `bash` a `task`; pozdější allow pravidla zachovají jen výslovně povolené capabilities a `StructuredOutput`. Server-wide `always` approvals do tohoto surface filtru nevstupují a nemohou zakázaný tool znovu zpřístupnit. Execution-time hard deny uvnitř izolovaného plugin-owned Serveru zůstává druhou obrannou vrstvou: Server začíná s prázdným approval state, passive a effective config guard vyloučí custom tools a MCP a permanentně input-locked TUI nemůže založit unmanaged approval. Managed dialog smí nabídnout `always` pouze pro schvalovatelnou permission explicitně allowlisted toolu; `read` a `external_directory` se omezí na `once` nebo `reject`. Nečekaný permission request pro hard-denied nebo neznámou capability se bez dialogu odmítne a vyvolá fail-closed diagnostiku.
 
-Hard deny se nikdy nezobrazí jako schvalovatelný dialog. Ostatní OpenCode permission requesty používají kanonický `/permission` endpoint. Plugin podporuje odpovědi pinovaného API `once`, `always`, `reject` s výše uvedeným omezením; `always` nesmí rozšířit resolved tool allowlist ani path-level deny managed Session.
+Hard deny se nikdy nezobrazí jako schvalovatelný dialog. Ostatní OpenCode permission requesty používají kanonický `/permission` endpoint. Plugin podporuje odpovědi obou compatibility profilů `once`, `always`, `reject` s výše uvedeným omezením; žádná podporovaná UI cesta nesmí vytvořit approval pro hard-denied capability ani obejít path-level deny managed Session.
 
 Plan používá stejný Session hard deny. Built-in výjimky pro plan files jsou tím přepsány, takže Plan nemůže zapisovat ani `.opencode/plans`.
 
@@ -266,7 +273,7 @@ Každá nová Session se vytvoří s metadata markerem:
 
 Runtime registry spravuje a nabízí k reuse pouze Session se správným `client`, podporovaným `contract_version`, odpovídajícím `root_hash` a bez archive timestampu. Session bez markeru je cizí i tehdy, když ji vrací stejný Server. Plugin-managed Session se nikdy automaticky nemaže; uživatel ji může archivovat nebo smazat explicitně přes podporované Session UI.
 
-Před každým promptem, včetně reuse po restartu, plugin přes `PATCH /session/:sessionID` znovu nastaví přesný permission profile a přes `GET /session/:sessionID` ověří ownership metadata i výsledná rules. Teprve potom registruje a dispatchuje Job.
+Před každým promptem, včetně reuse po restartu, plugin přes `PATCH /session/:sessionID` znovu připojí přesný ordered permission profile a přes `GET /session/:sessionID` ověří ownership metadata i výsledná rules. Oba podporované profily používají append-only PATCH a last-match evaluation, proto bezpečná revalidace znamená, že vrácený ruleset končí přesně požadovanou sekvencí a za ní není žádné další pravidlo; starší prefix je touto sekvencí přestíněn. Plugin nesmí předstírat replacement ani přijmout pouze množinovou shodu. Teprve potom registruje a dispatchuje Job.
 
 ### Job
 
@@ -683,7 +690,7 @@ Konkrétní názvy Lua modulů se mohou přizpůsobit upstream struktuře, ale o
 
 ## Reference sources
 
-- OpenCode release: <https://github.com/anomalyco/opencode/releases/tag/v1.18.9>
+- OpenCode releases: <https://github.com/anomalyco/opencode/releases/tag/v1.17.3> a <https://github.com/anomalyco/opencode/releases/tag/v1.18.9>
 - OpenCode server docs: <https://opencode.ai/docs/server/>
 - OpenCode agents: <https://opencode.ai/docs/agents/>
 - OpenCode permissions: <https://opencode.ai/docs/permissions/>

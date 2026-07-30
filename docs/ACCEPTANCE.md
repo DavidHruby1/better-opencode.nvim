@@ -18,11 +18,11 @@ Scénáře definují pozorovatelné chování, nikoli konkrétní test framework
 |---|---|
 | Unit | Scope převody, overlap, schema, hash, state transitions, event correlation |
 | Neovim integration | Buffery, changedtick, extmarky, undo, InsertLeave, views, dialogs |
-| Contract | HTTP/SSE payloady proti uloženému OpenCode `v1.18.9` `/doc` fixture |
+| Contract | HTTP/SSE payloady proti uloženým OpenCode `v1.17.3` a `v1.18.9` `/doc` fixtures |
 | End-to-end | Skutečný plugin-owned Server + TUI + Neovim workflow |
 | Failure injection | Crash, disconnect, late event, save failure, invalid proposal, merge error |
 
-Contract suite MUSÍ obsahovat neměnný `/doc` fixture získaný z OpenCode `v1.18.9` commitu `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`. End-to-end suite MUSÍ běžet proti binárce stejné verze.
+Contract suite MUSÍ obsahovat dva neměnné `/doc` fixtures: OpenCode `v1.17.3` z commitu `8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74` a OpenCode `v1.18.9` z commitu `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`. Všechny povinné contract scénáře a end-to-end suite MUSÍ běžet proti oběma přesně odpovídajícím binárkám; rozdíl smí obsloužit pouze explicitní version profile, ne best-effort fallback.
 
 ## Společné testovací fixture
 
@@ -59,7 +59,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **And** TUI je spuštěn s `attach --dir` rovným tomuto rootu  
 **And** každý HTTP/SSE request nese stejný `x-opencode-directory`  
 **And** spustí právě jeden TUI klient připojený k tomuto Serveru  
-**And** `/global/health` vrátí `1.18.9`  
+**And** `/global/health` vrátí přesně verzi zvoleného testovacího profilu `1.17.3` nebo `1.18.9`<br>
 **And** `/doc` obsahuje všechny endpointy z architektury  
 **And** port ani heslo nejsou v logu.
 
@@ -78,7 +78,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Priorita:** P0  
 **Požadavky:** RUN-04, RUN-05
 
-**Given** executable hlásí jinou verzi nebo `/doc` postrádá required operation  
+**Given** executable hlásí jinou než podporovanou verzi nebo `/doc` neodpovídá profilu required operations a schemas<br>
 **When** skončí preflight  
 **Then** Runtime nepřejde do `ready`  
 **And** žádný prompt se neodešle  
@@ -709,8 +709,11 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Then** nativní dialog ukáže Session/Job identitu a API-supported odpovědi  
 **Given** požadavek odpovídá hard deny edit/bash/task/external nebo neznámému toolu mimo allowlist  
 **Then** OpenCode jej odmítne bez možnosti `once` nebo `always`  
-**Given** contract fixture přímo předvyplní Server-wide `always` approval pro edit  
-**Then** managed Session edit ani neznámý tool nemá v resolved model tool surface a approval jej nemůže znovu zpřístupnit  
+**Given** nový plugin-owned Server začíná s prázdným Server-wide approval state<br>
+**Then** pokus managed Session použít edit nebo neznámou capability skončí execution-time hard deny bez schvalovacího dialogu<br>
+**Given** contract fixture přímo předvyplní Server-wide `always` approval pro edit<br>
+**Then** managed Session edit ani neznámý tool nemá v resolved model tool surface a approval jej nemůže znovu zpřístupnit<br>
+**And** žádná managed UI cesta nevytvoří `always` approval pro hard-denied capability<br>
 **And** permission pro `read` nebo `external_directory` nikdy nenabídne `always`, pouze `once` nebo `reject`.
 
 ### AC-INT-03: FIFO dialog queue
@@ -807,6 +810,6 @@ Release candidate je přijatelný pouze tehdy, když:
 
 1. všechny delivery slices jsou dokončené a všechny P0 a P1 scénáře procházejí,
 2. žádný scenario skip nezakrývá unsupported platform nebo API drift,
-3. real OpenCode `v1.18.9` contract suite prochází bez legacy fallbacku,
+3. real OpenCode contract a end-to-end suite procházejí pro profily `v1.17.3` i `v1.18.9` bez neznámého legacy fallbacku,
 4. failure-injection suite neprokáže diskový write, stale apply, cross-Job event nebo ztrátu Ours,
 5. P2 scénáře mají automatizovaný výsledek nebo uložený reprodukovatelný manuální protokol.

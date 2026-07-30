@@ -9,7 +9,7 @@
 | Aktualizováno | 30. 7. 2026 |
 | Produkt | Fork `nickjvandyke/opencode.nvim` pro Neovim/OpenCode |
 | Upstream baseline | `nickjvandyke/opencode.nvim` commit `7749a034db61258ece828df70a89ff31bb27ff47` |
-| OpenCode baseline | `v1.18.9`, commit `4da7bb44c84e013fa53e9c5d02ac753d1435c81a` |
+| OpenCode baselines | `v1.17.3` (`8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74`) a `v1.18.9` (`4da7bb44c84e013fa53e9c5d02ac753d1435c81a`) |
 | Jazyk | Čeština |
 
 Tento dokument je autoritou pro produktové chování a rozsah. `docs/ARCHITECTURE.md` je autoritou pro implementační kontrakty a `docs/ACCEPTANCE.md` pro ověření. Při rozporu se nejprve opraví dokumentace; implementace nesmí rozpor řešit skrytým předpokladem.
@@ -223,7 +223,7 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 | RUN-01 | Runtime MUSÍ být klíčován canonical project rootem; každý root má vlastní plugin-owned Server a TUI klient a každý instance request musí být explicitně routován do tohoto rootu. |
 | RUN-02 | Sidebar MUSÍ zobrazit TUI aktivního rootu; přepnutí rootu nesmí ukončit background Joby jiných rootů. |
 | RUN-03 | Server MUSÍ poslouchat pouze na `127.0.0.1`, použít náhodný volný port a náhodné HTTP Basic credentials uložené pouze v paměti a private mode-0600 ownership manifestu. |
-| RUN-04 | Plugin MUSÍ před použitím ověřit `/global/health`, OpenCode `v1.18.9` a požadované `/doc` operace. Jiná verze je fail-closed compatibility error. |
+| RUN-04 | Plugin MUSÍ před použitím ověřit `/global/health`, přesnou podporovanou verzi OpenCode `v1.17.3` nebo `v1.18.9` a odpovídající profil požadovaných `/doc` operací. Jiná verze nebo neshoda s profilem je fail-closed compatibility error. |
 | RUN-05 | Startup MUSÍ mít timeout a diagnostickou chybu; plugin nesmí fallbacknout na cizí Server. |
 | RUN-06 | Pád TUI MUSÍ restartovat jen TUI nad živým Serverem; pád Serveru MUSÍ označit Runtime jako disconnected, zachovat lokální pending data a vyžádat Server reconciliation. |
 | RUN-07 | Reconnect MUSÍ proběhnout až po reconciliation; nedokončený Job bez prokazatelného výsledku skončí `error` bez aplikace. |
