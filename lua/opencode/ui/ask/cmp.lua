@@ -35,8 +35,8 @@ handlers[ms.textDocument_completion] = function(params, callback)
     table.insert(items, item)
   end
 
-  local connected_server = require("opencode.server").connected
-  local agents = connected_server and connected_server.subagents or {}
+  local runtime = require("opencode.runtime").current()
+  local agents = runtime and runtime.agents or {}
   for _, agent in ipairs(agents) do
     local label = "@" .. agent.name
     ---@type lsp.CompletionItem
@@ -61,7 +61,7 @@ end
 ---@param callback fun(err?: lsp.ResponseError, result: lsp.CompletionItem)
 handlers[ms.completionItem_resolve] = function(params, callback)
   local item = vim.deepcopy(params)
-  local context = require("opencode.context").current
+  local context = require("opencode.ui.ask").contexts[vim.api.nvim_get_current_buf()]
   if not item.documentation and context then
     local rendered = context:render(item.label)
     -- Highlights won't match other locations, but there's no general way to control them.

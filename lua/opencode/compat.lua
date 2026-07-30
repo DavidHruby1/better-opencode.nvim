@@ -1,0 +1,58 @@
+local operations = {
+  "global.health",
+  "path.get",
+  "config.get",
+  "event.subscribe",
+  "session.list",
+  "session.create",
+  "session.update",
+  "session.status",
+  "session.get",
+  "session.messages",
+  "session.message",
+  "session.prompt_async",
+  "session.abort",
+  "app.agents",
+  "tui.selectSession",
+  "permission.list",
+  "permission.reply",
+  "question.list",
+  "question.reply",
+  "question.reject",
+}
+
+local tools = {
+  read = true,
+  glob = true,
+  grep = true,
+  lsp = true,
+  skill = true,
+  question = true,
+  webfetch = true,
+  websearch = true,
+  edit = true,
+  write = true,
+  apply_patch = true,
+  bash = true,
+  task = true,
+  todowrite = true,
+}
+
+return {
+  ["1.17.3"] = {
+    version = "1.17.3",
+    commit = "8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74",
+    fixture = "tests/fixtures/opencode-1.17.3-doc.json",
+    operations = operations,
+    tools = tools,
+    mcp_resource_permission = nil,
+  },
+  ["1.18.9"] = {
+    version = "1.18.9",
+    commit = "4da7bb44c84e013fa53e9c5d02ac753d1435c81a",
+    fixture = "tests/fixtures/opencode-1.18.9-doc.json",
+    operations = operations,
+    tools = tools,
+    mcp_resource_permission = "read",
+  },
+}

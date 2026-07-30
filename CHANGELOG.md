@@ -1,5 +1,10 @@
 # Changelog
 
+## Fork baseline
+
+- Imported `nickjvandyke/opencode.nvim` commit `7749a034db61258ece828df70a89ff31bb27ff47`.
+- Added the F01-F02 owned Runtime and read-only Plan workflow.
+
 ## [0.13.4](https://github.com/nickjvandyke/opencode.nvim/compare/v0.13.3...v0.13.4) (2026-06-26)
 
 

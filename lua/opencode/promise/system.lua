@@ -10,7 +10,7 @@ function M.system(cmd)
   return require("opencode.promise").new(function(resolve, reject)
     local ok, err = pcall(function()
       vim.system(cmd, { text = true }, function(obj)
-        if obj.code > 1 then -- exit code 1 is expected for our uses - indicates no results for pgrep and lsof
+        if obj.code > 1 then
           reject(string.format("`%s` failed with code %d\n%s", cmd[1], obj.code, obj.stderr))
         else
           resolve(obj.stdout)

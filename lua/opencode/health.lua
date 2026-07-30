@@ -1,126 +1,54 @@
 local M = {}
 
+---Reports the hard capabilities needed by the owned Runtime and Plan UI.
 function M.check()
   vim.health.start("opencode.nvim")
-
-  local uname = vim.uv.os_uname()
-  vim.health.info(string.format("OS: %s %s (%s)", uname.sysname, uname.release, uname.machine))
-
-  vim.health.info("`nvim` version: `" .. tostring(vim.version()) .. "`")
-
-  local plugin_dir = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h")
-  local git_hash =
-    vim.trim(vim.fn.system("cd " .. vim.fn.shellescape(plugin_dir) .. " && git rev-parse HEAD")):gsub("\n", "\\n")
-  if vim.v.shell_error == 0 then
-    vim.health.info("opencode.nvim git commit hash: `" .. git_hash .. "`")
+  if vim.version.ge(vim.version(), { 0, 11, 0 }) then
+    vim.health.ok("Neovim >= 0.11.0")
   else
-    vim.health.warn("opencode.nvim git commit hash: `" .. git_hash .. "`")
+    vim.health.error("Neovim 0.11.0 or newer is required")
   end
-
-  vim.health.info("`vim.g.opencode_opts`: " .. vim.inspect(vim.g.opencode_opts))
-  local opts = require("opencode.config").opts
-
-  if opts.events.reload.enabled and not vim.o.autoread then
-    vim.health.warn(
-      "`vim.g.opencode_opts.events.reload.enabled = true` but `vim.o.autoread = false`: files edited by `opencode` can't be automatically reloaded in buffers.",
-      "Set `vim.o.autoread = true`."
-    )
+  for _, executable in ipairs({ "opencode", "curl" }) do
+    if vim.fn.executable(executable) == 1 then
+      vim.health.ok(executable .. " available")
+    else
+      vim.health.error(executable .. " is required")
+    end
   end
-
-  vim.health.start("opencode.nvim [binaries]")
-
   if vim.fn.executable("opencode") == 1 then
-    local found_version = vim.fn.system("opencode --version")
-    found_version = vim.trim(vim.split(found_version, "\n")[1])
-    vim.health.ok("`opencode` available with version `" .. found_version .. "`.")
-
-    local found_version_parsed = vim.version.parse(found_version)
-    local latest_tested_version = "1.17.4"
-    local latest_tested_version_parsed = vim.version.parse(latest_tested_version)
-    if found_version_parsed and latest_tested_version_parsed then
-      local found_major = found_version_parsed[1] or 0
-      local latest_tested_major = latest_tested_version_parsed[1] or 0
-      local found_minor = found_version_parsed[2] or 0
-      local latest_tested_minor = latest_tested_version_parsed[2] or 0
-      local found_patch = found_version_parsed[3] or 0
-      local latest_tested_patch = latest_tested_version_parsed[3] or 0
-
-      if latest_tested_major ~= found_major then
-        vim.health.warn(
-          "`opencode` version has a `major` version mismatch with latest tested version `"
-            .. latest_tested_version
-            .. "`: may cause compatibility issues."
-        )
-      elseif found_minor < latest_tested_minor then
-        vim.health.warn(
-          "`opencode` version has an older `minor` version than latest tested version `"
-            .. latest_tested_version
-            .. "`: may cause compatibility issues.",
-          {
-            "Update `opencode`.",
-          }
-        )
-      elseif found_minor == latest_tested_minor and found_patch < latest_tested_patch then
-        vim.health.warn(
-          "`opencode` version has an older `patch` version than latest tested version `"
-            .. latest_tested_version
-            .. "`: may cause compatibility issues.",
-          {
-            "Update `opencode`.",
-          }
-        )
+    local version = vim.trim(vim.fn.system({ "opencode", "--version" }))
+    if require("opencode.compat")[version] then
+      vim.health.ok("supported OpenCode " .. version)
+    else
+      vim.health.error("unsupported OpenCode " .. version)
+    end
+  end
+  local snacks_ok, snacks = pcall(require, "snacks")
+  if not snacks_ok then
+    vim.health.error("snacks.nvim is required")
+  else
+    for _, capability in ipairs({ "input", "picker" }) do
+      if snacks.config.get(capability, {}).enabled then
+        vim.health.ok("snacks." .. capability .. " enabled")
+      else
+        vim.health.error("snacks." .. capability .. " must be enabled")
       end
     end
-  else
-    vim.health.error("`opencode` executable not found in `$PATH`.", {
-      "Install `opencode` and ensure it's in your `$PATH`.",
-    })
   end
-
-  if vim.fn.executable("curl") == 1 then
-    vim.health.ok("`curl` available.")
-  else
-    vim.health.error("`curl` executable not found in `$PATH`.", {
-      "Install `curl` and ensure it's in your `$PATH`.",
-    })
+  local tcp = vim.uv.new_tcp()
+  local bound = tcp and tcp:bind("127.0.0.1", 0)
+  if tcp then
+    tcp:close()
   end
-
-  -- Binaries for auto-finding `opencode` process (Unix only)
-  if vim.fn.has("win32") == 0 and not (opts and opts.server and opts.server.url) then
-    if vim.fn.executable("pgrep") == 1 then
-      vim.health.ok("`pgrep` available.")
-    else
-      vim.health.error(
-        "`pgrep` executable not found in `$PATH`.",
-        { "Install `pgrep` and ensure it's in your `$PATH`", "Or set `vim.g.opencode_opts.server.url`." }
-      )
-    end
-    if vim.fn.executable("lsof") == 1 then
-      vim.health.ok("`lsof` available.")
-    else
-      vim.health.error(
-        "`lsof` executable not found in `$PATH`.",
-        { "Install `lsof` and ensure it's in your `$PATH`", "Or set `vim.g.opencode_opts.server.url`." }
-      )
-    end
-  end
-
-  vim.health.start("opencode.nvim [snacks]")
-
-  local snacks_ok, snacks = pcall(require, "snacks")
-  if snacks_ok then
-    if snacks.config.get("input", {}).enabled then
-      vim.health.ok("snacks.input enabled: `ask()` enhanced.")
-    else
-      vim.health.warn("snacks.input disabled: `ask()` not enhanced.")
-    end
-    if snacks.config.get("picker", {}).enabled then
-      vim.health.ok("snacks.picker enabled: `select()` enhanced.")
-    else
-      vim.health.warn("snacks.picker disabled: `select()` enhanced.")
-    end
+  if bound then
+    vim.health.ok("loopback bind available")
   else
-    vim.health.warn("snacks.nvim not available: `ask()` and `select()` not enhanced.")
+    vim.health.error("cannot bind loopback")
+  end
+  if vim.fn.exists("*termopen") == 1 or vim.fn.exists("*jobstart") == 1 then
+    vim.health.ok("terminal API available")
+  else
+    vim.health.error("terminal API unavailable")
   end
 end
 

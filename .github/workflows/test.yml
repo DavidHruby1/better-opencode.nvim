@@ -1,0 +1,39 @@
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        suite: [unit, integration, contract]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          version: v0.11.0
+          neovim: true
+      - uses: actions/checkout@v4
+        with:
+          repository: echasnovski/mini.nvim
+          ref: v0.16.0
+          path: .deps/mini.nvim
+      - run: MINI_TEST_PATH=$PWD/.deps/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run({ collect = { find_files = function() return vim.fn.globpath('tests/${{ matrix.suite }}', 'test_*.lua', false, true) end } })"
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        opencode: [1.17.3, 1.18.9]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          version: v0.11.0
+          neovim: true
+      - run: npm install --global opencode-ai@${{ matrix.opencode }}
+      - run: test "$(opencode --version)" = "${{ matrix.opencode }}"
+      - run: nvim --headless -u NONE -c "set rtp+=$PWD" -c "lua assert(require('opencode.compat')[vim.env.OPENCODE_VERSION])" -c qa
+        env:
+          OPENCODE_VERSION: ${{ matrix.opencode }}

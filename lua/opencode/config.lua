@@ -1,32 +1,15 @@
 ---@class opencode.Opts
----@field server? opencode.server.Opts OpenCode server connection options.
----@field contexts? table<string, fun(context: opencode.context.Context): string?> Context placeholders and their builders.
----@field ask? opencode.ask.Opts Options for `ask()`. Supports [snacks.input](https://github.com/folke/snacks.nvim/blob/main/docs/input.md).
----@field select? opencode.select.Opts Options and items for `select()`. Supports [snacks.picker](https://github.com/folke/snacks.nvim/blob/main/docs/picker.md).
----@field events? opencode.events.Opts Options for handling OpenCode events.
+---@field runtime? { startup_timeout?: integer }
+---@field sidebar? { width?: number }
+---@field contexts? table<string, function>
+---@field ask? table
 
----Your opencode.nvim configuration.
----Passed via global variable for [simpler UX and faster startup](https://mrcjkb.dev/posts/2023-08-22-setup.html).
----
----snacks.nvim note: Neovim does not yet support metatables or mixed integer and string keys in `vim.g` variables, affecting some options.
----In that case you may modify `require("opencode.config").opts` directly.
----See [opencode.nvim #36](https://github.com/nickjvandyke/opencode.nvim/issues/36) and [neovim #12544](https://github.com/neovim/neovim/issues/12544#issuecomment-1116794687).
 ---@type opencode.Opts?
 vim.g.opencode_opts = vim.g.opencode_opts
 
-local M = {}
-
----@type opencode.Opts
 local defaults = {
-  server = {
-    url = nil,
-    connect = true,
-    username = vim.env.OPENCODE_SERVER_USERNAME or "opencode", -- Same env vars and defaults as OpenCode
-    password = vim.env.OPENCODE_SERVER_PASSWORD,
-    start = function()
-      vim.cmd("vsplit term://opencode --port | wincmd p")
-    end,
-  },
+  runtime = { startup_timeout = 10000 },
+  sidebar = { width = 0.30 },
   contexts = {
     ["@this"] = require("opencode.context.builtins").this,
     ["@buffer"] = require("opencode.context.builtins").buffer,
@@ -37,96 +20,19 @@ local defaults = {
     ["@visible"] = require("opencode.context.builtins").visible_text,
   },
   ask = {
-    prompt = "Ask OpenCode: ",
     completion = "customlist,v:lua.opencode_completion",
     snacks = {
-      icon = "󰚩 ",
+      icon = "Plan ",
+      history = false,
       win = {
-        title_pos = "left",
         relative = "cursor",
-        row = -3, -- Row above the cursor
-        col = 0, -- Align with the cursor
-        keys = {
-          i_cr = {
-            desc = "submit",
-          },
-        },
-        b = {
-          completion = true,
-        },
-        bo = {
-          filetype = "opencode_ask",
-        },
-        on_buf = function(win)
-          -- Make sure your completion plugin has the LSP source enabled,
-          -- either by default or for the `opencode_ask` filetype!
-          vim.lsp.start(require("opencode.ui.ask.cmp"), {
-            bufnr = win.buf,
-          })
-        end,
-      },
-    },
-  },
-  select = {
-    prompt = "OpenCode: ",
-    prompts = {
-      ask = "...",
-      diagnostics = "Explain @diagnostics",
-      document = "Add comments documenting @this",
-      explain = "Explain @this and its context",
-      fix = "Fix @diagnostics",
-      implement = "Implement @this",
-      optimize = "Optimize @this for performance and readability",
-      review = "Review @this for correctness and readability",
-      test = "Add tests for @this",
-    },
-    commands = {
-      ["agent.cycle"] = "Cycle selected agent",
-      ["prompt.clear"] = "Clear current prompt",
-      ["prompt.submit"] = "Submit current prompt",
-      ["session.compact"] = "Compact current session",
-      ["session.interrupt"] = "Interrupt current session",
-      ["session.new"] = "Start new session",
-      ["session.redo"] = "Redo last undone action in current session",
-      ["session.select"] = "Select session",
-      ["session.undo"] = "Undo last action in current session",
-    },
-    server = {
-      ["server.start"] = "Start configured server",
-      ["server.connect"] = "Connect to a server",
-      ["server.disconnect"] = "Disconnect from connected server",
-    },
-    snacks = {
-      preview = "preview",
-      layout = {
-        preset = "vscode",
-        hidden = {}, -- preview is hidden by default in `vim.ui.select`
-      },
-    },
-  },
-  events = {
-    enabled = true,
-    reload = {
-      enabled = true,
-    },
-    permissions = {
-      enabled = true,
-      edits = {
-        enabled = true,
+        row = -3,
+        col = 0,
+        b = { completion = true },
+        bo = { filetype = "opencode_ask" },
       },
     },
   },
 }
 
----Plugin options, lazily merged from `defaults` and `vim.g.opencode_opts`.
----@type opencode.Opts
-M.opts = vim.tbl_deep_extend("force", vim.deepcopy(defaults), vim.g.opencode_opts or {})
-
-if M.opts.events.reload.enabled then
-  local info = vim.api.nvim_get_option_info2("autoread", { scope = "global" })
-  if not info.was_set then
-    vim.o.autoread = true
-  end
-end
-
-return M
+return { opts = vim.tbl_deep_extend("force", vim.deepcopy(defaults), vim.g.opencode_opts or {}) }

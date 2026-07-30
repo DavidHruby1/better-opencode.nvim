@@ -1,0 +1,4 @@
+version=1.18.9
+commit=4da7bb44c84e013fa53e9c5d02ac753d1435c81a
+capture=OPENCODE_SERVER_PASSWORD=fixture-secret opencode serve --hostname 127.0.0.1 --port 45992; curl --user opencode:fixture-secret -H 'x-opencode-directory: <root>' http://127.0.0.1:45992/doc
+sha256=f5cb443f0d160fc4b17190f64c2401f199160eb2137ce4e00ca319b99aa34005
