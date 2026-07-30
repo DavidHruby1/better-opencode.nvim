@@ -1,5 +1,36 @@
 local M = {}
 
+---Removes commas before closing arrays or objects while preserving every byte inside JSON strings.
+---Comments have already been removed, so lexical quote tracking and whitespace lookahead are sufficient here.
+local function strip_trailing_commas(input)
+  local out, i, quoted, escaped = {}, 1, false, false
+  while i <= #input do
+    local c = input:sub(i, i)
+    if quoted then
+      table.insert(out, c)
+      if escaped then
+        escaped = false
+      elseif c == "\\" then
+        escaped = true
+      elseif c == '"' then
+        quoted = false
+      end
+    elseif c == '"' then
+      quoted = true
+      table.insert(out, c)
+    elseif c == "," then
+      local following = input:sub(i + 1):match("^%s*([}%]])")
+      if not following then
+        table.insert(out, c)
+      end
+    else
+      table.insert(out, c)
+    end
+    i = i + 1
+  end
+  return table.concat(out)
+end
+
 ---Removes JSONC comments and trailing commas without changing string content.
 ---A small state machine is used because pattern replacement would corrupt URLs and escaped quotes.
 ---@param input string
@@ -32,9 +63,7 @@ function M.strip_jsonc(input)
       i = i + 1
     end
   end
-  local text = table.concat(out)
-  local stripped = text:gsub(",(%s*[}%]])", "%1")
-  return stripped
+  return strip_trailing_commas(table.concat(out))
 end
 
 ---Decodes passive JSON or JSONC config and rejects malformed input.
