@@ -78,41 +78,109 @@ local function restore_views(buf, views)
   end
 end
 
-local function terminate(job, runtime, state, conflict_kind)
+---Captures the source facts required by every automatic or user-confirmed apply path.
+---It rejects Insert mode, invalid ownership marks, overlapping scopes, and unsafe disk content before merge work begins.
+local function source_state(job, runtime)
+  if vim.api.nvim_get_mode().mode:sub(1, 1) == "i" then
+    return nil, "insert_mode"
+  end
+  if
+    not vim.api.nvim_buf_is_valid(job.buffer)
+    or require("opencode.runtime.root").realpath(vim.api.nvim_buf_get_name(job.buffer)) ~= job.path
+  then
+    return nil, "invalid_buffer"
+  end
+  local range, range_error = require("opencode.scope").current_range(job)
+  if not range then
+    return nil, range_error
+  end
+  local active_ranges = require("opencode.scope").active_ranges(runtime, job.buffer)
+  if not active_ranges then
+    return nil, "scope_overlap"
+  end
+  local ours = logical(job.buffer)
+  local _, disk_sha, disk_error = current_disk(job, ours)
+  if disk_error then
+    return nil, disk_error, disk_sha
+  end
+  return { ours = ours, tick = vim.api.nvim_buf_get_changedtick(job.buffer), disk_sha = disk_sha }
+end
+
+local function terminate(job, runtime, state, conflict_kind, conflict_payload)
   local session = runtime.sessions[job.session_id]
   if conflict_kind then
-    require("opencode.job").transition(job, session, "conflict", conflict_kind)
+    local changed = require("opencode.job").transition(job, "conflict", {
+      session = session,
+      conflict_kind = conflict_kind,
+      conflict_payload = conflict_payload,
+    })
+    if changed then
+      require("opencode.interaction").enqueue({
+        kind = conflict_kind == "agent" and "agent_conflict" or "external_change",
+        root = job.root,
+        session_id = job.session_id,
+        session_short_id = job.session_id:sub(-8),
+        job_key = job.key,
+        payload = job.conflict_payload,
+      })
+    end
   else
-    require("opencode.job").transition(job, session, state)
+    if state == "error" and not job.error_class then
+      job.error_class = "apply_error"
+    end
+    require("opencode.job").transition(job, state, { session = session })
   end
 end
 
-local function apply_result(job, runtime, generation, ours, tick, disk_sha, result)
+local function apply_result(job, runtime, generation, ours, tick, disk_sha, result, expected_state, callback)
   vim.schedule(function()
-    if job.state ~= "pending_apply" or job.apply_generation ~= generation then
+    expected_state = expected_state or "pending_apply"
+    if job.state ~= expected_state or job.apply_generation ~= generation then
       return
     end
-    if
-      not vim.api.nvim_buf_is_valid(job.buffer)
-      or require("opencode.runtime.root").realpath(vim.api.nvim_buf_get_name(job.buffer)) ~= job.path
-    then
-      terminate(job, runtime, "error")
+    local current, state_error, current_sha = source_state(job, runtime)
+    if not current then
+      if expected_state == "pending_apply" then
+        if state_error == "external_change" then
+          terminate(job, runtime, nil, "external_change", { disk_sha = current_sha })
+        elseif state_error == "insert_mode" then
+          M.start(job, runtime)
+        else
+          terminate(job, runtime, state_error == "scope_overlap" and "scope_violation" or "error")
+        end
+      elseif callback then
+        callback(false, state_error)
+      end
       return
     end
-    local _, current_sha, disk_error = current_disk(job, logical(job.buffer))
-    if disk_error then
-      if disk_error == "external_change" then
-        terminate(job, runtime, nil, "external_change")
+    if current.tick ~= tick or current.disk_sha ~= disk_sha or current.ours ~= ours then
+      if expected_state == "pending_apply" then
+        M.start(job, runtime)
+      elseif callback then
+        callback(false, "stale_source")
+      end
+      return
+    end
+    if result:find("\0", 1, true) or result:find("\r", 1, true) then
+      if expected_state == "pending_apply" then
+        terminate(job, runtime, "error")
+      elseif callback then
+        callback(false, "invalid_result")
       else
         terminate(job, runtime, "error")
       end
       return
     end
-    if vim.api.nvim_buf_get_changedtick(job.buffer) ~= tick or current_sha ~= disk_sha then
-      M.start(job, runtime)
+    local span = M.changed_span(ours, result)
+    local final_ranges = require("opencode.scope").active_ranges(runtime, job.buffer)
+    if not final_ranges or require("opencode.scope").mutation_overlaps(runtime, job, span) then
+      if expected_state == "pending_apply" then
+        terminate(job, runtime, "scope_violation")
+      elseif callback then
+        callback(false, "scope_overlap")
+      end
       return
     end
-    local span = M.changed_span(ours, result)
     local start_row, start_col = require("opencode.snapshot").offset_to_position(ours, span.start_byte)
     local end_row, end_col = require("opencode.snapshot").offset_to_position(ours, span.ours_end)
     if not start_row or not end_row then
@@ -130,6 +198,9 @@ local function apply_result(job, runtime, generation, ours, tick, disk_sha, resu
     )
     restore_views(job.buffer, views)
     terminate(job, runtime, "completed")
+    if callback then
+      callback(true)
+    end
   end)
 end
 
@@ -155,40 +226,36 @@ function M.start(job, runtime)
     })
     return
   end
-  local range, range_error = require("opencode.scope").current_range(job)
-  if not range then
-    terminate(job, runtime, range_error == "invalid_marks" and "error" or "scope_violation")
-    return
-  end
-  local collapsed = job.scope.start_byte < job.scope.end_byte and range.start_byte == range.end_byte
-  if
-    range.start_byte > range.end_byte
-    or collapsed
-    or require("opencode.scope").find_overlap(runtime, job.buffer, range, job.key)
-  then
-    terminate(job, runtime, "scope_violation")
-    return
-  end
-  local ours = logical(job.buffer)
-  local _, disk_sha, disk_error = current_disk(job, ours)
-  if disk_error then
-    if disk_error == "external_change" then
-      terminate(job, runtime, nil, "external_change")
+  local current, state_error, disk_sha = source_state(job, runtime)
+  if not current then
+    if state_error == "external_change" then
+      terminate(job, runtime, nil, "external_change", { disk_sha = disk_sha })
+    elseif state_error == "insert_mode" then
+      if not job.insert_leave then
+        job.insert_leave = vim.api.nvim_create_autocmd("InsertLeave", {
+          buffer = job.buffer,
+          once = true,
+          callback = function()
+            job.insert_leave = nil
+            M.start(job, runtime)
+          end,
+        })
+      end
     else
-      terminate(job, runtime, "error")
+      terminate(job, runtime, state_error == "scope_overlap" and "scope_violation" or "error")
     end
     return
   end
-  local tick = vim.api.nvim_buf_get_changedtick(job.buffer)
+  local ours, tick = current.ours, current.tick
+  disk_sha = current.disk_sha
   job.apply_generation = (job.apply_generation or 0) + 1
   local generation = job.apply_generation
   require("opencode.merge")
-    .run(job.base.text, ours, job.theirs)
+    .run(job.base.text, ours, job.theirs, { owner_key = job.key })
     :next(function(merge)
       if merge.kind == "conflict" then
         if job.state == "pending_apply" and job.apply_generation == generation then
-          job.conflict_payload = vim.deepcopy({ base = job.base, ours = ours, theirs = job.theirs })
-          terminate(job, runtime, nil, "agent")
+          terminate(job, runtime, nil, "agent", { base = job.base, ours = ours, theirs = job.theirs })
         end
         return
       end
@@ -199,6 +266,126 @@ function M.start(job, runtime)
         terminate(job, runtime, "error")
       end
     end)
+end
+
+---Resolves every agent conflict hunk with one merge-file preference and applies through the normal stale-checked path.
+---Fresh Ours and disk state are captured before the process; clean hunks from both sides remain in its output.
+function M.prefer(job, runtime, preference, callback)
+  if job.state ~= "conflict" or job.conflict_kind ~= "agent" or (preference ~= "ours" and preference ~= "theirs") then
+    return false
+  end
+  local payload = job.conflict_payload
+  local current, state_error = source_state(job, runtime)
+  if not current then
+    if callback then
+      callback(false, state_error)
+    end
+    return false
+  end
+  job.apply_generation = (job.apply_generation or 0) + 1
+  local generation = job.apply_generation
+  require("opencode.merge")
+    .run(payload.base.text, current.ours, payload.theirs, { preference = preference, owner_key = job.key })
+    :next(function(result)
+      if result.kind ~= "clean" or job.state ~= "conflict" then
+        require("opencode.job").transition(job, "error", { session = runtime.sessions[job.session_id] })
+        return
+      end
+      apply_result(
+        job,
+        runtime,
+        generation,
+        current.ours,
+        current.tick,
+        current.disk_sha,
+        result.text,
+        "conflict",
+        callback
+      )
+    end)
+    :catch(function()
+      require("opencode.job").transition(job, "error", { session = runtime.sessions[job.session_id] })
+    end)
+  return true
+end
+
+---Applies an explicitly confirmed manual result only after fresh source and disk checks.
+---The same minimal-span mutation path is used so confirmation remains one undoable buffer edit.
+function M.manual(job, runtime, result, callback)
+  if
+    job.state ~= "conflict"
+    or job.conflict_kind ~= "agent"
+    or result:find("\0", 1, true)
+    or result:find("\r", 1, true)
+  then
+    if callback then
+      callback(false, "invalid_result")
+    end
+    return false
+  end
+  local current, state_error = source_state(job, runtime)
+  if not current then
+    if callback then
+      callback(false, state_error)
+    end
+    return false
+  end
+  job.apply_generation = (job.apply_generation or 0) + 1
+  apply_result(
+    job,
+    runtime,
+    job.apply_generation,
+    current.ours,
+    current.tick,
+    current.disk_sha,
+    result,
+    "conflict",
+    callback
+  )
+  return true
+end
+
+---Retries an external conflict only when fresh disk logical text exactly equals fresh Ours.
+---The old merge result is discarded and the standard apply pipeline recomputes from Base/Ours/Theirs.
+function M.retry(job, runtime, callback)
+  if job.state ~= "conflict" or job.conflict_kind ~= "external_change" then
+    return false
+  end
+  local current, state_error = source_state(job, runtime)
+  if not current then
+    if callback then
+      callback(false, state_error)
+    end
+    return false
+  end
+  local ours = current.ours
+  local raw = require("opencode.snapshot").read_raw(job.path)
+  local disk = raw and require("opencode.snapshot").decode_disk(raw, job.base)
+  if disk ~= ours then
+    vim.notify("OpenCode: save or reconcile the buffer before retrying", vim.log.levels.WARN)
+    return false
+  end
+  job.apply_generation = (job.apply_generation or 0) + 1
+  local generation = job.apply_generation
+  require("opencode.merge")
+    .run(job.base.text, ours, job.theirs, { owner_key = job.key })
+    :next(function(result)
+      if job.state ~= "conflict" or job.apply_generation ~= generation then
+        return
+      end
+      if result.kind == "conflict" then
+        vim.notify("OpenCode: retry still conflicts with agent changes", vim.log.levels.WARN)
+        if callback then
+          callback(false, "agent_conflict")
+        end
+        return
+      end
+      apply_result(job, runtime, generation, ours, current.tick, current.disk_sha, result.text, "conflict", callback)
+    end)
+    :catch(function()
+      require("opencode.job").transition(job, "error", { session = runtime.sessions[job.session_id] })
+    end)
+  return true
 end
 
 return M

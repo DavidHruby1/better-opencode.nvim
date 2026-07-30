@@ -96,7 +96,65 @@ function M.current_range(job)
 end
 
 function M.overlaps(a, b)
+  if a.start_byte == a.end_byte and b.start_byte == b.end_byte then
+    return a.start_byte == b.start_byte
+  end
   return a.start_byte < b.end_byte and b.start_byte < a.end_byte
+end
+
+local function invalid_range(job, range)
+  return range.start_byte > range.end_byte
+    or (job.scope.start_byte < job.scope.end_byte and range.start_byte == range.end_byte)
+end
+
+---Snapshots and validates every active Build scope in one buffer.
+---Missing, reversed, collapsed, and pairwise overlapping ranges fail as one scope violation.
+---The snapshot lets callers validate before merge and again in the final mutation callback.
+---@param runtime table
+---@param buf integer
+---@return table?
+---@return string?
+function M.active_ranges(runtime, buf)
+  local ranges = {}
+  for key, job in pairs(runtime.jobs) do
+    if job.mode == "build" and job.buffer == buf and not require("opencode.job").terminal(job.state) then
+      local range = M.current_range(job)
+      if not range or invalid_range(job, range) then
+        return nil, "scope_overlap"
+      end
+      for _, existing in ipairs(ranges) do
+        if M.overlaps(range, existing.range) then
+          return nil, "scope_overlap"
+        end
+      end
+      table.insert(ranges, { key = key, range = range })
+    end
+  end
+  return ranges
+end
+
+---Returns whether a pending mutation would enter another active Job's current scope.
+---Touching ranges stay valid, while two insertions at the same empty-file position collide.
+---@param runtime table
+---@param job table
+---@param span table
+---@return boolean
+function M.mutation_overlaps(runtime, job, span)
+  local changed = { start_byte = span.start_byte, end_byte = span.ours_end }
+  for key, other in pairs(runtime.jobs) do
+    if
+      key ~= job.key
+      and other.mode == "build"
+      and other.buffer == job.buffer
+      and not require("opencode.job").terminal(other.state)
+    then
+      local range = M.current_range(other)
+      if not range or M.overlaps(changed, range) then
+        return true
+      end
+    end
+  end
+  return false
 end
 
 ---Finds the first active Build Job whose current range overlaps a candidate.
@@ -114,7 +172,7 @@ function M.find_overlap(runtime, buf, candidate, except_key)
       and not require("opencode.job").terminal(job.state)
     then
       local current = M.current_range(job)
-      if current and M.overlaps(candidate, current) then
+      if not current or invalid_range(job, current) or M.overlaps(candidate, current) then
         return job
       end
     end
