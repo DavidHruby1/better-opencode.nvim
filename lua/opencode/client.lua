@@ -22,6 +22,20 @@ local function request_error(endpoint, code, status)
   return { error_class = code == 124 and "timeout" or "http", endpoint = endpoint, status = status }
 end
 
+local function config_value(value)
+  return '"' .. value:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
+end
+
+---Builds curl configuration supplied through stdin so credentials and request content never enter process argv.
+---Curl parses this before making the request; quoting preserves JSON and authentication bytes exactly.
+local function curl_config(username, password, body)
+  local lines = { "user = " .. config_value(username .. ":" .. password) }
+  if body then
+    table.insert(lines, "data-binary = " .. config_value(vim.json.encode(body)))
+  end
+  return table.concat(lines, "\n") .. "\n"
+end
+
 ---Sends one JSON request with mandatory authentication and root routing.
 ---Only status metadata escapes on failure; response bodies are never included in errors or logs.
 ---@param method string
@@ -41,8 +55,8 @@ function Client:request(method, endpoint, body)
       "1",
       "--max-time",
       timeout,
-      "--user",
-      self.username .. ":" .. self.password,
+      "--config",
+      "-",
       "-X",
       method,
       "-H",
@@ -54,11 +68,8 @@ function Client:request(method, endpoint, body)
       "-w",
       marker .. "%{http_code}",
     }
-    if body then
-      vim.list_extend(cmd, { "--data-binary", vim.json.encode(body) })
-    end
     table.insert(cmd, self.url .. endpoint)
-    self.runner(cmd, { text = true }, function(result)
+    self.runner(cmd, { text = true, stdin = curl_config(self.username, self.password, body) }, function(result)
       vim.schedule(function()
         local payload, status = (result.stdout or ""):match("^(.*)__OPENCODE_STATUS__:(%d%d%d)$")
         status = tonumber(status)
@@ -99,6 +110,12 @@ end
 function Client:create_session(body)
   return self:request("POST", "/session", body)
 end
+function Client:list_sessions()
+  return self:request("GET", "/session")
+end
+function Client:session_status()
+  return self:request("GET", "/session/status")
+end
 function Client:update_session(id, body)
   return self:request("PATCH", "/session/" .. id, body)
 end
@@ -120,6 +137,21 @@ end
 function Client:select_session(id)
   return self:request("POST", "/tui/select-session", { sessionID = id })
 end
+function Client:questions()
+  return self:request("GET", "/question")
+end
+function Client:question_reply(id, answers)
+  return self:request("POST", "/question/" .. id .. "/reply", { answers = answers })
+end
+function Client:question_reject(id)
+  return self:request("POST", "/question/" .. id .. "/reject")
+end
+function Client:permissions()
+  return self:request("GET", "/permission")
+end
+function Client:permission_reply(id, response)
+  return self:request("POST", "/permission/" .. id .. "/reply", { reply = response })
+end
 
 ---Subscribes to SSE and emits decoded data frames.
 ---Frames are separated by blank lines and may contain multiple data lines.
@@ -132,8 +164,8 @@ function Client:subscribe(callback, on_exit)
     "--silent",
     "--show-error",
     "--no-buffer",
-    "--user",
-    self.username .. ":" .. self.password,
+    "--config",
+    "-",
     "-H",
     "Accept: text/event-stream",
     "-H",
@@ -141,7 +173,7 @@ function Client:subscribe(callback, on_exit)
     self.url .. "/event",
   }
   local lines = {}
-  return vim.fn.jobstart(cmd, {
+  local job = vim.fn.jobstart(cmd, {
     stdout_buffered = false,
     on_stdout = function(_, data)
       for _, line in ipairs(data or {}) do
@@ -173,6 +205,11 @@ function Client:subscribe(callback, on_exit)
       end)
     end,
   })
+  if job > 0 then
+    vim.fn.chansend(job, curl_config(self.username, self.password))
+    vim.fn.chanclose(job, "stdin")
+  end
+  return job
 end
 
 return Client

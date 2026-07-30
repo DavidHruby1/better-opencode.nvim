@@ -5,11 +5,12 @@ local M = {}
 ---@param responses table[]
 ---@return function, table
 function M.runner(responses)
-  local calls = {}
+  local calls, options = {}, {}
   local index = 0
-  return function(argv, _, callback)
+  return function(argv, opts, callback)
     index = index + 1
     table.insert(calls, argv)
+    table.insert(options, opts)
     local response = responses[index]
     callback({
       code = response.code or 0,
@@ -17,7 +18,8 @@ function M.runner(responses)
       stderr = "",
     })
   end,
-    calls
+    calls,
+    options
 end
 
 return M
