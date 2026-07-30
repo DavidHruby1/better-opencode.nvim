@@ -74,6 +74,7 @@ function Runtime.new(root)
     sessions = {},
     jobs = {},
     assistant_jobs = {},
+    correlation = { exact = 0, late = 0, unknown = 0 },
   }, Runtime)
   self.owner_manifest = vim.fn.stdpath("state") .. "/opencode.nvim/runtimes/" .. hash .. ".json"
   return self
@@ -196,26 +197,35 @@ local function finish_build(runtime, session, job, messages)
   local structured = {}
   for _, message in ipairs(messages or {}) do
     local info = message.info or message
-    if info.role == "assistant" and info.parentID == job.user_message_id and type(info.structured) == "table" then
+    if
+      info.role == "assistant"
+      and info.parentID == job.user_message_id
+      and job.assistant_message_ids[info.id]
+      and type(info.structured) == "table"
+    then
       table.insert(structured, { id = info.id, value = info.structured })
     end
   end
   if #structured ~= 1 then
-    require("opencode.job").transition(job, session, "error")
+    job.error_class = "structured_output_count"
+    require("opencode.job").transition(job, "error", { session = session })
     return
   end
   local validated, err = require("opencode.proposal").validate(structured[1].value, job)
   if not validated then
+    job.error_class = err and err.error_class or "proposal_validation"
     require("opencode.job").transition(
       job,
-      session,
-      err and err.error_class == "scope_violation" and "scope_violation" or "error"
+      err and err.error_class == "scope_violation" and "scope_violation" or "error",
+      {
+        session = session,
+      }
     )
     return
   end
   job.structured_assistant_message_id = structured[1].id
   job.proposal, job.theirs = validated.proposal, validated.theirs
-  require("opencode.job").transition(job, session, "pending_apply")
+  require("opencode.job").transition(job, "pending_apply", { session = session })
   if job.auto_apply then
     require("opencode.apply").start(job, runtime)
   end
@@ -224,29 +234,34 @@ end
 ---Routes only events correlated to a registered local Plan or Build Job.
 ---@param event table
 function Runtime:route_event(event)
+  if require("opencode.events").route(self, event) then
+    return
+  end
   local properties = event.properties or {}
   local info = properties.info or properties.message or properties
   if event.type == "session.error" then
-    local session = self.sessions[properties.sessionID]
-    local job = session and self.jobs[session.active_job_key]
-    if job then
+    local session_id = properties.sessionID or info.sessionID
+    local message_id = properties.messageID or info.parentID or info.messageID
+    local job = message_id and self.jobs[session_id .. ":" .. message_id]
+    local session = job and self.sessions[job.session_id]
+    if job and not require("opencode.job").terminal(job.state) then
+      job.error_class = "session_error"
       require("opencode.job").finish(job, session, "error")
+    else
+      self.prompt_locked, self.reconciliation_required = true, true
     end
     return
   end
   if event.type == "file.edited" then
-    local session = self.sessions[properties.sessionID]
-    local job = session and self.jobs[session.active_job_key]
+    local session_id = properties.sessionID or info.sessionID
+    local message_id = properties.messageID or info.parentID or info.messageID
+    local job = message_id and self.jobs[session_id .. ":" .. message_id]
+    local session = job and self.sessions[job.session_id]
     if job and job.mode == "build" and job.state == "running" then
-      require("opencode.job").transition(job, session, "error")
-    end
-    return
-  end
-  if event.type == "message.updated" and info.role == "assistant" then
-    local job = self.jobs[(info.sessionID or properties.sessionID) .. ":" .. (info.parentID or "")]
-    if job and job.state == "running" then
-      job.assistant_message_ids[info.id] = true
-      self.assistant_jobs[info.id] = job.key
+      job.error_class = "file_edited"
+      require("opencode.job").transition(job, "error", { session = session })
+    else
+      self.prompt_locked, self.reconciliation_required = true, true
     end
     return
   end
@@ -255,33 +270,85 @@ function Runtime:route_event(event)
   end
   local session_id = properties.sessionID or info.sessionID
   local session = self.sessions[session_id]
+  if session then
+    session.remote_status = "idle"
+  end
   local job = session and self.jobs[session.active_job_key]
   if not job or job.state ~= "running" then
     return
   end
-  self.client
-    :messages(session_id)
-    :next(function(messages)
-      if job.mode == "build" then
-        finish_build(self, session, job, messages)
+  job.remote_idle = true
+  -- Completes only the Job captured for this idle event from its exact message list.
+  local function accept_messages(messages)
+    if job.state ~= "running" or session.active_job_key ~= job.key then
+      return
+    end
+    local has_response = false
+    for _, message in ipairs(messages or {}) do
+      local message_info = message.info or message
+      if
+        message_info.role == "assistant"
+        and message_info.parentID == job.user_message_id
+        and job.assistant_message_ids[message_info.id]
+      then
+        has_response = true
+        break
+      end
+    end
+    if not has_response then
+      job.late_event_count = (job.late_event_count or 0) + 1
+      self.correlation.late = self.correlation.late + 1
+      job.remote_idle, session.remote_status = false, "busy"
+      return
+    end
+    if job.mode == "build" then
+      finish_build(self, session, job, messages)
+      return
+    end
+    require("opencode.job").finish(job, session, "completed")
+  end
+  -- Loads only assistant IDs already bootstrapped from this Job's exact parent.
+  local function fetch_messages(attempt)
+    local live = {}
+    local has_structured = false
+    for _, message in pairs(job.assistant_messages or {}) do
+      table.insert(live, message)
+      has_structured = has_structured or type(message.info.structured) == "table"
+    end
+    if #live > 0 and (job.mode == "plan" or has_structured) then
+      accept_messages(live)
+      return
+    end
+    local requests = {}
+    for assistant_id in pairs(job.assistant_message_ids) do
+      table.insert(requests, self.client:message(session_id, assistant_id))
+    end
+    if #requests == 0 then
+      job.late_event_count = (job.late_event_count or 0) + 1
+      self.correlation.late = self.correlation.late + 1
+      job.remote_idle, session.remote_status = false, "busy"
+      return
+    end
+    require("opencode.promise").all(requests):next(accept_messages):catch(function(err)
+      if job.state == "running" and type(err) == "table" and err.status == 400 then
+        if attempt < 3 then
+          vim.defer_fn(function()
+            fetch_messages(attempt + 1)
+          end, 100)
+        else
+          job.late_event_count = (job.late_event_count or 0) + 1
+          self.correlation.late = self.correlation.late + 1
+          job.remote_idle, session.remote_status = false, "busy"
+        end
         return
       end
-      local found = false
-      for _, message in ipairs(messages or {}) do
-        local message_info = message.info or message
-        if
-          message_info.role == "assistant"
-          and message_info.parentID == job.user_message_id
-          and job.assistant_message_ids[message_info.id]
-        then
-          found = true
-        end
-      end
-      require("opencode.job").finish(job, session, found and "completed" or "error")
-    end)
-    :catch(function()
+      job.error_class = type(err) == "table" and err.error_class or "message_reconciliation"
+      job.error_endpoint = type(err) == "table" and err.endpoint or nil
+      job.error_status = type(err) == "table" and err.status or nil
       require("opencode.job").finish(job, session, "error")
     end)
+  end
+  fetch_messages(1)
 end
 
 ---Stops this Runtime idempotently and removes only its verified manifest.

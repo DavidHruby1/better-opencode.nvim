@@ -1,13 +1,45 @@
 local M = {}
 
-local function verify_session(session, runtime, metadata)
-  return session.directory == runtime.root
-    and vim.deep_equal(session.metadata, metadata)
-    and require("opencode.session").verify_permissions(session.permission or {})
-end
-
 local function relative_path(root, path)
   return assert(vim.fs.relpath(root, path))
+end
+
+---Creates a verified Session or revalidates the explicitly selected reusable Session.
+---An active selection is rejected instead of queued; new-session requests clear transcript reuse intent.
+---Permission verification remains mandatory on both paths because OpenCode PATCH is append-only.
+local function prepare_session(runtime, mode, path, opts)
+  local sessions = require("opencode.session")
+  local selected_id = opts.new_session and nil or runtime.selected_session_id
+  if opts.new_session then
+    runtime.selected_session_id = nil
+  end
+  if selected_id then
+    local selected = runtime.sessions[selected_id]
+    if selected then
+      local availability = sessions.availability(runtime, selected, selected.remote_status)
+      if availability == "active" then
+        return require("opencode.promise").reject({
+          error_class = "session_active",
+          action = "create_new_session",
+        })
+      end
+      if availability == "blocked" then
+        return require("opencode.promise").reject({ error_class = "session_busy" })
+      end
+    end
+    return sessions.revalidate(runtime, selected_id, mode)
+  end
+  local metadata = sessions.metadata(runtime.root_hash)
+  metadata.last_mode = mode
+  return runtime.client
+    :create_session({
+      title = (mode == "build" and "Build " or "Plan ") .. vim.fs.basename(path),
+      metadata = metadata,
+      permission = sessions.permissions,
+    })
+    :next(function(created)
+      return sessions.revalidate(runtime, created.id, mode)
+    end)
 end
 
 local function build_instruction(context, rendered, base, scope)
@@ -26,7 +58,7 @@ end
 ---The Job is registered before prompt_async so immediate SSE cannot outrun local correlation state.
 ---@param text string
 ---@param context table
----@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean }
+---@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean, new_session?: boolean }
 ---@return Promise<table>
 function M.prompt(text, context, opts)
   local Promise = require("opencode.promise")
@@ -40,6 +72,9 @@ function M.prompt(text, context, opts)
     local runtime = context.runtime
     if runtime.state ~= "ready" then
       return Promise.reject({ error_class = "runtime_not_ready" })
+    end
+    if runtime.prompt_locked or runtime.interaction_locked then
+      return Promise.reject({ error_class = "interaction_locked" })
     end
     local base, scope, marks
     if mode == "build" then
@@ -56,31 +91,20 @@ function M.prompt(text, context, opts)
       end
       marks = require("opencode.scope").create_marks(context.buf, scope)
     end
-    local metadata = require("opencode.session").metadata(runtime.root_hash)
-    local rules = require("opencode.session").permissions
-    return runtime.client
-      :create_session({
-        title = (mode == "build" and "Build " or "Plan ") .. vim.fs.basename(context.path),
-        metadata = metadata,
-        permission = rules,
-      })
-      :next(function(created)
-        return runtime.client:update_session(created.id, { metadata = metadata, permission = rules }):next(function()
-          return runtime.client:get_session(created.id)
-        end)
-      end)
+    if runtime.prompt_locked or runtime.interaction_locked then
+      if marks then
+        require("opencode.scope").delete_marks({ buffer = context.buf, marks = marks })
+        marks = nil
+      end
+      return Promise.reject({ error_class = "interaction_locked" })
+    end
+    return prepare_session(runtime, mode, context.path, opts)
       :next(function(remote)
-        if not verify_session(remote, runtime, metadata) then
-          return Promise.reject({ error_class = "session_verification" })
-        end
-        local session = {
-          id = remote.id,
-          root = runtime.root,
-          title = remote.title,
-          short_id = remote.id:sub(-8),
-          active_job_key = nil,
-          last_job_state = nil,
-        }
+        local session = runtime.sessions[remote.id]
+          or { id = remote.id, root = runtime.root, short_id = remote.id:sub(-8), active_job_key = nil }
+        session.title = remote.title
+        session.last_mode = mode
+        session.remote_status = "busy"
         runtime.sessions[session.id] = session
         local job = require("opencode.job").new(session.id, {
           root = runtime.root,
@@ -94,6 +118,7 @@ function M.prompt(text, context, opts)
         })
         runtime.jobs[job.key] = job
         session.active_job_key = job.key
+        session.activity = vim.uv.now()
         runtime.sidebar:show()
         local payload = {
           messageID = job.user_message_id,
@@ -110,7 +135,8 @@ function M.prompt(text, context, opts)
             return job
           end)
           :catch(function(err)
-            require("opencode.job").transition(job, session, "error")
+            job.error_class = type(err) == "table" and err.error_class or "prompt_http"
+            require("opencode.job").transition(job, "error", { session = session })
             return Promise.reject(err)
           end)
       end)
