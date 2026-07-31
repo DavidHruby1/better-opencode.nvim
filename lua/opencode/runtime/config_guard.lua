@@ -130,6 +130,24 @@ local function config_files(root)
   return files
 end
 
+---Lists every documented directory where OpenCode can discover executable plugins or tools.
+---Global, project, and custom config roots are all included so the passive guard runs before any code can load.
+local function extension_dirs(root)
+  local home = vim.uv.os_homedir()
+  local config_home = vim.env.XDG_CONFIG_HOME or (home .. "/.config")
+  local roots = { config_home .. "/opencode", home .. "/.opencode", root .. "/.opencode" }
+  if vim.env.OPENCODE_CONFIG_DIR then
+    table.insert(roots, vim.env.OPENCODE_CONFIG_DIR)
+  end
+  local dirs = {}
+  for _, base in ipairs(roots) do
+    for _, name in ipairs({ "plugin", "plugins", "tool", "tools" }) do
+      table.insert(dirs, base .. "/" .. name)
+    end
+  end
+  return dirs
+end
+
 ---Passively scans documented config files and executable extension directories.
 ---It only reads data and directory entries, so custom code cannot run before the owned server starts.
 ---@param root string
@@ -152,14 +170,7 @@ function M.scan(root)
       end
     end
   end
-  local dirs =
-    { root .. "/.opencode/plugin", root .. "/.opencode/plugins", root .. "/.opencode/tool", root .. "/.opencode/tools" }
-  if vim.env.OPENCODE_CONFIG_DIR then
-    for _, name in ipairs({ "plugin", "plugins", "tool", "tools" }) do
-      table.insert(dirs, vim.env.OPENCODE_CONFIG_DIR .. "/" .. name)
-    end
-  end
-  for _, dir in ipairs(dirs) do
+  for _, dir in ipairs(extension_dirs(root)) do
     local handle = vim.uv.fs_scandir(dir)
     if handle and vim.uv.fs_scandir_next(handle) then
       return false, dir:match("tools?$") and "custom_tool" or "custom_plugin"

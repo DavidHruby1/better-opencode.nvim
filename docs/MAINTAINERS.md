@@ -8,6 +8,12 @@
 
 Support is not a semver range. A new OpenCode version requires source audit of tool construction and permissions, route/schema comparison, a frozen `/doc` fixture, an explicit profile, and all P0/P1 tests for both baselines.
 
+The current baselines contain the persisted output-format encoding bug tracked by upstream
+[#26929](https://github.com/anomalyco/opencode/issues/26929). Upstream
+[#37541](https://github.com/anomalyco/opencode/pull/37541) is sufficient to make authenticated Build complete in
+diagnostic source builds, but patched binaries must not produce release result artifacts. Replace the baselines with an
+official release containing the fix, then repeat the full upgrade checklist.
+
 ## Fixture capture
 
 Capture `/doc` from an owned temporary Server with a disposable password and a loopback port. Use argv-based `curl`, `-H 'x-opencode-directory: <canonical-root>'`, and credentials through a private config/stdin. Do not commit credentials, absolute home paths, response bodies outside the frozen fixture, or live logs. Record version, upstream commit, capture command with placeholders, and SHA-256 in the matching `.meta` file.
@@ -26,6 +32,8 @@ OPENCODE_VERSION=1.17.3 MINI_TEST_PATH=/path/to/mini.nvim nvim --headless -u tes
 OPENCODE_VERSION=1.18.9 MINI_TEST_PATH=/path/to/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run({ collect = { find_files = function() return vim.fn.globpath('tests/contract', 'test_*.lua', false, true) end } })"
 OPENCODE_VERSION=1.17.3 sh tests/e2e/run.sh
 PATH=/path/to/opencode-1.18.9/bin:$PATH OPENCODE_VERSION=1.18.9 sh tests/e2e/run.sh
+PATH=/path/to/exact-opencode/bin:$PATH OPENCODE_VERSION=1.17.3 MINI_TEST_PATH=/path/to/mini.nvim tests/release/run.sh
+PATH=/path/to/exact-opencode/bin:$PATH OPENCODE_VERSION=1.18.9 MINI_TEST_PATH=/path/to/mini.nvim tests/release/run.sh
 nvim --headless -u NONE -c "luafile tests/release/validate.lua" -c 'qa!'
 ```
 

@@ -66,6 +66,19 @@ function M.signal(expected, signal)
   return vim.uv.kill(expected.pid, signal or "sigterm") == 0
 end
 
+---Terminates one verified process and waits only for that exact process identity to disappear.
+---The configured bound allows normal SIGTERM cleanup without treating a reused PID as success.
+local function terminate(expected)
+  if not M.signal(expected) then
+    return false
+  end
+  local timeout = require("opencode.config").opts.runtime.shutdown_timeout
+  return vim.wait(timeout, function()
+    local current = M.identity(expected.pid)
+    return current == nil
+  end, 20)
+end
+
 ---Removes a manifest only after all recorded process identities are gone or verified.
 ---@param path string
 ---@param manifest table
@@ -78,7 +91,7 @@ function M.cleanup(path, manifest)
         return false
       end
       if running then
-        if not M.signal(manifest[key]) or M.identity(manifest[key].pid) then
+        if not terminate(manifest[key]) then
           return false
         end
       end
@@ -167,7 +180,7 @@ function M.cleanup_stale(path, root)
       if not verified then
         return false
       end
-      if running and (not M.signal(manifest.tui) or M.identity(manifest.tui.pid)) then
+      if running and not terminate(manifest.tui) then
         return false
       end
     end
@@ -193,7 +206,7 @@ function M.cleanup_stale(path, root)
     if not verified then
       return false
     end
-    if running and (not M.signal(manifest.tui) or M.identity(manifest.tui.pid)) then
+    if running and not terminate(manifest.tui) then
       return false
     end
   end
@@ -202,7 +215,7 @@ function M.cleanup_stale(path, root)
     if not verified then
       return false
     end
-    if running and (not M.signal(manifest.server) or M.identity(manifest.server.pid)) then
+    if running and not terminate(manifest.server) then
       return false
     end
   end

@@ -24,12 +24,44 @@ T["extmark scope tracks insertion with configured gravity"] = function()
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "alpha", "beta" })
   local scope = { start_byte = 6, end_byte = 10 }
   local marks = require("opencode.scope").create_marks(buf, scope)
+  local mark = vim.api.nvim_buf_get_extmark_by_id(buf, require("opencode.scope").namespace, marks.start_id, {
+    details = true,
+  })
+  eq(mark[3].hl_group, "OpencodeScope")
   local job = { buffer = buf, marks = marks }
   vim.api.nvim_buf_set_text(buf, 0, 0, 0, 0, { "prefix", "" })
   local current = require("opencode.scope").current_range(job)
   eq({ current.start_byte, current.end_byte }, { 13, 17 })
   require("opencode.scope").delete_marks(job)
   vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["non-modifiable source terminates apply without throwing"] = function()
+  local path = vim.fn.tempname()
+  vim.fn.writefile({ "one" }, path)
+  vim.cmd.edit(path)
+  local buf = vim.api.nvim_get_current_buf()
+  local base = assert(require("opencode.snapshot").capture(buf))
+  local session = { id = "ses_readonly", active_job_key = "job_readonly" }
+  local job = {
+    key = session.active_job_key,
+    root = vim.fs.dirname(path),
+    session_id = session.id,
+    mode = "build",
+    state = "pending_apply",
+    buffer = buf,
+    path = path,
+    base = base,
+    scope = { kind = "file", path = path, start_byte = 0, end_byte = #base.text },
+    theirs = "two",
+  }
+  job.marks = require("opencode.scope").create_marks(buf, job.scope)
+  vim.bo[buf].modifiable = false
+  require("opencode.apply").start(job, { sessions = { [session.id] = session }, jobs = { [job.key] = job } })
+  eq(job.state, "error")
+  vim.bo[buf].modifiable = true
+  vim.cmd.bwipeout({ bang = true })
+  vim.uv.fs_unlink(path)
 end
 
 T["clean merge applies once without writing disk and one undo restores Ours"] = function()
@@ -109,7 +141,7 @@ T["disk races block every automatic and conflict apply path"] = function()
       marks = marks,
       theirs = "one\nTWO\nthree",
     }
-    local runtime = { root = job.root, sessions = { [session.id] = session }, jobs = { [job.key] = job } }
+    local runtime = { root = job.root, generation = 1, sessions = { [session.id] = session }, jobs = { [job.key] = job } }
     return path, buf, job, runtime
   end
   local function cleanup(path, buf, job)
@@ -137,6 +169,7 @@ T["disk races block every automatic and conflict apply path"] = function()
       require("opencode.apply").manual(job, runtime, job.theirs, function(_, err)
         callback_error = err
       end)
+      runtime.generation = runtime.generation + 1
     else
       delayed_merge({ kind = "clean", text = job.theirs })
       require("opencode.apply").retry(job, runtime, function(_, err)
@@ -156,7 +189,11 @@ T["disk races block every automatic and conflict apply path"] = function()
       eq({ job.state, job.conflict_kind }, { "conflict", "external_change" }, route)
     else
       eq(job.state, "conflict", route)
-      eq(callback_error == "external_change" or callback_error == "stale_source", true, route)
+      eq(
+        callback_error == "external_change" or callback_error == "stale_source" or callback_error == "stale_generation",
+        true,
+        route
+      )
     end
     cleanup(path, buf, job)
   end

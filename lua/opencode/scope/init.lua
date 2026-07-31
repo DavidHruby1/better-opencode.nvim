@@ -67,7 +67,14 @@ function M.create_marks(buf, scope)
     snapshot.offset_to_position(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"), scope.end_byte)
   )
   return {
-    start_id = vim.api.nvim_buf_set_extmark(buf, M.namespace, start_row, start_col, { right_gravity = false }),
+    start_id = vim.api.nvim_buf_set_extmark(buf, M.namespace, start_row, start_col, {
+      right_gravity = false,
+      end_row = end_row,
+      end_col = end_col,
+      end_right_gravity = true,
+      hl_group = "OpencodeScope",
+      hl_mode = "combine",
+    }),
     end_id = vim.api.nvim_buf_set_extmark(buf, M.namespace, end_row, end_col, { right_gravity = true }),
   }
 end

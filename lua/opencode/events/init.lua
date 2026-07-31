@@ -96,12 +96,6 @@ local function reconcile_part(runtime, session_id, assistant_id)
     end
     return true
   end
-  local function unlock_reconciled()
-    runtime.reconciliation_required = false
-    if not runtime.interaction_locked then
-      runtime.prompt_locked = false
-    end
-  end
   local function attempt(number)
     if unlock_if_mapped() then
       return
@@ -116,7 +110,7 @@ local function reconcile_part(runtime, session_id, assistant_id)
           and info.id == assistant_id
           and runtime.jobs[session_id .. ":" .. assistant_id]
         then
-          unlock_reconciled()
+          runtime:begin_reconciliation()
           return
         end
         local job = info.parentID and runtime.jobs[session_id .. ":" .. info.parentID]
@@ -125,6 +119,8 @@ local function reconcile_part(runtime, session_id, assistant_id)
             vim.defer_fn(function()
               attempt(number + 1)
             end, 100)
+          else
+            runtime:begin_reconciliation()
           end
           return
         end
@@ -137,6 +133,8 @@ local function reconcile_part(runtime, session_id, assistant_id)
           vim.defer_fn(function()
             attempt(number + 1)
           end, 100)
+        else
+          runtime:begin_reconciliation()
         end
       end)
   end
@@ -181,6 +179,11 @@ local function route_message(runtime, event)
     return true
   end
   local assistant_id = info.messageID or properties.messageID
+  local user_job = assistant_id and runtime.jobs[session_id .. ":" .. assistant_id]
+  if user_job then
+    exact(runtime, user_job)
+    return true
+  end
   local key = session_id and assistant_id and runtime.assistant_jobs[session_id .. ":" .. assistant_id]
   local job = key and runtime.jobs[key]
   if not job then

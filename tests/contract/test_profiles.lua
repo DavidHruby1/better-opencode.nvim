@@ -1,12 +1,42 @@
 local T = MiniTest.new_set()
 local eq = MiniTest.expect.equality
 
+---Finds one operation in a frozen OpenAPI tree by its stable operation ID.
+---Tests use this only to inspect or corrupt a known contract before calling the public verifier.
+local function operation(value, id)
+  if type(value) ~= "table" then
+    return nil
+  end
+  if value.operationId == id then
+    return value
+  end
+  for _, child in pairs(value) do
+    local found = operation(child, id)
+    if found then
+      return found
+    end
+  end
+end
+
 T["both frozen documents expose required operations"] = function()
+  local cwd = vim.fn.getcwd()
+  local outside = vim.fn.tempname()
+  vim.fn.mkdir(outside, "p")
+  vim.cmd.cd(outside)
   for version, profile in pairs(require("opencode.compat")) do
     local doc = vim.json.decode(table.concat(vim.fn.readfile(profile.fixture), "\n"))
     local ok, missing = require("opencode.runtime").verify_doc(doc, profile)
     eq(ok, true, version .. ": " .. tostring(missing))
   end
+  vim.cmd.cd(cwd)
+  vim.fn.delete(outside, "d")
+end
+
+T["profile verification rejects schema drift with unchanged operation IDs"] = function()
+  local profile = require("opencode.compat")["1.18.9"]
+  local doc = vim.json.decode(table.concat(vim.fn.readfile(profile.fixture), "\n"))
+  operation(doc, "permission.reply").requestBody.content["application/json"].schema.required = {}
+  eq({ require("opencode.runtime").verify_doc(doc, profile) }, { false, "schema_mismatch:permission.reply" })
 end
 
 T["client always sends auth and canonical root header"] = function()
@@ -77,20 +107,6 @@ T["interaction client uses canonical endpoints and payloads"] = function()
 end
 
 T["both profiles require the canonical permission reply field"] = function()
-  local function operation(value, id)
-    if type(value) ~= "table" then
-      return nil
-    end
-    if value.operationId == id then
-      return value
-    end
-    for _, child in pairs(value) do
-      local found = operation(child, id)
-      if found then
-        return found
-      end
-    end
-  end
   for version, profile in pairs(require("opencode.compat")) do
     local doc = vim.json.decode(table.concat(vim.fn.readfile(profile.fixture), "\n"))
     local reply = assert(operation(doc, "permission.reply"), version)

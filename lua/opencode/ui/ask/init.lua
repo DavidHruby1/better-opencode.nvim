@@ -13,9 +13,18 @@ function M.ask(default, context, mode, workflow_opts)
   mode = mode or "build"
   local scope_kind = ""
   if mode == "build" then
-    local base = { text = table.concat(vim.api.nvim_buf_get_lines(context.buf, 0, -1, false), "\n") }
+    local text = table.concat(vim.api.nvim_buf_get_lines(context.buf, 0, -1, false), "\n")
+    local base = { text = text }
     local scope = require("opencode.scope").resolve(context, base, workflow_opts and workflow_opts.scope)
     scope_kind = " | " .. (scope and scope.kind or "unsupported")
+    if scope then
+      context.displayed_scope = {
+        sha256 = vim.fn.sha256(text),
+        kind = scope.kind,
+        start_byte = scope.start_byte,
+        end_byte = scope.end_byte,
+      }
+    end
   end
   local opts = {
     default = default,
@@ -36,6 +45,13 @@ function M.ask(default, context, mode, workflow_opts)
   local previous = opts.win.on_buf
   opts.win.on_buf = function(win)
     M.contexts[win.buf] = context
+    vim.api.nvim_create_autocmd("BufWipeout", {
+      buffer = win.buf,
+      once = true,
+      callback = function()
+        M.contexts[win.buf] = nil
+      end,
+    })
     if previous then
       previous(win)
     end

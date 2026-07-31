@@ -86,6 +86,7 @@ local function source_state(job, runtime)
   end
   if
     not vim.api.nvim_buf_is_valid(job.buffer)
+    or not vim.bo[job.buffer].modifiable
     or require("opencode.runtime.root").realpath(vim.api.nvim_buf_get_name(job.buffer)) ~= job.path
   then
     return nil, "invalid_buffer"
@@ -154,6 +155,9 @@ local function apply_result(
       or job.apply_generation ~= generation
       or runtime.generation ~= runtime_generation
     then
+      if callback then
+        callback(false, "stale_generation")
+      end
       return
     end
     local current, state_error, current_sha = source_state(job, runtime)
@@ -206,7 +210,8 @@ local function apply_result(
       return
     end
     local views = save_views(job.buffer)
-    vim.api.nvim_buf_set_text(
+    local applied = pcall(
+      vim.api.nvim_buf_set_text,
       job.buffer,
       start_row,
       start_col,
@@ -214,6 +219,13 @@ local function apply_result(
       end_col,
       vim.split(span.replacement, "\n", { plain = true })
     )
+    if not applied then
+      terminate(job, runtime, "error")
+      if callback then
+        callback(false, "buffer_apply")
+      end
+      return
+    end
     restore_views(job.buffer, views)
     terminate(job, runtime, "completed")
     if callback then
@@ -407,7 +419,9 @@ function M.retry(job, runtime, callback)
         return
       end
       if result.kind == "conflict" then
-        require("opencode.ui.notify").warn("agent_conflict")
+        job.conflict_kind = "agent"
+        job.conflict_payload = vim.deepcopy({ base = job.base, ours = ours, theirs = job.theirs })
+        require("opencode.interaction").replace_current_conflict(job.root, job.key, "agent_conflict", job.conflict_payload)
         if callback then
           callback(false, "agent_conflict")
         end

@@ -42,6 +42,32 @@ T["stale HTTP completion is rejected after Runtime generation changes"] = functi
   eq(error.error_class, "stale_generation")
 end
 
+T["SSE reconnect attempts exhaust when transports start but never deliver an event"] = function()
+  local config = require("opencode.config").opts.runtime.reconnect
+  local saved = vim.deepcopy(config)
+  config.max_attempts, config.backoff_ms, config.max_backoff_ms = 2, 0, 0
+  local runtime = require("opencode.runtime").new("/root")
+  runtime.state = "ready"
+  local subscriptions = 0
+  runtime.client = {
+    subscribe = function(_, _, on_exit)
+      subscriptions = subscriptions + 1
+      vim.schedule(function()
+        on_exit(7)
+      end)
+      return subscriptions
+    end,
+  }
+  runtime:connect_sse()
+  eq(vim.wait(500, function()
+    return runtime.reconnect_error ~= nil
+  end), true)
+  eq({ subscriptions, runtime.reconnect_attempt, runtime.reconnect_error }, { 3, 3, "reconnect_exhausted" })
+  for key, value in pairs(saved) do
+    config[key] = value
+  end
+end
+
 T["reconciliation completes an exact Plan once"] = function()
   local Promise = require("opencode.promise")
   local runtime = require("opencode.runtime").new("/root")
@@ -86,6 +112,8 @@ T["reconciliation completes an exact Plan once"] = function()
   )
   eq(job.state, "completed")
   eq(job.completion_count, 1)
+  eq(runtime.state, "ready")
+  eq(runtime.prompt_locked, false)
   eq(calls, { "status", "messages", "questions", "permissions" })
 end
 

@@ -21,7 +21,9 @@ local function close_all(owner)
     end
   end
   if owner.tab and vim.api.nvim_tabpage_is_valid(owner.tab) then
-    vim.api.nvim_set_current_tabpage(owner.source_tab)
+    if owner.source_tab and vim.api.nvim_tabpage_is_valid(owner.source_tab) then
+      vim.api.nvim_set_current_tabpage(owner.source_tab)
+    end
     pcall(vim.api.nvim_tabpage_close, owner.tab, true)
   end
 end
@@ -108,29 +110,49 @@ function M.external(request, runtime, job)
   local raw = require("opencode.snapshot").read_raw(job.path)
   local disk = raw and require("opencode.snapshot").decode_disk(raw, job.base)
   if not disk then
+    require("opencode.ui.notify").warn("disk_read")
+    vim.schedule(function()
+      if request.state ~= "closed" then
+        require("opencode.ui.dialog").show(request)
+      end
+    end)
     return
   end
   local ours = table.concat(vim.api.nvim_buf_get_lines(job.buffer, 0, -1, false), "\n")
+  local owner = { request = request, source_tab = vim.api.nvim_get_current_tabpage(), buffers = {}, closing = false }
   vim.cmd.tabnew()
-  local tab = vim.api.nvim_get_current_tabpage()
-  local buffers = { scratch(request.id .. "/Buffer", ours, false), scratch(request.id .. "/Disk", disk, false) }
+  owner.tab = vim.api.nvim_get_current_tabpage()
+  owner.tab_number = vim.api.nvim_tabpage_get_number(owner.tab)
+  owner.buffers = { scratch(request.id .. "/Buffer", ours, false), scratch(request.id .. "/Disk", disk, false) }
+  local buffers = owner.buffers
   vim.api.nvim_win_set_buf(0, buffers[1])
   vim.cmd.diffthis()
   vim.cmd.vsplit()
   vim.api.nvim_win_set_buf(0, buffers[2])
   vim.cmd.diffthis()
-  for _, buf in ipairs(buffers) do
-    vim.keymap.set("n", "q", function()
-      for _, owned in ipairs(buffers) do
-        if vim.api.nvim_buf_is_valid(owned) then
-          vim.api.nvim_buf_delete(owned, { force = true })
-        end
-      end
-      pcall(vim.api.nvim_tabpage_close, tab, true)
-      vim.schedule(function()
+  local function finish()
+    if owner.closing then
+      return
+    end
+    close_all(owner)
+    vim.schedule(function()
+      if request.state ~= "closed" then
         require("opencode.ui.dialog").show(request)
-      end)
-    end, { buffer = buf })
+      end
+    end)
+  end
+  local group = vim.api.nvim_create_augroup("OpencodeExternalDiff" .. request.id, { clear = true })
+  vim.api.nvim_create_autocmd("TabClosed", {
+    group = group,
+    callback = function(args)
+      if tonumber(args.match) == owner.tab_number then
+        finish()
+      end
+    end,
+  })
+  for _, buf in ipairs(buffers) do
+    vim.api.nvim_create_autocmd("BufWipeout", { group = group, buffer = buf, once = true, callback = finish })
+    vim.keymap.set("n", "q", finish, { buffer = buf })
   end
 end
 

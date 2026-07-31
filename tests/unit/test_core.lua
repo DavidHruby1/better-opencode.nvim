@@ -21,6 +21,21 @@ T["config rejects executable extensions"] = function()
   eq(select(2, guard.validate({ mcp = { x = { enabled = true } } })), "enabled_mcp")
 end
 
+T["config guard scans standard global executable directories"] = function()
+  local root = vim.fn.tempname()
+  local home = root .. "/home"
+  local config_home = root .. "/config"
+  vim.fn.mkdir(config_home .. "/opencode/plugin", "p")
+  vim.fn.mkdir(home, "p")
+  vim.fn.writefile({ "return {}" }, config_home .. "/opencode/plugin/unsafe.lua")
+  local old_home, old_config = vim.env.HOME, vim.env.XDG_CONFIG_HOME
+  vim.env.HOME, vim.env.XDG_CONFIG_HOME = home, config_home
+  local ok, reason = require("opencode.runtime.config_guard").scan(root)
+  vim.env.HOME, vim.env.XDG_CONFIG_HOME = old_home, old_config
+  vim.fn.delete(root, "rf")
+  eq({ ok, reason }, { false, "custom_plugin" })
+end
+
 T["message IDs and Job keys are OpenCode compatible"] = function()
   local job = require("opencode.job").new("ses_1", { root = "/r", buf = 1, path = "/r/a" })
   eq(job.user_message_id:match("^msg_[0-9A-HJKMNP-TV-Z]+$") ~= nil, true)
@@ -127,6 +142,10 @@ T["disk decoding preserves empty and trailing logical lines"] = function()
   eq(snapshot.decode_disk("a\n\n", { fileformat = "unix", endofline = true }), "a\n")
   eq(snapshot.decode_disk("a\r\n", { fileformat = "dos", endofline = true }), "a")
   eq(select(2, snapshot.decode_disk("a\r\nb\n", { fileformat = "dos", endofline = true })), "mixed_eol")
+  eq(snapshot.valid_utf8("až中"), true)
+  for _, invalid in ipairs({ string.char(0x80), string.char(0xc0, 0x80), string.char(0xed, 0xa0, 0x80), string.char(0xf4, 0x90, 0x80, 0x80) }) do
+    eq(snapshot.valid_utf8(invalid), false)
+  end
 end
 
 T["visual ranges are half-open and blockwise is rejected"] = function()
@@ -168,11 +187,24 @@ T["proposal schema and identity construct exact Theirs"] = function()
     summary = "change",
   }
   local validated = require("opencode.proposal").validate(value, job)
+  eq(require("opencode.proposal").schema.properties.version.type, "integer")
   eq(validated.theirs, "one\nTWO\nthree")
   value.scope.end_byte = 8
   eq(select(2, require("opencode.proposal").validate(value, job)).error_class, "scope_violation")
   value.scope.end_byte, value.replacement = 7, "bad\rtext"
   eq(select(2, require("opencode.proposal").validate(value, job)).error_class, "invalid_structured_output")
+end
+
+T["user message parts do not enter assistant reconciliation"] = function()
+  local runtime = require("opencode.runtime").new("/root")
+  local job = require("opencode.job").new("ses_1", { root = "/root", buf = 1, path = "/root/a" })
+  runtime.jobs[job.key] = job
+  runtime.sessions.ses_1 = { id = "ses_1", active_job_key = job.key }
+  runtime:route_event({
+    type = "message.part.updated",
+    properties = { sessionID = "ses_1", part = { sessionID = "ses_1", messageID = job.user_message_id } },
+  })
+  eq({ runtime.correlation.exact, runtime.correlation.unknown, runtime.prompt_locked }, { 1, 0, false })
 end
 
 T["changed span is minimal and UTF-8 safe"] = function()
@@ -200,15 +232,35 @@ T["merge backend reports clean, conflict, and process failure"] = function()
     :catch(function(err)
       results.error = err
     end)
+  merge
+    .run("a", "b", "c", {
+      runner = function(_, _, callback)
+        callback({ code = 127, signal = 0, stdout = "" })
+      end,
+    })
+    :catch(function(err)
+      results.invocation_error = err
+    end)
+  merge
+    .run("a", "b", "c", {
+      runner = function(_, _, callback)
+        callback({ code = 2, signal = 0, stdout = "not a conflict" })
+      end,
+    })
+    :catch(function(err)
+      results.non_conflict_exit = err
+    end)
   eq(
     vim.wait(1000, function()
-      return results.clean and results.conflict and results.error
+      return results.clean and results.conflict and results.error and results.invocation_error and results.non_conflict_exit
     end),
     true
   )
   eq(results.clean, { kind = "clean", text = "A\nB" })
   eq(results.conflict.kind, "conflict")
   eq(results.error.error_class, "merge_process")
+  eq(results.invocation_error.error_class, "merge_process")
+  eq(results.non_conflict_exit.error_class, "merge_process")
 end
 
 T["Job transition matrix requires kinds and keeps terminal transitions idempotent"] = function()
@@ -249,7 +301,7 @@ T["Job transition matrix covers every state pair"] = function()
       error = true,
       scope_violation = true,
     },
-    waiting_user = { running = true },
+    waiting_user = { running = true, cancelled = true, error = true },
     pending_apply = { completed = true, conflict = true, cancelled = true, error = true, scope_violation = true },
     conflict = { completed = true, cancelled = true, error = true },
   }

@@ -87,7 +87,7 @@ function M.run(base, ours, theirs, opts)
         forget(opts.owner_key, paths)
         if result.code == 0 then
           resolve({ kind = "clean", text = result.stdout or "" })
-        elseif result.code and result.code > 0 and (not result.signal or result.signal == 0) then
+        elseif result.code == 1 and (not result.signal or result.signal == 0) then
           resolve({ kind = "conflict", text = result.stdout or "" })
         else
           reject({ error_class = "merge_process" })

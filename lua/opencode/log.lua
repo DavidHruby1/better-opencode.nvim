@@ -48,6 +48,7 @@ local states = {
   conflict = true,
   completed = true,
   cancelled = true,
+  error = true,
   scope_violation = true,
 }
 local event_types = {

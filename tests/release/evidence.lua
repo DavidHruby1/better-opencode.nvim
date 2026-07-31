@@ -13,17 +13,34 @@ local function safe_reference(value)
     and value
 end
 
-local function result_map(results)
-  local map = {}
-  for _, result in ipairs(results or {}) do
-    if result.id and result.profile then
-      map[result.id .. ":" .. result.profile] = result
-    end
+local function read(path)
+  local file = io.open(path, "rb")
+  if not file then
+    return nil
   end
-  return map
+  local value = file:read("*a")
+  file:close()
+  return value
 end
 
-local function result_status(result, scenario)
+local function result_map(results)
+  local map, duplicates = {}, {}
+  for _, result in ipairs(results or {}) do
+    if result.id and result.profile then
+      local key = result.id .. ":" .. result.profile
+      if map[key] then
+        duplicates[key] = true
+      end
+      map[key] = result
+    end
+  end
+  return map, duplicates
+end
+
+local function result_status(root, result, scenario, duplicate)
+  if duplicate then
+    return "FAIL duplicate result"
+  end
   if not result then
     return "FAIL missing result artifact"
   end
@@ -32,6 +49,15 @@ local function result_status(result, scenario)
   end
   if not safe_reference(result.artifact) or not safe_reference(result.checksum) then
     return "FAIL missing safe artifact/checksum"
+  end
+  local artifact = read(rooted(root, result.artifact))
+  local checksum = read(rooted(root, result.checksum))
+  if not artifact or not checksum then
+    return "FAIL missing artifact/checksum file"
+  end
+  local expected = checksum:match("^([0-9a-fA-F]+)%s*$")
+  if not expected or #expected ~= 64 or expected:lower() ~= vim.fn.sha256(artifact) then
+    return "FAIL checksum mismatch"
   end
   if scenario.protocol and (result.manual ~= true or result.protocol_complete ~= true) then
     return "FAIL incomplete manual protocol"
@@ -48,13 +74,13 @@ end
 function M.generate(root, results_path, output_path)
   local manifest = dofile(root .. "/tests/acceptance.lua")
   local results = dofile(rooted(root, results_path))
-  local by_key = result_map(results)
+  local by_key, duplicates = result_map(results)
   local lines = {
     "# v2.0 Acceptance Evidence",
     "",
     "Generated from `tests/acceptance.lua` and explicit result artifacts.",
     "",
-    "Overall: **FAIL** until every required result has exit code `0`, a safe artifact/checksum, both exact profiles, and complete P2 protocols.",
+    "Overall: **FAIL** until every required result has exit code `0`, a safe artifact/checksum, both exact profiles, and complete P2 evidence.",
     "",
     "| AC ID | Priority | Owner | 1.17.3 | 1.18.9 | Test/protocol |",
     "|---|---|---|---|---|---|",
@@ -63,7 +89,8 @@ function M.generate(root, results_path, output_path)
   for _, scenario in ipairs(manifest.scenarios) do
     local statuses = {}
     for _, profile in ipairs(manifest.profiles) do
-      statuses[profile] = result_status(by_key[scenario.id .. ":" .. profile], scenario)
+      local key = scenario.id .. ":" .. profile
+      statuses[profile] = result_status(root, by_key[key], scenario, duplicates[key])
       overall = overall and statuses[profile] == "PASS"
     end
     local evidence = scenario.protocol or scenario.test

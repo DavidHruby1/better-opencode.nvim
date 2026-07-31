@@ -32,7 +32,9 @@ function M.ask(default, opts)
       if not context.runtime:accepts_prompts() then
         return require("opencode.promise").reject({ error_class = "interaction_locked" })
       end
-      return require("opencode.ui.ask").ask(default, context, mode, opts):next(function(input)
+      return require("opencode.context.preflight").run(context):next(function()
+        return require("opencode.ui.ask").ask(default, context, mode, opts)
+      end):next(function(input)
         return require("opencode.api.prompt").prompt(input, context, opts)
       end)
     end)

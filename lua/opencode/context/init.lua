@@ -51,7 +51,7 @@ function Context.capture(range)
   if bytes:find("\0", 1, true) then
     return nil, "nul_file"
   end
-  if not pcall(vim.str_utfindex, bytes) then
+  if not require("opencode.snapshot").valid_utf8(bytes) then
     return nil, "non_utf8_file"
   end
   return {

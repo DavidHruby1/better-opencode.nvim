@@ -15,8 +15,53 @@ local function raw_file(path)
   return bytes, read_error
 end
 
-local function valid_utf8(text)
-  return pcall(vim.str_utfindex, text)
+---Checks UTF-8 bytes without relying on Neovim's version-dependent conversion helpers.
+---It rejects truncated sequences, continuation bytes, overlong encodings, surrogates, and values above U+10FFFF.
+---@param text string
+---@return boolean
+function M.valid_utf8(text)
+  local index = 1
+  while index <= #text do
+    local first = text:byte(index)
+    if first <= 0x7f then
+      index = index + 1
+    elseif first >= 0xc2 and first <= 0xdf then
+      local second = text:byte(index + 1)
+      if not second or second < 0x80 or second > 0xbf then
+        return false
+      end
+      index = index + 2
+    elseif first >= 0xe0 and first <= 0xef then
+      local second, third = text:byte(index + 1), text:byte(index + 2)
+      local second_valid = second
+        and second >= (first == 0xe0 and 0xa0 or 0x80)
+        and second <= (first == 0xed and 0x9f or 0xbf)
+      if not second_valid or not third or third < 0x80 or third > 0xbf then
+        return false
+      end
+      index = index + 3
+    elseif first >= 0xf0 and first <= 0xf4 then
+      local second, third, fourth = text:byte(index + 1), text:byte(index + 2), text:byte(index + 3)
+      local second_valid = second
+        and second >= (first == 0xf0 and 0x90 or 0x80)
+        and second <= (first == 0xf4 and 0x8f or 0xbf)
+      if
+        not second_valid
+        or not third
+        or third < 0x80
+        or third > 0xbf
+        or not fourth
+        or fourth < 0x80
+        or fourth > 0xbf
+      then
+        return false
+      end
+      index = index + 4
+    else
+      return false
+    end
+  end
+  return true
 end
 
 ---Returns the exact bytes and SHA-256 currently stored at a path.
@@ -39,7 +84,7 @@ end
 ---@return string?
 ---@return string?
 function M.decode_disk(raw, metadata)
-  if raw:find("\0", 1, true) or not valid_utf8(raw) then
+  if raw:find("\0", 1, true) or not M.valid_utf8(raw) then
     return nil, "unsupported_encoding"
   end
   local text = raw

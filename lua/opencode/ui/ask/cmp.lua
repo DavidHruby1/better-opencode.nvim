@@ -35,7 +35,9 @@ handlers[ms.textDocument_completion] = function(params, callback)
     table.insert(items, item)
   end
 
-  local runtime = require("opencode.runtime").current()
+  local bufnr = vim.uri_to_bufnr(params.textDocument.uri)
+  local context = require("opencode.ui.ask").contexts[bufnr]
+  local runtime = context and context.runtime
   local agents = runtime and runtime.agents or {}
   for _, agent in ipairs(agents) do
     local label = "@" .. agent.name
@@ -48,7 +50,7 @@ handlers[ms.textDocument_completion] = function(params, callback)
       kind = vim.lsp.protocol.CompletionItemKind.Property,
       documentation = {
         kind = "markdown",
-        value = "```" .. agent.description or "Agent" .. "```",
+        value = "```\n" .. (agent.description or "Agent") .. "\n```",
       },
     }
     table.insert(items, item)

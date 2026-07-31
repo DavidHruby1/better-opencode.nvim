@@ -6,22 +6,18 @@ A Neovim Lua plugin that bridges Neovim and the `opencode` CLI (external binary)
 
 ## Entrypoints
 
-- **Public API**: `lua/opencode.lua` — exports `ask()`, `select()`, `prompt()`, `command()`, `operator()`, `format()`, `statusline`
+- **Public API**: `lua/opencode.lua` — exports `ask()`, `prompt()`, `select()`, `cancel()`, `cancel_all()`, and `statusline()`
 - **Config**: `vim.g.opencode_opts` global (not a `setup()` call); merged with defaults from `lua/opencode/config.lua`
-- **Plugin files**: `plugin/highlights.lua` sets highlight groups; `plugin/events/` registers four autocmd groups (`OpencodeReload`, `OpencodeStatus`, `OpencodePermissions`, `OpencodeEdits`) that listen for `OpencodeEvent:*` User events to reload edited buffers, update statusline, display permission requests, and diff edit proposals
+- **Plugin files**: `plugin/highlights.lua` sets highlight groups. Runtime SSE events are routed directly to root-owned Sessions, Jobs, and the interaction queue.
 
 ## Config quirks
 
-- Config is passed via `vim.g.opencode_opts` for simpler UX and faster startup (see `lua/opencode/config.lua:6`)
-- `snacks.nvim` nested opts go under `ask.snacks` / `select.snacks`, then get merged into `ask` / `select` at the end of config.lua
-- `vim.o.autoread` is automatically set to `true` when `events.reload.enabled = true` (the default) unless the user has explicitly configured it
-- Neovim doesn't support mixed integer/string keys in `vim.g`, which affects some `snacks.input` options; workaround: modify `require("opencode.config").opts` directly
+- Config is passed via `vim.g.opencode_opts`; supported keys are documented in `docs/CONFIGURATION.md` and validated at startup.
+- `ask.snacks` is passed to `snacks.input` unchanged.
 
 ## Dependencies
 
-- **Required**: `opencode` CLI, `curl`
-- **Auto-discovery**: `pgrep` + `lsof` (Unix, unless `server.url` is set)
-- **Optional**: `snacks.nvim` (enhances `ask()` with `snacks.input`, `select()` with `snacks.picker`), `blink.cmp` (completion plugin with LSP source)
+- **Required**: Neovim 0.11+, exact OpenCode `1.17.3` or `1.18.9`, `curl`, `git merge-file`, and `snacks.nvim`
 - No hard Lua dependencies beyond Neovim itself
 
 ## Verification commands
@@ -45,7 +41,8 @@ stylua .
 
 ## Testing
 
-- No test framework — no tests directory, no test runner config
+- MiniTest suites live under `tests/unit`, `tests/integration`, and `tests/contract`; `tests/e2e` covers both exact OpenCode profiles.
+- Release validation and evidence generation live under `tests/release`.
 - Manual verification: `:checkhealth opencode`
 
 ## Formatting (StyLua)
@@ -62,14 +59,11 @@ stylua .
 ## Architecture notes
 
 - **Async**: custom Promise implementation in `lua/opencode/promise/init.lua` (fork of `promise.nvim`)
-- **Server discovery flow** (`lua/opencode/server/discovery/init.lua`): connected server → configured URL → local process scan (filtered by CWD overlap) → auto-start + poll (5s timeout)
-- **Discovery vs connection**: server.connect (default true) controls whether auto-discovered servers are automatically subscribed to via SSE. When false, the server is found but not connected — use the select menu's "Connect to a server" / "Disconnect from connected server" items to manage connections manually.
-- **Context system** (`lua/opencode/context/init.lua`): captures buffer/win/cursor/selection before UI opens, renders placeholders (`@this`, `@buffer`, etc.) in prompts
-- **Events**: SSE subscribed on `connect()`, dispatched as `OpencodeEvent:<type>` User autocmds
-- **Edit review**: opens diff in new tab via `:diffpatch`, keymaps `da`/`dr` to accept/reject, `dp`/`do` for per-hunk
-- **Ask completion**: in-process LSP server (`lua/opencode/ui/ask/cmp.lua`) providing context placeholder + agent completions
-- **Integration policy**: code that bridges another tool _to_ opencode.nvim (e.g. picker send, terminal toggle) belongs in README examples. Code that enhances opencode.nvim's own UI (ask/select with snacks input/picker) stays in the plugin.
-- **Operator**: `operator()` sets `operatorfunc`, uses `g@` for range + dot-repeat support
+- **Runtime ownership**: one isolated Server and TUI are started per canonical project root; foreign processes are never attached or stopped.
+- **Context system** (`lua/opencode/context/init.lua`): captures buffer, window, cursor, and selection before UI opens and renders configured context placeholders.
+- **Events**: each Runtime owns one authenticated SSE stream and routes events by exact Session, message, request, Job, and root identity.
+- **Edit review**: Build proposals use Base/Ours/Theirs merge and change only the live buffer. Agent conflicts use four scratch buffers; external conflicts compare buffer and disk in a scratch tab.
+- **Safety**: Plan is read-only, tool permissions fail closed, source files are not autosaved, and stale generations or disk changes block apply.
 
 ## Project vision
 

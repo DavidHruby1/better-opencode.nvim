@@ -1,8 +1,40 @@
 local scenarios = {}
 
 local profiles = { "1.17.3", "1.18.9" }
+local unit = "MINI_TEST_PATH=$MINI_TEST_PATH nvim --headless -u tests/minimal_init.lua"
+
+local function acceptance_test(id)
+  if id:match("^AC%-RUN%-") or id == "AC-EVT-05" then
+    return "tests/release/ac/test_runtime.lua"
+  end
+  if
+    id:match("^AC%-UI%-")
+    or id:match("^AC%-CTX%-")
+    or id:match("^AC%-MODE%-")
+    or id == "AC-SCOPE-01"
+    or id == "AC-SCOPE-02"
+  then
+    return "tests/release/ac/test_ui_context.lua"
+  end
+  if id:match("^AC%-SCOPE%-") or id:match("^AC%-PROP%-") or id:match("^AC%-MERGE%-") or id == "AC-JOB-03" then
+    return "tests/release/ac/test_merge.lua"
+  end
+  if id:match("^AC%-JOB%-") or id:match("^AC%-EVT%-") or id:match("^AC%-INT%-") or id:match("^AC%-STATE%-") then
+    return "tests/release/ac/test_jobs.lua"
+  end
+  if id == "AC-SEC-02" then
+    return "tests/release/ac/test_security.lua"
+  end
+  return "tests/release/privacy.lua"
+end
 
 local function add(id, priority, owner, test, protocol)
+  local test_path = acceptance_test(id)
+  if id == "AC-SEC-01" then
+    test = "nvim --headless -u NONE --cmd 'set runtimepath^=.' -c 'luafile " .. test_path .. "' -c 'qa!'"
+  else
+    test = unit .. " -c \"lua MiniTest.run_file('" .. test_path .. "')\""
+  end
   table.insert(scenarios, {
     id = id,
     priority = priority,
@@ -12,8 +44,6 @@ local function add(id, priority, owner, test, protocol)
     protocol = protocol,
   })
 end
-
-local unit = "MINI_TEST_PATH=$MINI_TEST_PATH nvim --headless -u tests/minimal_init.lua"
 
 add("AC-RUN-01", "P0", "F02", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-RUN-02", "P0", "F01", unit .. " -c 'lua MiniTest.run()'", nil)
@@ -27,8 +57,8 @@ add("AC-RUN-09", "P0", "F01", unit .. " -c 'lua MiniTest.run()'", nil)
 
 add("AC-UI-01", "P1", "F03", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-UI-02", "P1", "F02", unit .. " -c 'lua MiniTest.run()'", nil)
-add("AC-UI-03", "P2", "F11", unit .. " -c 'lua MiniTest.run()'", "tests/release/protocols/AC-UI-03.md")
-add("AC-UI-04", "P2", "F11", unit .. " -c 'lua MiniTest.run()'", "tests/release/protocols/AC-UI-04.md")
+add("AC-UI-03", "P2", "F11", unit .. " -c 'lua MiniTest.run()'", nil)
+add("AC-UI-04", "P2", "F11", unit .. " -c 'lua MiniTest.run()'", nil)
 
 add("AC-CTX-01", "P1", "F02", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-CTX-02", "P1", "F02", unit .. " -c 'lua MiniTest.run()'", nil)
@@ -87,8 +117,14 @@ add("AC-INT-04", "P0", "F06", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-STATE-01", "P0", "F06", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-STATE-02", "P1", "F07", unit .. " -c 'lua MiniTest.run()'", nil)
 
-add("AC-SEC-01", "P0", "F11", "nvim --headless -u tests/minimal_init.lua -c 'lua MiniTest.run()'", nil)
-add("AC-SEC-02", "P2", "F11", unit .. " -c 'lua MiniTest.run()'", "tests/release/protocols/AC-SEC-02.md")
+add(
+  "AC-SEC-01",
+  "P0",
+  "F11",
+  "nvim --headless -u NONE --cmd 'set runtimepath^=.' -c 'luafile tests/release/privacy.lua' -c 'qa!'",
+  nil
+)
+add("AC-SEC-02", "P2", "F11", unit .. " -c 'lua MiniTest.run()'", nil)
 
 return {
   version = 1,

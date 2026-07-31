@@ -10,7 +10,7 @@ local state_transitions = {
   stopped = { starting = true },
   starting = { ready = true, disconnected = true, stopping = true },
   ready = { disconnected = true, stopping = true },
-  disconnected = { starting = true, stopping = true },
+  disconnected = { starting = true, ready = true, stopping = true },
   stopping = { stopped = true },
 }
 
@@ -28,16 +28,53 @@ local function free_port()
   return port
 end
 
-local function operation_ids(value, result)
+local function operations_by_id(value, result)
   if type(value) ~= "table" then
     return
   end
   if type(value.operationId) == "string" then
-    result[value.operationId] = true
+    result[value.operationId] = value
   end
   for _, child in pairs(value) do
-    operation_ids(child, result)
+    operations_by_id(child, result)
   end
+end
+
+---Expands local OpenAPI references inside request and response contracts for exact comparison.
+---Reference cycles retain their reference marker so recursive schemas terminate deterministically.
+local function resolve_contract(value, doc, resolving)
+  if type(value) ~= "table" then
+    return value
+  end
+  if type(value["$ref"]) == "string" and value["$ref"]:match("^#/") then
+    local ref = value["$ref"]
+    if resolving[ref] then
+      return { ["$ref"] = ref }
+    end
+    local target = doc
+    for segment in ref:gmatch("[^/]+") do
+      if segment ~= "#" then
+        target = type(target) == "table" and target[segment:gsub("~1", "/"):gsub("~0", "~")] or nil
+      end
+    end
+    resolving[ref] = true
+    local resolved = resolve_contract(target, doc, resolving)
+    resolving[ref] = nil
+    return resolved
+  end
+  local result = {}
+  for key, child in pairs(value) do
+    result[key] = resolve_contract(child, doc, resolving)
+  end
+  return result
+end
+
+local function operation_contract(operation, doc)
+  return {
+    parameters = resolve_contract(operation.parameters, doc, {}),
+    requestBody = resolve_contract(operation.requestBody, doc, {}),
+    responses = resolve_contract(operation.responses, doc, {}),
+  }
 end
 
 ---Polls only the owned Server health endpoint until startup succeeds or the bounded deadline expires.
@@ -69,17 +106,29 @@ local function normalize_status(config)
   return config
 end
 
----Checks that a captured OpenAPI document exposes every operation required by a profile.
+---Checks required operation request and response contracts against the profile's frozen fixture.
+---The fixture checksum is verified first so a modified baseline cannot silently redefine compatibility.
 ---@param doc table
 ---@param profile table
 ---@return boolean
 ---@return string?
 function Runtime.verify_doc(doc, profile)
-  local ids = {}
-  operation_ids(doc, ids)
+  local raw = table.concat(vim.fn.readfile(profile.fixture, "b"), "\n")
+  if vim.fn.sha256(raw) ~= profile.fixture_sha256 then
+    return false, "fixture_checksum"
+  end
+  local expected = vim.json.decode(raw)
+  local actual_operations, expected_operations = {}, {}
+  operations_by_id(doc, actual_operations)
+  operations_by_id(expected, expected_operations)
   for _, id in ipairs(profile.operations) do
-    if not ids[id] then
+    if not actual_operations[id] then
       return false, "missing_operation:" .. id
+    end
+    if
+      not vim.deep_equal(operation_contract(actual_operations[id], doc), operation_contract(expected_operations[id], expected))
+    then
+      return false, "schema_mismatch:" .. id
     end
   end
   return true
@@ -257,6 +306,7 @@ function Runtime:connect_sse()
   self.sse_live = false
   self.sse = self.client:subscribe(function(event)
     if generation == self.stream_generation and self.state ~= "stopping" and self.state ~= "stopped" then
+      self.reconnect_attempt = 0
       self:route_event(event)
     end
   end, function(code)
@@ -266,7 +316,6 @@ function Runtime:connect_sse()
     return Promise.reject({ error_class = "sse_spawn" })
   end
   self.sse_live = true
-  self.reconnect_attempt = 0
   if recovering then
     return require("opencode.runtime.reconcile").run(self, self.generation)
   end
@@ -605,8 +654,15 @@ function Runtime:route_event(event)
         if job.state ~= "running" then
           return
         end
-        if type(err) == "table" and err.status == 400 and attempts < 3 then
-          vim.defer_fn(load_messages, 100)
+        if type(err) == "table" and err.status == 400 then
+          local captured = vim.tbl_values(job.assistant_messages or {})
+          local reconcile = require("opencode.runtime.reconcile")
+          if reconcile.has_parent_response(job, captured) then
+            reconcile.complete_job(self, session, job, captured)
+            return
+          end
+          job.remote_idle = false
+          self.correlation.late = self.correlation.late + 1
           return
         end
         job.error_class = type(err) == "table" and err.error_class or "message_reconciliation"

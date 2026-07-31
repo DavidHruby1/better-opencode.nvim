@@ -10,7 +10,7 @@ end
 ---Spawns an input-locked attach client in a Runtime-local terminal buffer.
 local function spawn(runtime, buf, on_exit)
   buf = buf or vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].bufhidden = "hide"
   local command =
     { require("opencode.config").opts.runtime.binary, "attach", runtime.client.url, "--dir", runtime.root }
   local source = vim.api.nvim_get_current_win()
@@ -110,10 +110,10 @@ function Sidebar:is_visible()
 end
 
 function Sidebar:hide()
-  if valid_window(shared.win) then
+  if self:is_visible() then
     vim.api.nvim_win_close(shared.win, true)
+    shared.win = nil
   end
-  shared.win = nil
   self.win = nil
 end
 

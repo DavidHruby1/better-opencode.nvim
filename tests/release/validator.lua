@@ -7,6 +7,15 @@ local function read(path)
   return value
 end
 
+local function exists(path)
+  local file = io.open(path, "r")
+  if not file then
+    return false
+  end
+  file:close()
+  return true
+end
+
 local function acceptance_document(root)
   local scenarios, ids, current, priority = {}, {}, nil, nil
   for line in read(root .. "/docs/ACCEPTANCE.md"):gmatch("[^\n]+") do
@@ -70,9 +79,21 @@ function M.validate(root)
     if scenario.priority == "P0" or scenario.priority == "P1" then
       if type(scenario.test) ~= "string" or scenario.test == "" then
         table.insert(errors, "missing automated test: " .. scenario.id)
+      elseif not scenario.test:find("MiniTest.run_file", 1, true) and scenario.id ~= "AC-SEC-01" then
+        table.insert(errors, "unfocused automated test: " .. scenario.id)
       end
-    elseif scenario.priority == "P2" and (not scenario.test or not scenario.protocol) then
-      table.insert(errors, "P2 needs test and protocol: " .. scenario.id)
+    elseif scenario.priority == "P2" and not scenario.test and not scenario.protocol then
+      table.insert(errors, "P2 needs a test or protocol: " .. scenario.id)
+    end
+    local test_path = type(scenario.test) == "string"
+      and (scenario.test:match("run_file%('([^']+%.lua)'%)") or scenario.test:match("luafile%s+(tests/[%w_./-]+%.lua)"))
+    if not test_path or not exists(root .. "/" .. test_path) then
+      table.insert(errors, "missing test file: " .. tostring(scenario.id))
+    elseif not read(root .. "/" .. test_path):find(scenario.id, 1, true) then
+      table.insert(errors, "test file does not declare " .. scenario.id .. ": " .. test_path)
+    end
+    if scenario.protocol and not exists(root .. "/" .. scenario.protocol) then
+      table.insert(errors, "missing protocol file: " .. scenario.id)
     end
     local has_profiles = {}
     for _, profile in ipairs(scenario.profiles or {}) do

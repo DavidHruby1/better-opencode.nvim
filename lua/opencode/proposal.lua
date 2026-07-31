@@ -5,7 +5,7 @@ M.schema = {
   additionalProperties = false,
   required = { "version", "path", "base_sha256", "scope", "replacement", "summary" },
   properties = {
-    version = { const = 1 },
+    version = { type = "integer", const = 1 },
     path = { type = "string" },
     base_sha256 = { type = "string", pattern = "^[0-9a-f]{64}$" },
     scope = {
@@ -78,7 +78,7 @@ function M.validate(value, job)
   if
     value.replacement:find("\0", 1, true)
     or value.replacement:find("\r", 1, true)
-    or not pcall(vim.str_utfindex, value.replacement)
+    or not require("opencode.snapshot").valid_utf8(value.replacement)
   then
     return nil, { error_class = "invalid_structured_output" }
   end

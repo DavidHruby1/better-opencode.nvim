@@ -38,11 +38,14 @@ local tools = {
   todowrite = true,
 }
 
+local source = debug.getinfo(1, "S").source:gsub("^@", "")
+local plugin_root = vim.fn.fnamemodify(source, ":p:h:h:h")
+
 return {
   ["1.17.3"] = {
     version = "1.17.3",
     commit = "8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74",
-    fixture = "tests/fixtures/opencode-1.17.3-doc.json",
+    fixture = plugin_root .. "/tests/fixtures/opencode-1.17.3-doc.json",
     fixture_sha256 = "41d34a78b59d6bd472dd6b10b3de77fd200faec1c6ed7b757f352eed58b84e24",
     operations = operations,
     tools = tools,
@@ -51,7 +54,7 @@ return {
   ["1.18.9"] = {
     version = "1.18.9",
     commit = "4da7bb44c84e013fa53e9c5d02ac753d1435c81a",
-    fixture = "tests/fixtures/opencode-1.18.9-doc.json",
+    fixture = plugin_root .. "/tests/fixtures/opencode-1.18.9-doc.json",
     fixture_sha256 = "f5cb443f0d160fc4b17190f64c2401f199160eb2137ce4e00ca319b99aa34005",
     operations = operations,
     tools = tools,

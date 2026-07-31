@@ -67,8 +67,8 @@ function M.prompt(text, context, opts)
   if text:match("^%s*/[%w_.-]+") then
     return Promise.reject({ error_class = "command_unsupported" })
   end
-  local rendered = context:render(text)
   return require("opencode.context.preflight").run(context):next(function()
+    local rendered = context:render(text)
     local runtime = context.runtime
     if not runtime:accepts_prompts() then
       return Promise.reject({ error_class = "runtime_not_ready" })
@@ -83,6 +83,18 @@ function M.prompt(text, context, opts)
       scope, scope_error = require("opencode.scope").resolve(context, base, opts.scope)
       if not scope then
         return Promise.reject({ error_class = scope_error })
+      end
+      local displayed = context.displayed_scope
+      if
+        displayed
+        and (
+          displayed.sha256 ~= base.sha256
+          or displayed.kind ~= scope.kind
+          or displayed.start_byte ~= scope.start_byte
+          or displayed.end_byte ~= scope.end_byte
+        )
+      then
+        return Promise.reject({ error_class = "scope_changed" })
       end
       local candidate = { start_byte = scope.start_byte, end_byte = scope.end_byte }
       local overlap = require("opencode.scope").find_overlap(runtime, context.buf, candidate)
@@ -123,21 +135,24 @@ function M.prompt(text, context, opts)
           require("opencode.job").transition(job, "error", { session = session })
           return Promise.reject({ error_class = "interaction_locked" })
         end
-        runtime.sidebar:show()
-        local payload = {
-          messageID = job.user_message_id,
-          agent = mode,
-          parts = { { type = "text", text = rendered.plaintext } },
-        }
-        if mode == "build" then
-          payload.format = { type = "json_schema", schema = vim.deepcopy(require("opencode.proposal").schema) }
-          payload.parts[1].text = build_instruction(context, rendered, base, scope)
-        end
-        return runtime.client
-          :prompt_async(session.id, payload)
-          :next(function()
-            return job
-          end)
+        runtime.selected_session_id = session.id
+        return runtime.client:select_session(session.id):next(function()
+          runtime.sidebar:show()
+          local payload = {
+            messageID = job.user_message_id,
+            agent = mode,
+            parts = { { type = "text", text = rendered.plaintext } },
+          }
+          if mode == "build" then
+            payload.format = { type = "json_schema", schema = vim.deepcopy(require("opencode.proposal").schema) }
+            payload.parts[1].text = build_instruction(context, rendered, base, scope)
+          end
+          return runtime.client
+            :prompt_async(session.id, payload)
+            :next(function()
+              return job
+            end)
+        end)
           :catch(function(err)
             job.error_class = type(err) == "table" and err.error_class or "prompt_http"
             require("opencode.job").transition(job, "error", { session = session })

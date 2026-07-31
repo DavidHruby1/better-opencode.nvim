@@ -65,7 +65,7 @@ local transitions = {
     error = true,
     scope_violation = true,
   },
-  waiting_user = { running = true },
+  waiting_user = { running = true, cancelled = true, error = true },
   pending_apply = { completed = true, conflict = true, cancelled = true, error = true, scope_violation = true },
   conflict = { completed = true, cancelled = true, error = true },
 }
@@ -154,10 +154,6 @@ function M.cancel(runtime, key)
   if merge.cleanup then
     merge.cleanup(job.merge_key or job.key)
   end
-  -- waiting_user is terminalized after its remote request is rejected and removed from the FIFO.
-  if job.state == "waiting_user" then
-    job.state = "running"
-  end
   M.transition(job, "cancelled", { session = session })
   if not runtime.client or job.remote_idle then
     return Promise.resolve({ cancelled = 1, errors = 0 })
@@ -204,10 +200,6 @@ end
 ---@param state "completed"|"cancelled"|"error"
 ---@return boolean
 function M.finish(job, session, state)
-  -- A lost pending request is an explicit reconciliation error, not a valid user transition.
-  if job.state == "waiting_user" and state == "error" then
-    job.state = "running"
-  end
   return M.transition(job, state, { session = session })
 end
 

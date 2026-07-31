@@ -145,6 +145,17 @@ function M.mark_awaiting(id)
   return false
 end
 
+---Replaces the displayed conflict after a retry changes its conflict kind.
+---The same queue slot is retained so no later dialog can overtake the new agent-conflict choices.
+function M.replace_current_conflict(root, job_key, kind, payload)
+  if not M.current or M.current.root ~= root or M.current.job_key ~= job_key then
+    return false
+  end
+  M.current.kind = kind
+  M.current.payload = vim.deepcopy(payload)
+  return true
+end
+
 ---Checks remote identity without changing queue, lock, or Job state.
 ---Reply events use this before transitioning so stale IDs cannot make a waiting Job run.
 function M.has_remote(session_id, job_key, request_id, root)

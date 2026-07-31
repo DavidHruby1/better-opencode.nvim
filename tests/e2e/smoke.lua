@@ -37,7 +37,7 @@ end
 local job, dispatch_error, dispatch_done
 require("opencode.api.prompt")
   .prompt(
-    "Ask one yes/no question with the question tool, then fetch https://example.com, then try to edit return 1 to return 9.",
+    "Ask one yes/no question with the question tool, then fetch https://example.com, then try to change return 1 to return 9.",
     context,
     { mode = "plan" }
   )
@@ -72,6 +72,38 @@ assert(
 assert(interactions.question > 0, "Plan did not exercise the question workflow")
 assert(interactions.permission > 0, "Plan did not exercise an approvable permission")
 
+local messages, messages_error
+runtime.client
+  :messages(job.session_id)
+  :next(function(value)
+    messages = value
+  end)
+  :catch(function(err)
+    messages_error = err
+  end)
+assert(vim.wait(5000, function()
+  return messages or messages_error
+end), "Plan messages timed out")
+assert(messages, vim.inspect(messages_error))
+local prohibited_tool_call = false
+local tool_states = {}
+for _, message in ipairs(messages) do
+  local info = message.info or message
+  if info.role == "assistant" then
+    for _, part in ipairs(message.parts or {}) do
+      local state = type(part.state) == "table" and part.state.status or part.state
+      if part.type == "tool" then
+        table.insert(tool_states, { tool = part.tool, state = state })
+      end
+      if part.type == "tool" and ({ edit = true, write = true, apply_patch = true })[part.tool] then
+        prohibited_tool_call = true
+        break
+      end
+    end
+  end
+end
+assert(not prohibited_tool_call, "Plan exposed a prohibited source-write tool: " .. vim.inspect(tool_states))
+
 local selected, select_error
 require("opencode.session")
   .select(runtime, job.session_id)
@@ -92,8 +124,8 @@ assert(selected, vim.inspect(select_error))
 local old_state, old_message = job.state, job.user_message_id
 local build, build_error, build_done
 require("opencode.api.prompt")
-  .prompt("Change only alpha's return value from 1 to 2 and return the required structured replacement.", context, {
-    mode = "build",
+    .prompt("Change only alpha's return value from 1 to 2 and return the required structured replacement.", context, {
+      mode = "build",
   })
   :next(function(value)
     build, build_done = value, true
@@ -129,6 +161,15 @@ assert(
     error_class = build.error_class,
     endpoint = build.error_endpoint,
     status = build.error_status,
+    assistant_ids = vim.tbl_keys(build.assistant_message_ids or {}),
+    assistant_messages = vim.tbl_map(function(message)
+      return {
+        id = message.info and message.info.id,
+        parent_id = message.info and message.info.parentID,
+        structured = type(message.info and message.info.structured) == "table",
+      }
+    end, vim.tbl_values(build.assistant_messages or {})),
+    correlation = runtime.correlation,
   })
 )
 assert(

@@ -20,6 +20,15 @@ jobs:
           ref: v0.16.0
           path: .deps/mini.nvim
       - run: MINI_TEST_PATH=$PWD/.deps/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run({ collect = { find_files = function() return vim.fn.globpath('tests/${{ matrix.suite }}', 'test_*.lua', false, true) end } })"
+  privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          version: v0.11.0
+          neovim: true
+      - run: nvim --headless -u NONE --cmd 'set runtimepath^=.' -c 'luafile tests/release/privacy.lua' -c 'qa!'
   e2e:
     runs-on: ubuntu-latest
     strategy:
