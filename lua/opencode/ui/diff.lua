@@ -89,7 +89,7 @@ function M.agent(request, runtime, job)
           if ok then
             close_all(owner)
           else
-            vim.notify("OpenCode: " .. err, vim.log.levels.WARN)
+            require("opencode.ui.notify").warn(err)
           end
         end)
       end, { buffer = result_buf })

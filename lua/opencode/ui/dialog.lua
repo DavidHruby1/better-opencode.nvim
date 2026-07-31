@@ -1,8 +1,12 @@
 local M = {}
 
+local function identity(request)
+  return vim.fs.basename(request.root) .. " " .. (request.session_short_id or request.session_id:sub(-8))
+end
+
 local function context(request)
-  local runtime = require("opencode.runtime").current()
-  local job = runtime and runtime.root == request.root and runtime.jobs[request.job_key]
+  local runtime = require("opencode.runtime").for_root(request.root)
+  local job = runtime and runtime.jobs[request.job_key]
   return runtime, job
 end
 
@@ -18,7 +22,7 @@ local function retry_visible(request, error_class)
   if request.state == "closed" then
     return
   end
-  vim.notify("OpenCode: " .. (error_class or "interaction_failed"), vim.log.levels.ERROR)
+  require("opencode.ui.notify").error(error_class or "interaction_failed")
   vim.schedule(function()
     if request.state ~= "closed" then
       M.show(request)
@@ -40,7 +44,7 @@ local function show_conflict(request)
   local agent = request.kind == "agent_conflict"
   local choices = agent and { "keep my changes", "accept agent changes", "open manual diff" }
     or { "open external diff", "retry apply", "cancel" }
-  vim.ui.select(choices, { prompt = "OpenCode " .. request.session_short_id }, function(choice)
+  vim.ui.select(choices, { prompt = "OpenCode " .. identity(request) }, function(choice)
     local runtime, job = context(request)
     if not runtime or not job or request.state == "closed" then
       return
@@ -93,7 +97,7 @@ local function answer_questions(request, index, answers)
   end
   local selected = {}
   local function custom(next_step)
-    vim.ui.input({ prompt = question.question .. ": " }, function(value)
+    vim.ui.input({ prompt = identity(request) .. ": " .. question.question .. ": " }, function(value)
       if value == nil then
         M.reject(request)
         return
@@ -115,7 +119,7 @@ local function answer_questions(request, index, answers)
       table.insert(choices, { label = "Type a custom answer", custom = true })
     end
     vim.ui.select(choices, {
-      prompt = question.question,
+      prompt = identity(request) .. ": " .. question.question,
       format_item = function(item)
         return item.description and (item.label .. " - " .. item.description) or item.label
       end,
@@ -150,7 +154,7 @@ local function answer_questions(request, index, answers)
       table.insert(options, { label = "Type a custom answer", custom = true })
     end
     vim.ui.select(options, {
-      prompt = question.question,
+      prompt = identity(request) .. ": " .. question.question,
       format_item = function(item)
         return item.description and (item.label .. " - " .. item.description) or item.label
       end,
@@ -188,7 +192,7 @@ function M.show(request)
     return
   end
   local actions = request.payload.actions or { "once", "always", "reject" }
-  vim.ui.select(actions, { prompt = "Permission " .. request.session_short_id }, function(action)
+  vim.ui.select(actions, { prompt = "Permission " .. identity(request) }, function(action)
     if not action or action == "reject" then
       M.reject(request)
       return
