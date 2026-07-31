@@ -94,6 +94,7 @@ function M.availability(runtime, session, remote_status)
   end
   if remote_status == "busy" or remote_status == "running" then
     runtime.prompt_locked, runtime.reconciliation_required = true, true
+    runtime.reconciliation_blocked = true
     return "blocked", "remote_busy_without_job"
   end
   return "reusable"
@@ -138,24 +139,26 @@ function M.inventory(runtime)
     local checks = {}
     for _, candidate in ipairs(listed or {}) do
       if M.managed(candidate, runtime, false) then
-        table.insert(checks, runtime.client:get_session(candidate.id))
+        table.insert(
+          checks,
+          runtime.client:get_session(candidate.id):catch(function()
+            return nil
+          end)
+        )
       end
     end
     return Promise.all(checks):next(function(details)
       local sessions = {}
       for _, detail in ipairs(details) do
-        if M.managed(detail, runtime, true) then
+        if detail and M.managed(detail, runtime, true) then
           local local_session = runtime.sessions[detail.id] or { id = detail.id, root = runtime.root }
           local_session.title = detail.title
           local_session.metadata = vim.deepcopy(detail.metadata)
           local_session.remote_status = status_value(statuses, detail.id) or "idle"
           local_session.last_mode = detail.metadata and detail.metadata.last_mode or local_session.last_mode
           local_session.activity = activity(detail)
-          local_session.availability, local_session.availability_reason = M.availability(
-            runtime,
-            local_session,
-            local_session.remote_status
-          )
+          local_session.availability, local_session.availability_reason =
+            M.availability(runtime, local_session, local_session.remote_status)
           runtime.sessions[detail.id] = local_session
           table.insert(sessions, local_session)
         end

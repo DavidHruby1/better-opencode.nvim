@@ -6,12 +6,12 @@ local function remote_key(request)
   if not request.request_id then
     return nil
   end
-  return request.session_id .. ":" .. request.job_key .. ":" .. request.request_id
+  return (request.root or "") .. ":" .. request.session_id .. ":" .. request.job_key .. ":" .. request.request_id
 end
 
 local function resolve(request)
-  local runtime = require("opencode.runtime").current()
-  if not runtime or runtime.root ~= request.root then
+  local runtime = require("opencode.runtime").for_root(request.root)
+  if not runtime then
     return nil
   end
   local job = runtime.jobs[request.job_key]
@@ -28,7 +28,7 @@ local function unlock(request)
   local runtime = resolve(request)
   if runtime then
     runtime.interaction_locked = false
-    runtime.prompt_locked = request.prompt_was_locked or runtime.reconciliation_required == true
+    runtime.prompt_locked = request.prompt_was_locked or runtime.reconciling or runtime.reconciliation_required == true
     if request.sidebar_was_visible then
       runtime.sidebar:show()
     end
@@ -48,7 +48,7 @@ function M.advance()
       M.current = request
       request.state = "shown"
       if remote_kinds[request.kind] then
-        request.sidebar_was_visible = runtime.sidebar.win and vim.api.nvim_win_is_valid(runtime.sidebar.win) or false
+        request.sidebar_was_visible = runtime.sidebar:is_visible()
         request.prompt_was_locked = runtime.prompt_locked == true
         runtime.interaction_locked, runtime.prompt_locked = true, true
         runtime.sidebar:hide()
@@ -147,17 +147,17 @@ end
 
 ---Checks remote identity without changing queue, lock, or Job state.
 ---Reply events use this before transitioning so stale IDs cannot make a waiting Job run.
-function M.has_remote(session_id, job_key, request_id)
+function M.has_remote(session_id, job_key, request_id, root)
   if not request_id then
     return false
   end
-  return M.remote[session_id .. ":" .. job_key .. ":" .. request_id] ~= nil
+  return M.remote[(root or "") .. ":" .. session_id .. ":" .. job_key .. ":" .. request_id] ~= nil
 end
 
 ---Completes a remote request only when its Session, Job, and request ID all match.
 ---This is the SSE confirmation path; an HTTP response cannot invoke it.
-function M.confirm(session_id, job_key, request_id)
-  local key = session_id .. ":" .. job_key .. ":" .. request_id
+function M.confirm(session_id, job_key, request_id, root)
+  local key = (root or "") .. ":" .. session_id .. ":" .. job_key .. ":" .. request_id
   local request = M.remote[key]
   if not request then
     return false

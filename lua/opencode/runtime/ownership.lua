@@ -1,11 +1,21 @@
 local M = {}
 
+local function exists(path)
+  return vim.uv.fs_stat(path) ~= nil
+end
+
+local function curl_config(username, password)
+  local value = username .. ":" .. password
+  return 'user = "' .. value:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"\n'
+end
+
 ---Returns Linux process start identity and executable real path.
 ---Both values are required so a reused PID cannot be mistaken for an owned child.
 ---@param pid integer
 ---@return table?
 function M.identity(pid)
-  local stat = vim.fn.readfile("/proc/" .. pid .. "/stat")[1]
+  local ok, lines = pcall(vim.fn.readfile, "/proc/" .. pid .. "/stat")
+  local stat = ok and lines[1] or nil
   local executable = vim.uv.fs_realpath("/proc/" .. pid .. "/exe")
   if not stat or not executable then
     return nil
@@ -16,6 +26,21 @@ function M.identity(pid)
   end
   local fields = vim.split(suffix, "%s+")
   return { pid = pid, start = fields[20], executable = executable }
+end
+
+---Checks whether a recorded process is still the same executable instance.
+---A missing process is safe for cleanup, while a reused PID is never treated as owned.
+---@param expected table
+---@return boolean, boolean
+function M.verified(expected)
+  if type(expected) ~= "table" or not expected.pid then
+    return false, false
+  end
+  local actual = M.identity(expected.pid)
+  if not actual then
+    return true, false
+  end
+  return actual.start == expected.start and actual.executable == expected.executable, true
 end
 
 ---Atomically writes a private ownership manifest.
@@ -47,18 +72,37 @@ end
 ---@return boolean
 function M.cleanup(path, manifest)
   for _, key in ipairs({ "tui", "server" }) do
-    if manifest[key] and not M.signal(manifest[key]) then
-      return false
+    if manifest[key] then
+      local verified, running = M.verified(manifest[key])
+      if not verified then
+        return false
+      end
+      if running then
+        if not M.signal(manifest[key]) or M.identity(manifest[key].pid) then
+          return false
+        end
+      end
     end
   end
-  vim.uv.fs_unlink(path)
+  if exists(path) then
+    vim.uv.fs_unlink(path)
+  end
   return true
+end
+
+---Signals only process identities recorded in a manifest and removes it after verification.
+---The bounded shutdown caller can retry this operation without ever targeting a reused PID.
+---@param path string
+---@param manifest table
+---@return boolean
+function M.shutdown(path, manifest)
+  return M.cleanup(path, manifest)
 end
 
 ---Verifies and removes a stale Runtime using process identity, credentials, health, and routed root.
 ---Any uncertainty leaves both processes and manifest untouched for manual diagnosis.
 ---@param path string
----@param root string
+---@param root? string
 ---@return boolean
 function M.cleanup_stale(path, root)
   local stat = vim.uv.fs_stat(path)
@@ -69,14 +113,31 @@ function M.cleanup_stale(path, root)
     return false
   end
   local ok, manifest = pcall(vim.json.decode, table.concat(vim.fn.readfile(path), "\n"))
-  if not ok or type(manifest) ~= "table" or manifest.root_hash ~= vim.fn.sha256(root) then
+  if
+    not ok
+    or type(manifest) ~= "table"
+    or manifest.schema_version ~= 1
+    or type(manifest.root_hash) ~= "string"
+    or type(manifest.port) ~= "number"
+    or type(manifest.username) ~= "string"
+    or type(manifest.password) ~= "string"
+    or type(manifest.nonce) ~= "string"
+    or type(manifest.server) ~= "table"
+  then
+    return false
+  end
+  root = root or manifest.root
+  if not root and manifest.server then
+    root = vim.uv.fs_realpath("/proc/" .. manifest.server.pid .. "/cwd")
+  end
+  if not root or vim.fn.sha256(root) ~= manifest.root_hash then
     return false
   end
   for _, key in ipairs({ "server", "tui" }) do
     local expected = manifest[key]
     if expected then
-      local actual = M.identity(expected.pid)
-      if not actual or actual.start ~= expected.start or actual.executable ~= expected.executable then
+      local verified = M.verified(expected)
+      if not verified then
         return false
       end
     end
@@ -87,22 +148,39 @@ function M.cleanup_stale(path, root)
     "--show-error",
     "--max-time",
     "2",
-    "--user",
-    manifest.username .. ":" .. manifest.password,
+    "--config",
+    "-",
     "-H",
     "x-opencode-directory: " .. root,
   }
   local health_cmd = { "curl" }
   vim.list_extend(health_cmd, common)
   table.insert(health_cmd, base .. "/global/health")
-  local health = vim.system(health_cmd, { text = true }):wait()
+  local health =
+    vim.system(health_cmd, { text = true, stdin = curl_config(manifest.username, manifest.password) }):wait()
   if health.code ~= 0 then
-    return false
+    if manifest.server and M.identity(manifest.server.pid) then
+      return false
+    end
+    if manifest.tui then
+      local verified, running = M.verified(manifest.tui)
+      if not verified then
+        return false
+      end
+      if running and (not M.signal(manifest.tui) or M.identity(manifest.tui.pid)) then
+        return false
+      end
+    end
+    if exists(path) then
+      vim.uv.fs_unlink(path)
+    end
+    vim.fn.delete(vim.fn.stdpath("state") .. "/opencode.nvim/runtimes/" .. manifest.root_hash, "rf")
+    return true
   end
   local path_cmd = { "curl" }
   vim.list_extend(path_cmd, common)
   table.insert(path_cmd, base .. "/path")
-  local result = vim.system(path_cmd, { text = true }):wait()
+  local result = vim.system(path_cmd, { text = true, stdin = curl_config(manifest.username, manifest.password) }):wait()
   local path_ok, routed = pcall(vim.json.decode, result.stdout or "")
   if result.code ~= 0 or not path_ok then
     return false
@@ -110,13 +188,48 @@ function M.cleanup_stale(path, root)
   if require("opencode.runtime.root").realpath(routed.directory or routed.worktree or "") ~= root then
     return false
   end
-  if manifest.tui and not M.signal(manifest.tui) then
-    return false
+  if manifest.tui then
+    local verified, running = M.verified(manifest.tui)
+    if not verified then
+      return false
+    end
+    if running and (not M.signal(manifest.tui) or M.identity(manifest.tui.pid)) then
+      return false
+    end
   end
-  if manifest.server and not M.signal(manifest.server) then
-    return false
+  if manifest.server then
+    local verified, running = M.verified(manifest.server)
+    if not verified then
+      return false
+    end
+    if running and (not M.signal(manifest.server) or M.identity(manifest.server.pid)) then
+      return false
+    end
   end
-  vim.uv.fs_unlink(path)
+  if exists(path) then
+    vim.uv.fs_unlink(path)
+  end
+  vim.fn.delete(vim.fn.stdpath("state") .. "/opencode.nvim/runtimes/" .. manifest.root_hash, "rf")
+  return true
+end
+
+---Verifies every stale manifest before the first new Runtime starts.
+---Unknown roots are recovered from the recorded Server cwd; uncertain ownership remains for diagnostics.
+---@return boolean
+function M.cleanup_stale_manifests()
+  local directory = vim.fn.stdpath("state") .. "/opencode.nvim/runtimes"
+  local handle = vim.uv.fs_scandir(directory)
+  if not handle then
+    return true
+  end
+  for name, kind in vim.uv.fs_scandir_next, handle do
+    if kind == "file" and name:match("%.json$") then
+      local path = directory .. "/" .. name
+      if not M.cleanup_stale(path) then
+        return false
+      end
+    end
+  end
   return true
 end
 

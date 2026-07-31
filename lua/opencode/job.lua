@@ -33,6 +33,7 @@ function M.new(session_id, target)
   local message_id = M.message_id()
   return {
     key = session_id .. ":" .. message_id,
+    merge_key = target.root .. ":" .. session_id .. ":" .. message_id,
     session_id = session_id,
     user_message_id = message_id,
     assistant_message_ids = {},
@@ -96,6 +97,10 @@ function M.transition(job, state, attrs)
   local leaving_conflict = job.state == "conflict"
   job.state = state
   job.waiting_kind = state == "waiting_user" and attrs.waiting_kind or nil
+  if state ~= "waiting_user" then
+    job.waiting_request_id = nil
+    job.waiting_remote = nil
+  end
   job.conflict_kind = state == "conflict" and attrs.conflict_kind or nil
   if leaving_conflict then
     job.conflict_payload = nil
@@ -117,6 +122,13 @@ function M.transition(job, state, attrs)
     local interaction = package.loaded["opencode.interaction"]
     if interaction then
       interaction.remove_by_job(job.root, job.key)
+    end
+    if state == "completed" or state == "error" or state == "scope_violation" then
+      local runtime = require("opencode.runtime").for_root(job.root)
+      if runtime then
+        local notify = require("opencode.ui.notify")
+        notify.emit(state, notify.snapshot(runtime, job), runtime)
+      end
     end
   end
   return true
@@ -140,18 +152,25 @@ function M.cancel(runtime, key)
   interaction.reject_by_job(runtime, job)
   local merge = require("opencode.merge")
   if merge.cleanup then
-    merge.cleanup(job.key)
+    merge.cleanup(job.merge_key or job.key)
+  end
+  -- waiting_user is terminalized after its remote request is rejected and removed from the FIFO.
+  if job.state == "waiting_user" then
+    job.state = "running"
   end
   M.transition(job, "cancelled", { session = session })
   if not runtime.client or job.remote_idle then
     return Promise.resolve({ cancelled = 1, errors = 0 })
   end
-  return runtime.client:abort(job.session_id):next(function()
-    return { cancelled = 1, errors = 0 }
-  end):catch(function(err)
-    job.cancel_error_class = type(err) == "table" and err.error_class or "abort"
-    return { cancelled = 1, errors = 1 }
-  end)
+  return runtime.client
+    :abort(job.session_id)
+    :next(function()
+      return { cancelled = 1, errors = 0 }
+    end)
+    :catch(function(err)
+      job.cancel_error_class = type(err) == "table" and err.error_class or "abort"
+      return { cancelled = 1, errors = 1 }
+    end)
 end
 
 ---Cancels a snapshot of every nonterminal Job in one Runtime.
@@ -185,6 +204,10 @@ end
 ---@param state "completed"|"cancelled"|"error"
 ---@return boolean
 function M.finish(job, session, state)
+  -- A lost pending request is an explicit reconciliation error, not a valid user transition.
+  if job.state == "waiting_user" and state == "error" then
+    job.state = "running"
+  end
   return M.transition(job, state, { session = session })
 end
 

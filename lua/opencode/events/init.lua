@@ -27,6 +27,12 @@ local function identity(properties)
   return info.sessionID or properties.sessionID, info.id or info.requestID or properties.requestID, info
 end
 
+local function request_reconcile(runtime)
+  if runtime.client and runtime.begin_reconciliation then
+    runtime:begin_reconciliation()
+  end
+end
+
 local function active(runtime, session_id)
   local session = runtime.sessions[session_id]
   local job = session and runtime.jobs[session.active_job_key]
@@ -38,6 +44,7 @@ local function active(runtime, session_id)
   then
     runtime.prompt_locked = true
     runtime.reconciliation_required = true
+    request_reconcile(runtime)
     return nil
   end
   return session, job
@@ -50,6 +57,9 @@ local function unknown(runtime, class)
   runtime.correlation.unknown = runtime.correlation.unknown + 1
   runtime.correlation.unknown_classes = runtime.correlation.unknown_classes or {}
   runtime.correlation.unknown_classes[class] = (runtime.correlation.unknown_classes[class] or 0) + 1
+  if class ~= "part_unmapped" then
+    request_reconcile(runtime)
+  end
 end
 
 local function late(runtime, job)
@@ -96,31 +106,39 @@ local function reconcile_part(runtime, session_id, assistant_id)
     if unlock_if_mapped() then
       return
     end
-    runtime.client:message(session_id, assistant_id):next(function(message)
-      local info = message.info or message
-      if info.role == "user" and info.id == assistant_id and runtime.jobs[session_id .. ":" .. assistant_id] then
-        unlock_reconciled()
-        return
-      end
-      local job = info.parentID and runtime.jobs[session_id .. ":" .. info.parentID]
-      if info.role ~= "assistant" or info.id ~= assistant_id or not job then
+    runtime.client
+      :message(session_id, assistant_id)
+      :next(function(message)
+        local info = message.info or message
+        if
+          info.sessionID == session_id
+          and info.role == "user"
+          and info.id == assistant_id
+          and runtime.jobs[session_id .. ":" .. assistant_id]
+        then
+          unlock_reconciled()
+          return
+        end
+        local job = info.parentID and runtime.jobs[session_id .. ":" .. info.parentID]
+        if info.sessionID ~= session_id or info.role ~= "assistant" or info.id ~= assistant_id or not job then
+          if number < 3 then
+            vim.defer_fn(function()
+              attempt(number + 1)
+            end, 100)
+          end
+          return
+        end
+        job.assistant_message_ids[assistant_id] = true
+        runtime.assistant_jobs[session_id .. ":" .. assistant_id] = job.key
+        unlock_if_mapped()
+      end)
+      :catch(function()
         if number < 3 then
           vim.defer_fn(function()
             attempt(number + 1)
           end, 100)
         end
-        return
-      end
-      job.assistant_message_ids[assistant_id] = true
-      runtime.assistant_jobs[session_id .. ":" .. assistant_id] = job.key
-      unlock_if_mapped()
-    end):catch(function()
-      if number < 3 then
-        vim.defer_fn(function()
-          attempt(number + 1)
-        end, 100)
-      end
-    end)
+      end)
   end
   attempt(1)
 end
@@ -177,6 +195,12 @@ end
 ---Requests without a provable Job fail closed, while matching reply events alone release waiting state and UI locks.
 ---@return boolean handled
 function M.route(runtime, event)
+  local properties = event.properties or {}
+  local event_root = properties.directory or properties.root or (properties.info and properties.info.directory)
+  if event_root and require("opencode.runtime.root").realpath(event_root) ~= runtime.root then
+    unknown(runtime, "root_mismatch")
+    return true
+  end
   if route_message(runtime, event) then
     return true
   end
@@ -198,10 +222,11 @@ function M.route(runtime, event)
     if
       job.state == "waiting_user"
       and job.waiting_kind == kind
-      and interaction.has_remote(session_id, job.key, request_id)
+      and interaction.has_remote(session_id, job.key, request_id, runtime.root)
     then
+      runtime.confirmed_requests[job.key .. ":" .. request_id] = runtime.generation
       if require("opencode.job").transition(job, "running", { session = session }) then
-        interaction.confirm(session_id, job.key, request_id)
+        interaction.confirm(session_id, job.key, request_id, runtime.root)
       end
     end
     return true
@@ -224,6 +249,7 @@ function M.route(runtime, event)
   if not require("opencode.job").transition(job, "waiting_user", { session = session, waiting_kind = kind }) then
     return true
   end
+  job.waiting_request_id = request_id
   require("opencode.interaction").enqueue({
     kind = kind,
     root = runtime.root,
@@ -233,6 +259,8 @@ function M.route(runtime, event)
     request_id = request_id,
     payload = payload,
   })
+  local notify = require("opencode.ui.notify")
+  notify.emit(kind, notify.snapshot(runtime, job), runtime)
   return true
 end
 

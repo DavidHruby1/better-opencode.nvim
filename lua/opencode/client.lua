@@ -2,7 +2,7 @@ local Client = {}
 Client.__index = Client
 
 ---Creates a root-routed authenticated OpenCode client.
----@param opts { host: string, port: integer, username: string, password: string, root: string, runner?: function }
+---@param opts { host: string, port: integer, username: string, password: string, root: string, runner?: function, runtime?: table }
 ---@return table
 function Client.new(opts)
   local self = setmetatable({
@@ -12,6 +12,9 @@ function Client.new(opts)
     password = opts.password,
     root = opts.root,
     runner = opts.runner or vim.system,
+    runtime = opts.runtime,
+    requests = {},
+    closed = false,
     url = "",
   }, Client)
   self.url = string.format("http://%s:%d", self.host, self.port)
@@ -44,6 +47,10 @@ end
 ---@return Promise<any>
 function Client:request(method, endpoint, body)
   local Promise = require("opencode.promise")
+  if self.closed then
+    return Promise.reject({ error_class = "transport_closed", endpoint = endpoint })
+  end
+  local request_generation = self.runtime and self.runtime.generation
   return Promise.new(function(resolve, reject)
     local marker = "__OPENCODE_STATUS__:"
     local timeout = endpoint == "/global/health" and "1" or "10"
@@ -69,27 +76,64 @@ function Client:request(method, endpoint, body)
       marker .. "%{http_code}",
     }
     table.insert(cmd, self.url .. endpoint)
-    self.runner(cmd, { text = true, stdin = curl_config(self.username, self.password, body) }, function(result)
-      vim.schedule(function()
-        local payload, status = (result.stdout or ""):match("^(.*)__OPENCODE_STATUS__:(%d%d%d)$")
-        status = tonumber(status)
-        if result.code ~= 0 or not status or status >= 400 then
-          reject(request_error(endpoint, result.code, status))
+    local process
+    process = self.runner(
+      cmd,
+      { text = true, stdin = curl_config(self.username, self.password, body) },
+      function(result)
+        if process then
+          self.requests[process] = nil
+        end
+        if self.closed then
           return
         end
-        if status == 204 or payload == "" then
-          resolve(nil)
-          return
-        end
-        local ok, decoded = pcall(vim.json.decode, payload)
-        if not ok then
-          reject({ error_class = "decode", endpoint = endpoint, status = status })
-          return
-        end
-        resolve(decoded)
-      end)
-    end)
+        vim.schedule(function()
+          if
+            self.runtime
+            and (
+              self.runtime.generation ~= request_generation
+              or self.runtime.state == "stopping"
+              or self.runtime.state == "stopped"
+            )
+          then
+            reject({ error_class = "stale_generation", endpoint = endpoint })
+            return
+          end
+          local payload, status = (result.stdout or ""):match("^(.*)__OPENCODE_STATUS__:(%d%d%d)$")
+          status = tonumber(status)
+          if result.code ~= 0 or not status or status >= 400 then
+            reject(request_error(endpoint, result.code, status))
+            return
+          end
+          if status == 204 or payload == "" then
+            resolve(nil)
+            return
+          end
+          local ok, decoded = pcall(vim.json.decode, payload)
+          if not ok then
+            reject({ error_class = "decode", endpoint = endpoint, status = status })
+            return
+          end
+          resolve(decoded)
+        end)
+      end
+    )
+    if process then
+      self.requests[process] = true
+    end
   end)
+end
+
+---Cancels all in-flight HTTP transports and prevents late callbacks from resolving Runtime state.
+---The runner remains injectable for contract tests; real vim.system handles are killed best-effort.
+function Client:cancel_requests()
+  self.closed = true
+  for process in pairs(self.requests) do
+    if process and process.kill then
+      pcall(process.kill, process, "sigterm")
+    end
+  end
+  self.requests = {}
 end
 
 function Client:health()
@@ -119,11 +163,25 @@ end
 function Client:update_session(id, body)
   return self:request("PATCH", "/session/" .. id, body)
 end
+
+---Rejects a Session response whose returned directory is not the client's canonical root.
+local function verify_session_root(client, value)
+  local directory = value and (value.directory or (value.session and value.session.directory))
+  if directory and require("opencode.runtime.root").realpath(directory) ~= client.root then
+    return require("opencode.promise").reject({ error_class = "root_mismatch", endpoint = "/session" })
+  end
+  return require("opencode.promise").resolve(value)
+end
+
 function Client:get_session(id)
-  return self:request("GET", "/session/" .. id)
+  return self:request("GET", "/session/" .. id):next(function(value)
+    return verify_session_root(self, value)
+  end)
 end
 function Client:messages(id)
-  return self:request("GET", "/session/" .. id .. "/message")
+  return self:request("GET", "/session/" .. id .. "/message"):next(function(value)
+    return verify_session_root(self, value)
+  end)
 end
 function Client:message(id, message_id)
   return self:request("GET", "/session/" .. id .. "/message/" .. message_id)
@@ -159,6 +217,7 @@ end
 ---@param on_exit fun(code: integer)
 ---@return integer
 function Client:subscribe(callback, on_exit)
+  on_exit = on_exit or function() end
   local cmd = {
     "curl",
     "--silent",
@@ -173,6 +232,9 @@ function Client:subscribe(callback, on_exit)
     self.url .. "/event",
   }
   local lines = {}
+  if self.closed then
+    return 0
+  end
   local job = vim.fn.jobstart(cmd, {
     stdout_buffered = false,
     on_stdout = function(_, data)

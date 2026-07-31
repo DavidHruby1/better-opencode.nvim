@@ -70,7 +70,7 @@ function M.prompt(text, context, opts)
   local rendered = context:render(text)
   return require("opencode.context.preflight").run(context):next(function()
     local runtime = context.runtime
-    if runtime.state ~= "ready" then
+    if not runtime:accepts_prompts() then
       return Promise.reject({ error_class = "runtime_not_ready" })
     end
     if runtime.prompt_locked or runtime.interaction_locked then
@@ -119,6 +119,10 @@ function M.prompt(text, context, opts)
         runtime.jobs[job.key] = job
         session.active_job_key = job.key
         session.activity = vim.uv.now()
+        if not runtime:accepts_prompts() then
+          require("opencode.job").transition(job, "error", { session = session })
+          return Promise.reject({ error_class = "interaction_locked" })
+        end
         runtime.sidebar:show()
         local payload = {
           messageID = job.user_message_id,

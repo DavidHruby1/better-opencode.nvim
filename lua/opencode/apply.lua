@@ -123,6 +123,8 @@ local function terminate(job, runtime, state, conflict_kind, conflict_payload)
         job_key = job.key,
         payload = job.conflict_payload,
       })
+      local notify = require("opencode.ui.notify")
+      notify.emit("conflict", notify.snapshot(runtime, job), runtime)
     end
   else
     if state == "error" and not job.error_class then
@@ -132,10 +134,26 @@ local function terminate(job, runtime, state, conflict_kind, conflict_payload)
   end
 end
 
-local function apply_result(job, runtime, generation, ours, tick, disk_sha, result, expected_state, callback)
+---Applies a merge result only when both Job and Runtime generations still own the scheduled callback.
+local function apply_result(
+  job,
+  runtime,
+  generation,
+  runtime_generation,
+  ours,
+  tick,
+  disk_sha,
+  result,
+  expected_state,
+  callback
+)
   vim.schedule(function()
     expected_state = expected_state or "pending_apply"
-    if job.state ~= expected_state or job.apply_generation ~= generation then
+    if
+      job.state ~= expected_state
+      or job.apply_generation ~= generation
+      or runtime.generation ~= runtime_generation
+    then
       return
     end
     local current, state_error, current_sha = source_state(job, runtime)
@@ -250,8 +268,12 @@ function M.start(job, runtime)
   disk_sha = current.disk_sha
   job.apply_generation = (job.apply_generation or 0) + 1
   local generation = job.apply_generation
+  local runtime_generation = runtime.generation
   require("opencode.merge")
-    .run(job.base.text, ours, job.theirs, { owner_key = job.key })
+    .run(job.base.text, ours, job.theirs, {
+      owner_key = job.merge_key or job.key,
+      temp_dir = runtime.temp_root,
+    })
     :next(function(merge)
       if merge.kind == "conflict" then
         if job.state == "pending_apply" and job.apply_generation == generation then
@@ -259,7 +281,7 @@ function M.start(job, runtime)
         end
         return
       end
-      apply_result(job, runtime, generation, ours, tick, disk_sha, merge.text)
+      apply_result(job, runtime, generation, runtime_generation, ours, tick, disk_sha, merge.text)
     end)
     :catch(function()
       if job.state == "pending_apply" and job.apply_generation == generation then
@@ -284,8 +306,13 @@ function M.prefer(job, runtime, preference, callback)
   end
   job.apply_generation = (job.apply_generation or 0) + 1
   local generation = job.apply_generation
+  local runtime_generation = runtime.generation
   require("opencode.merge")
-    .run(payload.base.text, current.ours, payload.theirs, { preference = preference, owner_key = job.key })
+    .run(payload.base.text, current.ours, payload.theirs, {
+      preference = preference,
+      owner_key = job.merge_key or job.key,
+      temp_dir = runtime.temp_root,
+    })
     :next(function(result)
       if result.kind ~= "clean" or job.state ~= "conflict" then
         require("opencode.job").transition(job, "error", { session = runtime.sessions[job.session_id] })
@@ -295,6 +322,7 @@ function M.prefer(job, runtime, preference, callback)
         job,
         runtime,
         generation,
+        runtime_generation,
         current.ours,
         current.tick,
         current.disk_sha,
@@ -335,6 +363,7 @@ function M.manual(job, runtime, result, callback)
     job,
     runtime,
     job.apply_generation,
+    runtime.generation,
     current.ours,
     current.tick,
     current.disk_sha,
@@ -362,25 +391,40 @@ function M.retry(job, runtime, callback)
   local raw = require("opencode.snapshot").read_raw(job.path)
   local disk = raw and require("opencode.snapshot").decode_disk(raw, job.base)
   if disk ~= ours then
-    vim.notify("OpenCode: save or reconcile the buffer before retrying", vim.log.levels.WARN)
+    require("opencode.ui.notify").warn("save_or_reconcile")
     return false
   end
   job.apply_generation = (job.apply_generation or 0) + 1
   local generation = job.apply_generation
+  local runtime_generation = runtime.generation
   require("opencode.merge")
-    .run(job.base.text, ours, job.theirs, { owner_key = job.key })
+    .run(job.base.text, ours, job.theirs, {
+      owner_key = job.merge_key or job.key,
+      temp_dir = runtime.temp_root,
+    })
     :next(function(result)
       if job.state ~= "conflict" or job.apply_generation ~= generation then
         return
       end
       if result.kind == "conflict" then
-        vim.notify("OpenCode: retry still conflicts with agent changes", vim.log.levels.WARN)
+        require("opencode.ui.notify").warn("agent_conflict")
         if callback then
           callback(false, "agent_conflict")
         end
         return
       end
-      apply_result(job, runtime, generation, ours, current.tick, current.disk_sha, result.text, "conflict", callback)
+      apply_result(
+        job,
+        runtime,
+        generation,
+        runtime_generation,
+        ours,
+        current.tick,
+        current.disk_sha,
+        result.text,
+        "conflict",
+        callback
+      )
     end)
     :catch(function()
       require("opencode.job").transition(job, "error", { session = runtime.sessions[job.session_id] })
