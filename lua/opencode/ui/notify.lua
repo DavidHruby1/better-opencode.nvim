@@ -14,10 +14,15 @@ local safe_classes = {
   apply_error = true,
   assistant_message_count = true,
   command_unsupported = true,
+  config_parse = true,
+  custom_plugin = true,
+  custom_tool = true,
   decode = true,
   external_change = true,
+  enabled_mcp = true,
   file_edited = true,
   hard_denied_permission = true,
+  http = true,
   interaction_failed = true,
   interaction_locked = true,
   invalid_result = true,
@@ -52,6 +57,8 @@ local safe_classes = {
   sse_spawn = true,
   stale_generation = true,
   stale_source = true,
+  startup_timeout = true,
+  timeout = true,
   transport_closed = true,
   tui_attach = true,
   tui_identity = true,
@@ -59,6 +66,19 @@ local safe_classes = {
   unknown_session_status = true,
   unsupported_version = true,
   write_failed = true,
+}
+
+local actionable_messages = {
+  config_parse = "config_parse: OpenCode config could not be parsed; fix it or use a clean config (see docs/RECOVERY.md)",
+  custom_plugin = "custom_plugin: custom OpenCode plugins are blocked; use a clean config (see docs/RECOVERY.md)",
+  custom_tool = "custom_tool: custom OpenCode tools are blocked; use a clean config (see docs/RECOVERY.md)",
+  decode = "decode: OpenCode returned an invalid response; restart the owned runtime (see docs/RECOVERY.md)",
+  enabled_mcp = "enabled_mcp: enabled OpenCode MCPs are blocked; disable them or use a clean config (see docs/RECOVERY.md)",
+  http = "http: OpenCode request failed; retry or run :checkhealth opencode (see docs/RECOVERY.md)",
+  server_spawn = "server_spawn: owned OpenCode startup failed; check runtime.binary and run :checkhealth opencode (see docs/RECOVERY.md)",
+  startup_timeout = "startup_timeout: owned OpenCode startup timed out; run :checkhealth opencode (see docs/RECOVERY.md)",
+  timeout = "timeout: OpenCode request timed out; retry or run :checkhealth opencode (see docs/RECOVERY.md)",
+  unsupported_version = "unsupported_version: unsupported OpenCode version; install exactly 1.17.3 or 1.18.9 (see docs/RECOVERY.md)",
 }
 
 local function focus_snapshot(runtime)
@@ -75,13 +95,43 @@ local function same_focus(before, after)
 end
 
 local function safe_class(value)
+  if type(value) == "table" then
+    value = value.error_class
+  end
   value = tostring(value or "error")
   return safe_classes[value] and value or "error"
 end
 
-local function generic(kind, error_class)
+local function safe_endpoint(value)
+  if type(value) ~= "string" then
+    return nil
+  end
+  local endpoint = require("opencode.log").endpoint(value)
+  return #endpoint <= 120 and endpoint or nil
+end
+
+---Builds an allowlisted startup or config diagnostic from structured error metadata.
+---Only bounded, sanitized endpoint and HTTP status fields may supplement fixed messages; all other input is ignored.
+local function safe_message(error)
+  local class = safe_class(error)
+  local message = actionable_messages[class] or class
+  if type(error) ~= "table" or (class ~= "http" and class ~= "timeout" and class ~= "decode") then
+    return "OpenCode: " .. message
+  end
+  local details = {}
+  local endpoint = safe_endpoint(error.endpoint)
+  if endpoint then
+    table.insert(details, "endpoint=" .. endpoint)
+  end
+  if class == "http" and type(error.status) == "number" and error.status % 1 == 0 and error.status >= 100 and error.status <= 599 then
+    table.insert(details, "status=" .. error.status)
+  end
+  return "OpenCode: " .. message .. (#details > 0 and " (" .. table.concat(details, ", ") .. ")" or "")
+end
+
+local function generic(kind, error)
   local before = focus_snapshot()
-  vim.notify("OpenCode: " .. safe_class(error_class), vim.log.levels[kind], { title = "OpenCode" })
+  vim.notify(safe_message(error), vim.log.levels[kind], { title = "OpenCode" })
   M.last_focus_safe = same_focus(before, focus_snapshot())
 end
 
@@ -171,11 +221,11 @@ function M.emit(kind, metadata, runtime)
   return true
 end
 
----Reports a safe generic error for command failures that do not belong to a Job.
----Only the enum-like error class is shown, never an exception body, argv, path, or server response.
----@param error_class string
-function M.error(error_class)
-  generic("ERROR", error_class)
+---Reports a safe error for command failures that do not belong to a Job.
+---Known startup failures use fixed guidance and bounded structured metadata; arbitrary error text is never shown.
+---@param error string|table
+function M.error(error)
+  generic("ERROR", error)
 end
 
 ---Reports a safe warning class without changing editor focus or exposing external error text.

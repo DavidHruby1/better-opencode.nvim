@@ -1,6 +1,6 @@
 # Recovery
 
-Run `:checkhealth opencode` first. Health reports only safe capability names, config source scopes, exact OpenCode profile, fixture SHA, and actionable fixes. It does not start MCP, import plugins/tools, discover processes, or print option values.
+Run `:checkhealth opencode` first. Health passively scans OpenCode config, reads the configured executable's version, and checks `git merge-file -p --diff3` with empty `/dev/null` operands. It does not start or attach to a server, run MCPs or plugins/tools, discover processes, or print option values, config contents, or private paths. The exact OpenCode profile is checked by health and verified again when the plugin starts its owned server.
 
 ## Startup or health failure
 
@@ -10,6 +10,12 @@ Run `:checkhealth opencode` first. Health reports only safe capability names, co
 - Install the Tree-sitter parser for the active language if function scope is needed. Without it, file scope remains available.
 - Fix write permission for Neovim `stdpath("state")`; private Runtime manifests and temporary merge inputs live below `opencode.nvim/`.
 - For an unsupported option, use the source scope and type reported by health, then consult `docs/CONFIGURATION.md`.
+
+## Clean OpenCode config
+
+This plugin requires every OpenCode config visible to the current project to contain no custom plugins or custom tools and no enabled MCPs. `:checkhealth opencode` reads those local config sources and extension directories without loading or running them, and startup repeats the same guard before starting OpenCode.
+
+Normal OpenCode use may keep custom plugins, tools, and MCPs in a separate config environment. Start Neovim for this plugin with clean `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, and `OPENCODE_CONFIG_CONTENT` values, or disable every MCP with `enabled: false`. Health and startup report only the blocking category; they never print config contents or paths.
 
 ## Runtime disconnected
 

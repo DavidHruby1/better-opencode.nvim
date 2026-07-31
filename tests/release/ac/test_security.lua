@@ -17,15 +17,18 @@ end
 local function run_health(spec)
   spec = spec or {}
   local binary = vim.fn.tempname()
+  local root = spec.root or (vim.fn.tempname() .. "/health-private-path")
+  vim.fn.mkdir(root, "p")
   vim.fn.writefile({ "#!/bin/sh", spec.version_error and "exit 1" or "printf '%s\\n' '" .. (spec.version or "") .. "'" }, binary)
   assert(vim.uv.fs_chmod(binary, 493))
   local observations = { start = {}, ok = {}, warn = {}, error = {} }
-  local calls = { executable = {}, system = {} }
+  local calls = { executable = {}, system = {}, jobstart = {} }
   local config = require("opencode.config")
   local health = require("opencode.health")
   local old = {
     health = vim.health,
     executable = vim.fn.executable,
+    jobstart = vim.fn.jobstart,
     exists = vim.fn.exists,
     stdpath = vim.fn.stdpath,
     isdirectory = vim.fn.isdirectory,
@@ -37,14 +40,22 @@ local function run_health(spec)
     new_tcp = vim.uv.new_tcp,
     version_ge = vim.version.ge,
     vim_system = vim.system,
+    cwd = vim.uv.cwd,
     binary = config.opts.runtime.binary,
     snacks = package.loaded.snacks,
     snacks_preload = package.preload.snacks,
+    env = {
+      XDG_CONFIG_HOME = vim.env.XDG_CONFIG_HOME,
+      OPENCODE_CONFIG = vim.env.OPENCODE_CONFIG,
+      OPENCODE_CONFIG_DIR = vim.env.OPENCODE_CONFIG_DIR,
+      OPENCODE_CONFIG_CONTENT = vim.env.OPENCODE_CONFIG_CONTENT,
+    },
   }
 
   local function restore()
     vim.health = old.health
     vim.fn.executable = old.executable
+    vim.fn.jobstart = old.jobstart
     vim.fn.exists = old.exists
     vim.fn.stdpath = old.stdpath
     vim.fn.isdirectory = old.isdirectory
@@ -56,10 +67,18 @@ local function run_health(spec)
     vim.uv.new_tcp = old.new_tcp
     vim.version.ge = old.version_ge
     vim.system = old.vim_system
+    vim.uv.cwd = old.cwd
     config.opts.runtime.binary = old.binary
     package.loaded.snacks = old.snacks
     package.preload.snacks = old.snacks_preload
+    vim.env.XDG_CONFIG_HOME = old.env.XDG_CONFIG_HOME
+    vim.env.OPENCODE_CONFIG = old.env.OPENCODE_CONFIG
+    vim.env.OPENCODE_CONFIG_DIR = old.env.OPENCODE_CONFIG_DIR
+    vim.env.OPENCODE_CONFIG_CONTENT = old.env.OPENCODE_CONFIG_CONTENT
     vim.uv.fs_unlink(binary)
+    if spec.root == nil then
+      vim.fn.delete(root, "rf")
+    end
   end
 
   vim.health = {
@@ -77,6 +96,13 @@ local function run_health(spec)
     end,
   }
   config.opts.runtime.binary = binary
+  vim.uv.cwd = function()
+    return root
+  end
+  vim.env.XDG_CONFIG_HOME = root .. "/config"
+  vim.env.OPENCODE_CONFIG = nil
+  vim.env.OPENCODE_CONFIG_DIR = nil
+  vim.env.OPENCODE_CONFIG_CONTENT = spec.config_content
   vim.fn.executable = function(name)
     table.insert(calls.executable, name)
     if name == binary and spec.opencode_available == false then
@@ -90,6 +116,10 @@ local function run_health(spec)
       return 0
     end
     return 1
+  end
+  vim.fn.jobstart = function(command)
+    table.insert(calls.jobstart, vim.deepcopy(command))
+    return -1
   end
   vim.fn.exists = function()
     return spec.terminal_available == false and 0 or 1
@@ -254,6 +284,55 @@ T["AC-SEC-02 health reports actionable local capability failures without discove
     )
     assert_private_health(supported, supported_calls)
   end
+end
+
+T["health passively reports config classes without config content or paths"] = function()
+  local fixtures = {
+    {
+      name = "custom plugin",
+      content = '{"plugin":{"private-plugin":"PLUGIN_SECRET_BODY"}}',
+      error = "custom OpenCode plugins are blocked; use a clean config for this plugin; see docs/RECOVERY.md",
+      secret = "PLUGIN_SECRET_BODY",
+    },
+    {
+      name = "custom tool",
+      content = '{"tool":{"private-tool":"TOOL_SECRET_BODY"}}',
+      error = "custom OpenCode tools are blocked; use a clean config for this plugin; see docs/RECOVERY.md",
+      secret = "TOOL_SECRET_BODY",
+    },
+    {
+      name = "enabled MCP",
+      content = '{"mcp":{"private-mcp":{"command":"MCP_SECRET_BODY"}}}',
+      error = "enabled OpenCode MCPs are blocked; disable them or use a clean config for this plugin; see docs/RECOVERY.md",
+      secret = "MCP_SECRET_BODY",
+    },
+    {
+      name = "malformed config",
+      content = '{"broken":"MALFORMED_SECRET_BODY"',
+      error = "OpenCode config could not be parsed; fix it or use a clean config; see docs/RECOVERY.md",
+      secret = "MALFORMED_SECRET_BODY",
+    },
+  }
+
+  for _, fixture in ipairs(fixtures) do
+    local observations, calls = run_health({ config_content = fixture.content })
+    eq(contains(observations.error, fixture.error), true, fixture.name)
+    local output = {}
+    for _, level in ipairs({ "start", "ok", "warn", "error" }) do
+      vim.list_extend(output, observations[level])
+    end
+    local text = table.concat(output, "\n")
+    eq(text:find(fixture.secret, 1, true), nil, fixture.name)
+    eq(text:find("health-private-path", 1, true), nil, fixture.name)
+    assert_private_health(observations, calls)
+    eq(#calls.jobstart, 0, fixture.name)
+  end
+
+  local clean, clean_calls = run_health({ config_content = '{"mcp":{"disabled":{"enabled":false}}}' })
+  eq(contains(clean.ok, "local OpenCode config contains no custom plugins, custom tools, or enabled MCPs"), true)
+  eq(contains(clean.error, "local OpenCode config is blocked"), false)
+  assert_private_health(clean, clean_calls)
+  eq(#clean_calls.jobstart, 0)
 end
 
 return T

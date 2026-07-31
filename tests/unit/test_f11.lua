@@ -70,6 +70,81 @@ T["notification templates deduplicate without content or focus changes"] = funct
   vim.notify = original
 end
 
+T["structured startup notifications keep only safe actionable transport details"] = function()
+  local notify = require("opencode.ui.notify")
+  local original = vim.notify
+  local messages = {}
+  vim.notify = function(message)
+    table.insert(messages, message)
+  end
+
+  local ok, failure = xpcall(function()
+    local cases = {
+      { error_class = "custom_plugin", expected = "custom OpenCode plugins are blocked" },
+      { error_class = "custom_tool", expected = "custom OpenCode tools are blocked" },
+      { error_class = "enabled_mcp", expected = "enabled OpenCode MCPs are blocked" },
+      { error_class = "config_parse", expected = "OpenCode config could not be parsed" },
+      {
+        error_class = "http",
+        endpoint = "https://user:credential@example.test/session/private-id?token=secret",
+        status = 503,
+        body = "HTTP_RESPONSE_SECRET",
+        message = "raw exception /private/project",
+        expected = "OpenCode request failed",
+        details = { "endpoint=/session", "status=503" },
+      },
+      {
+        error_class = "timeout",
+        endpoint = "http://user:credential@example.test/health/private-id?token=secret",
+        timeout = 2500,
+        body = "TIMEOUT_RESPONSE_SECRET",
+        message = "raw timeout exception /private/project",
+        expected = "OpenCode request timed out",
+        details = { "endpoint=/health" },
+      },
+      {
+        error_class = "decode",
+        endpoint = "http://user:credential@example.test/doc?token=secret",
+        status = 700,
+        body = "DECODE_RESPONSE_SECRET",
+        message = "raw decode exception /private/project",
+        expected = "OpenCode returned an invalid response",
+        details = { "endpoint=/doc" },
+      },
+      { error_class = "server_spawn", expected = "owned OpenCode startup failed" },
+      { error_class = "startup_timeout", expected = "owned OpenCode startup timed out" },
+      { error_class = "unsupported_version", expected = "unsupported OpenCode version" },
+    }
+
+    for _, case in ipairs(cases) do
+      notify.error(case)
+      local message = messages[#messages]
+      eq(message:find(case.expected, 1, true) ~= nil, true, case.error_class)
+      for _, detail in ipairs(case.details or {}) do
+        eq(message:find(detail, 1, true) ~= nil, true, case.error_class)
+      end
+      for _, secret in ipairs({
+        "HTTP_RESPONSE_SECRET",
+        "TIMEOUT_RESPONSE_SECRET",
+        "DECODE_RESPONSE_SECRET",
+        "credential",
+        "secret",
+        "raw exception",
+        "/private/project",
+      }) do
+        eq(message:find(secret, 1, true), nil, case.error_class .. " leaked " .. secret)
+      end
+      eq(message:find("status=700", 1, true), nil, case.error_class)
+    end
+
+    notify.error("raw exception /private/project with credential")
+    eq(messages[#messages], "OpenCode: error")
+  end, debug.traceback)
+
+  vim.notify = original
+  assert(ok, failure)
+end
+
 T["configuration validation exposes only documented source scopes"] = function()
   local config = require("opencode.config")
   eq(select(1, config.validate({ runtime = { binary = "opencode", startup_timeout = 1 } })), true)

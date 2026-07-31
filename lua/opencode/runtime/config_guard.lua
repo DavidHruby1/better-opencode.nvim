@@ -78,21 +78,14 @@ function M.decode(text)
   return value
 end
 
----Checks a config value for executable extensions and enabled MCP servers.
+---Checks a config value for custom tool definitions.
+---Plugin and MCP entries are left to OpenCode because they do not extend the proposal tool boundary.
 ---@param config table
 ---@return boolean
 ---@return string?
 function M.validate(config)
-  if next(config.plugin or config.plugins or {}) then
-    return false, "custom_plugin"
-  end
   if next(config.tool or config.tools or {}) then
     return false, "custom_tool"
-  end
-  for _, value in pairs(config.mcp or {}) do
-    if type(value) ~= "table" or value.enabled ~= false then
-      return false, "enabled_mcp"
-    end
   end
   return true
 end
@@ -130,8 +123,8 @@ local function config_files(root)
   return files
 end
 
----Lists every documented directory where OpenCode can discover executable plugins or tools.
----Global, project, and custom config roots are all included so the passive guard runs before any code can load.
+---Lists every documented directory where OpenCode can discover custom tools.
+---Plugin directories are ignored because only tools extend the proposal boundary.
 local function extension_dirs(root)
   local home = vim.uv.os_homedir()
   local config_home = vim.env.XDG_CONFIG_HOME or (home .. "/.config")
@@ -141,15 +134,15 @@ local function extension_dirs(root)
   end
   local dirs = {}
   for _, base in ipairs(roots) do
-    for _, name in ipairs({ "plugin", "plugins", "tool", "tools" }) do
+    for _, name in ipairs({ "tool", "tools" }) do
       table.insert(dirs, base .. "/" .. name)
     end
   end
   return dirs
 end
 
----Passively scans documented config files and executable extension directories.
----It only reads data and directory entries, so custom code cannot run before the owned server starts.
+---Passively scans documented config files and custom tool directories.
+---It parses config without loading plugins or MCPs and rejects tools before the owned server starts.
 ---@param root string
 ---@return boolean
 ---@return string?
@@ -173,7 +166,7 @@ function M.scan(root)
   for _, dir in ipairs(extension_dirs(root)) do
     local handle = vim.uv.fs_scandir(dir)
     if handle and vim.uv.fs_scandir_next(handle) then
-      return false, dir:match("tools?$") and "custom_tool" or "custom_plugin"
+      return false, "custom_tool"
     end
   end
   return true

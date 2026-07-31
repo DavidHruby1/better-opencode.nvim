@@ -201,19 +201,12 @@ function Runtime:transition(state)
   return true
 end
 
----Rejects effective remote configuration that would add tools or MCP capabilities to the owned proposal boundary.
+---Rejects effective remote configuration that enables tools outside the compatible profile.
+---Plugins and MCPs remain OpenCode-owned because they do not extend the proposal tool boundary.
 local function config_valid(runtime, config)
-  if next(config.plugin or config.plugins or {}) then
-    return false, "custom_plugin"
-  end
   for name, enabled in pairs(config.tools or {}) do
     if enabled ~= false and not runtime.profile.tools[name] then
       return false, "custom_tool"
-    end
-  end
-  for _, mcp in pairs(config.mcp or {}) do
-    if type(mcp) ~= "table" or mcp.enabled ~= false then
-      return false, "enabled_mcp"
     end
   end
   return true

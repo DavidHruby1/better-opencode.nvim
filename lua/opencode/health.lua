@@ -4,8 +4,9 @@ local function executable(name)
   return vim.fn.executable(name) == 1
 end
 
-local function opencode_version()
-  local binary = require("opencode.config").opts.runtime.binary
+---Reads the local OpenCode executable's version without starting or contacting a Server.
+---Only the trimmed command output is returned; callers compare it with the fixed compatibility profiles before reporting it.
+local function opencode_version(binary)
   if not executable(binary) then
     return nil
   end
@@ -36,12 +37,10 @@ local function parser_capability()
   return false, language
 end
 
----Collects local capability facts without starting OpenCode, discovering processes, or changing Runtime state.
----The report contains only booleans, exact supported profile metadata, and safe config source scopes for health UI.
+---Collects local capability and OpenCode config facts without starting a Server or initializing Runtime state.
+---The version probe is a local command; the passive config guard matches startup's root and environment.
 ---@return table
 function M.capabilities()
-  local version = opencode_version()
-  local profile = version and require("opencode.compat")[version] or nil
   local parser_ok, parser_name = parser_capability()
   local snacks_ok, snacks = pcall(require, "snacks")
   local snack_input = snacks_ok
@@ -53,6 +52,10 @@ function M.capabilities()
     and snacks.config.get
     and snacks.config.get("picker", {}).enabled == true
   local config = require("opencode.config")
+  local version = opencode_version(config.opts.runtime.binary)
+  local profile = version and require("opencode.compat")[version] or nil
+  local root = require("opencode.runtime.root").realpath(vim.uv.cwd() or vim.fn.getcwd())
+  local guard_ok, guard_error = require("opencode.runtime.config_guard").scan(root)
   return {
     nvim_ok = vim.version.ge(vim.version(), { 0, 11, 0 }),
     opencode_ok = version ~= nil,
@@ -71,6 +74,8 @@ function M.capabilities()
     state_dir_ok = writable_directory(vim.fn.stdpath("state") .. "/opencode.nvim"),
     temp_dir_ok = writable_directory(vim.fn.stdpath("state") .. "/opencode.nvim/runtimes"),
     config_error = config.validation_error,
+    config_guard_ok = guard_ok,
+    config_guard_error = guard_error,
   }
 end
 
@@ -87,21 +92,30 @@ function M.loopback_available()
 end
 
 local function report_config(report)
-  if not report.config_error then
-    vim.health.ok("documented configuration shape")
-    return
-  end
-  vim.health.error(
-    string.format(
-      "unsupported configuration at %s (%s); see docs/RECOVERY.md",
-      report.config_error.scope,
-      report.config_error.reason
+  if report.config_error then
+    vim.health.error(
+      string.format(
+        "unsupported configuration at %s (%s); see docs/RECOVERY.md",
+        report.config_error.scope,
+        report.config_error.reason
+      )
     )
-  )
+  else
+    vim.health.ok("documented plugin configuration shape")
+  end
+  local messages = {
+    config_parse = "OpenCode config could not be parsed; fix it or use a clean config",
+    custom_tool = "custom OpenCode tools are blocked; use a clean config for this plugin",
+  }
+  if report.config_guard_ok then
+    vim.health.ok("local OpenCode config parsed; plugins and MCPs are ignored; custom tools remain blocked")
+  else
+    vim.health.error((messages[report.config_guard_error] or "local OpenCode config is blocked") .. "; see docs/RECOVERY.md")
+  end
 end
 
----Reports hard dependencies and actionable warnings for the selected exact OpenCode compatibility profile.
----All probes are local and bounded: no MCP startup, plugin import, foreign attach, pgrep, or lsof is used.
+---Reports hard dependencies and actionable warnings without starting a Server, MCP, plugin, or tool.
+---The only external probes read the local OpenCode version and exercise Git with empty /dev/null operands.
 function M.check()
   vim.health.start("opencode.nvim")
   local report = M.capabilities()
@@ -130,10 +144,13 @@ function M.check()
     vim.health.error("curl is required; install curl and restart Neovim")
   end
   if report.git_ok then
-    local probe = vim
-      .system({ "git", "merge-file", "-p", "--diff3", "/dev/null", "/dev/null", "/dev/null" }, { text = true })
+    local result = vim
+      .system(
+        { "git", "merge-file", "-p", "--diff3", "/dev/null", "/dev/null", "/dev/null" },
+        { text = true }
+      )
       :wait()
-    if probe.code == 0 then
+    if result.code == 0 then
       vim.health.ok("git merge-file -p --diff3 available")
     else
       vim.health.error("git merge-file file-operand mode is required; install a complete Git")
@@ -141,14 +158,12 @@ function M.check()
   else
     vim.health.error("git is required for three-way merge; install Git and restart Neovim")
   end
-  if report.profile then
-    vim.health.ok(
-      string.format("OpenCode %s selected; fixture SHA-256 %s", report.profile.version, report.profile.fixture_sha256)
-    )
-  elseif report.version then
-    vim.health.error("unsupported OpenCode " .. report.version .. "; use exactly 1.17.3 or 1.18.9")
-  else
+  if not report.version then
     vim.health.error("OpenCode executable is unavailable; configure runtime.binary or install exactly 1.17.3 or 1.18.9")
+  elseif report.profile then
+    vim.health.ok("OpenCode " .. report.version .. " selected; fixture SHA-256 " .. report.profile.fixture_sha256)
+  else
+    vim.health.error("unsupported OpenCode " .. report.version .. "; use exactly 1.17.3 or 1.18.9")
   end
   if report.loopback_ok then
     vim.health.ok("loopback bind 127.0.0.1 available")

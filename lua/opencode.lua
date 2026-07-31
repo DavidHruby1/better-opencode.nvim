@@ -3,7 +3,7 @@ local M = {}
 local function notify_error(err)
   local class = type(err) == "table" and err.error_class or "cancelled"
   if class ~= "cancelled" then
-    require("opencode.ui.notify").error(class)
+    require("opencode.ui.notify").error(err)
   end
 end
 
