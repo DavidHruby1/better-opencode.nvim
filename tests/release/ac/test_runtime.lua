@@ -1,4 +1,15 @@
-local T = MiniTest.new_set()
+---Restores every harness after its case, including cases whose assertions abort before explicit teardown.
+local active_harnesses = {}
+local T = MiniTest.new_set({
+  hooks = {
+    post_case = function()
+      for _, harness in ipairs(active_harnesses) do
+        harness.restore()
+      end
+      active_harnesses = {}
+    end,
+  },
+})
 local eq = MiniTest.expect.equality
 local Runtime = require("opencode.runtime")
 local Promise = require("opencode.promise")
@@ -13,9 +24,12 @@ local function await(promise, timeout)
     :catch(function(reason)
       error, done = reason, true
     end)
-  eq(vim.wait(timeout or 1500, function()
-    return done
-  end), true)
+  eq(
+    vim.wait(timeout or 1500, function()
+      return done
+    end),
+    true
+  )
   return value, error
 end
 
@@ -36,23 +50,28 @@ end
 
 ---Builds a Runtime with fake process, HTTP, config, reconciliation, and sidebar boundaries.
 ---The fakes retain argv, request order, ownership, and lifecycle facts for outer-boundary assertions.
+---Each harness redirects state-backed manifests and logs to a disposable root and verifies teardown.
 ---@param spec? table
 ---@return table
 local function runtime_harness(spec)
   spec = spec or {}
   local root = spec.root or temp_root()
+  local state_root = temp_root()
   local calls = { client = {}, jobs = {}, jobstops = {}, tui = {}, manifests = {}, aborts = {}, selected_sessions = {} }
   local saved_modules, saved_functions = {}, {}
   local live, pid_for_job = {}, {}
+  local subscriptions = {}
   local next_job, next_tui = 100, 200
   local old_startup_timeout = require("opencode.config").opts.runtime.startup_timeout
+  local runtime_module = spec.Runtime or Runtime
 
   local function replace(name, value)
     saved_modules[name] = package.loaded[name] or false
     package.loaded[name] = value
   end
 
-  local ownership = {
+  local ownership
+  ownership = {
     identity = function(pid)
       if not live[pid] then
         return nil
@@ -78,6 +97,7 @@ local function runtime_harness(spec)
       calls.manifests[path] = vim.deepcopy(manifest)
       vim.fn.mkdir(vim.fs.dirname(path), "p")
       vim.fn.writefile({ vim.json.encode(manifest) }, path)
+      vim.fn.setfperm(path, "rw-------")
     end,
     shutdown = function(path)
       if vim.uv.fs_stat(path) then
@@ -86,7 +106,11 @@ local function runtime_harness(spec)
       return true
     end,
     cleanup_stale_manifests = function()
-      return true
+      calls.stale_cleanups = (calls.stale_cleanups or 0) + 1
+      if type(spec.cleanup_stale_manifests) == "function" then
+        return spec.cleanup_stale_manifests(calls.stale_cleanups)
+      end
+      return spec.cleanup_stale_manifests == nil and true or spec.cleanup_stale_manifests
     end,
   }
 
@@ -125,11 +149,32 @@ local function runtime_harness(spec)
   end
   function client:agents()
     table.insert(calls.client, "agents")
-    return result(spec.agents or {})
+    return result(spec.agents or { { name = "build", mode = "primary" }, { name = "plan", mode = "primary" } })
   end
-  function client:subscribe()
+  function client:subscribe(on_event, on_exit, options)
     table.insert(calls.client, "subscribe")
-    return 901
+    local subscription = { on_event = on_event, on_exit = on_exit, options = options, handle = 901 + #subscriptions }
+    table.insert(subscriptions, subscription)
+    if spec.sse_connected ~= false then
+      local connected = function()
+        if subscription.on_event then
+          subscription.on_event({ type = "server.connected", properties = {} })
+        end
+      end
+      if spec.sse_connected_at == "immediate" then
+        connected()
+      else
+        vim.schedule(connected)
+      end
+    end
+    if spec.sse_exit_before_connected then
+      vim.schedule(function()
+        if subscription.on_exit then
+          subscription.on_exit(spec.sse_exit_code or 1)
+        end
+      end)
+    end
+    return subscription.handle
   end
   function client:cancel_requests()
     calls.client_cancelled = true
@@ -210,6 +255,9 @@ local function runtime_harness(spec)
             vim.fn.jobstop(self.job)
           end
           if self.buf and vim.api.nvim_buf_is_valid(self.buf) then
+            if self.terminal_channel then
+              pcall(vim.fn.chanclose, self.terminal_channel)
+            end
             vim.api.nvim_buf_delete(self.buf, { force = true })
           end
           self.job, self.buf = nil, nil
@@ -225,14 +273,39 @@ local function runtime_harness(spec)
         is_visible = function()
           return false
         end,
+        valid_terminal = function(self)
+          return self.job ~= nil
+            and self.job > 0
+            and self.buf ~= nil
+            and vim.api.nvim_buf_is_valid(self.buf)
+            and vim.bo[self.buf].buftype == "terminal"
+        end,
       }
-      calls.tui = { runtime = runtime, command = { require("opencode.config").opts.runtime.binary, "attach", client.url, "--dir", root } }
+      sidebar.terminal_channel = vim.api.nvim_open_term(sidebar.buf, {})
+      if spec.tui_exit_before_ready then
+        vim.defer_fn(function()
+          runtime:handle_tui_exit(runtime.tui_generation)
+        end, 1)
+      end
+      calls.tui = {
+        runtime = runtime,
+        command = { require("opencode.config").opts.runtime.binary, "attach", client.url, "--dir", root },
+      }
       calls.tui_starts = (calls.tui_starts or 0) + 1
       return sidebar
     end,
   })
 
-  saved_functions.jobstart, saved_functions.jobpid, saved_functions.jobstop = vim.fn.jobstart, vim.fn.jobpid, vim.fn.jobstop
+  saved_functions.jobstart, saved_functions.jobpid, saved_functions.jobstop, saved_functions.jobwait =
+    vim.fn.jobstart, vim.fn.jobpid, vim.fn.jobstop, vim.fn.jobwait
+  saved_functions.chanclose = vim.fn.chanclose
+  saved_functions.stdpath = vim.fn.stdpath
+  vim.fn.stdpath = function(kind)
+    if kind == "state" then
+      return state_root
+    end
+    return saved_functions.stdpath(kind)
+  end
   vim.fn.jobstart = function(argv, options)
     next_job = next_job + 1
     local job = next_job
@@ -249,22 +322,51 @@ local function runtime_harness(spec)
     live[pid_for_job[job] or job] = false
     return 1
   end
+  vim.fn.jobwait = function(jobs)
+    local result = {}
+    for _, job in ipairs(jobs) do
+      result[#result + 1] = live[pid_for_job[job] or job] and -1 or 0
+    end
+    return result
+  end
   if spec.startup_timeout then
     require("opencode.config").opts.runtime.startup_timeout = spec.startup_timeout
   end
 
-  local runtime = spec.runtime or Runtime.new(root)
-  Runtime.registry[root] = runtime
+  local runtime = spec.runtime or runtime_module.new(root)
+  runtime_module.registry[root] = runtime
 
   local harness = {
     root = root,
+    state_root = state_root,
+    log_path = state_root .. "/opencode.nvim.log",
     runtime = runtime,
     calls = calls,
     live = live,
     ownership = ownership,
   }
+  function harness.emit_sse_event(event)
+    local subscription = subscriptions[#subscriptions]
+    assert(subscription and subscription.on_event, "SSE is not subscribed")
+    subscription.on_event(event)
+  end
+  function harness.emit_sse_exit(code)
+    local subscription = subscriptions[#subscriptions]
+    assert(subscription and subscription.on_exit, "SSE is not subscribed")
+    subscription.on_exit(code or 1)
+  end
+  function harness.emit_sse_connected()
+    harness.emit_sse_event({ type = "server.connected", properties = {} })
+  end
   ---Restores process and module boundaries after the Runtime under test has settled.
   function harness.restore()
+    if harness.restored then
+      return
+    end
+    harness.restored = true
+    if runtime.state ~= "stopped" then
+      runtime:stop()
+    end
     require("opencode.config").opts.runtime.startup_timeout = old_startup_timeout
     for name, value in pairs(saved_modules) do
       package.loaded[name] = value or nil
@@ -272,14 +374,21 @@ local function runtime_harness(spec)
     for name, value in pairs(saved_functions) do
       vim.fn[name] = value
     end
-    Runtime.registry[root] = nil
+    runtime_module.registry[root] = nil
     if vim.api.nvim_buf_is_valid(runtime.sidebar and runtime.sidebar.buf or -1) then
       vim.api.nvim_buf_delete(runtime.sidebar.buf, { force = true })
     end
+    eq(vim.uv.fs_stat(runtime.owner_manifest), nil)
+    eq(vim.uv.fs_stat(runtime.temp_root), nil)
+    vim.fn.delete(harness.log_path)
+    eq(vim.uv.fs_stat(harness.log_path), nil)
     if spec.root == nil then
       vim.fn.delete(root, "rf")
     end
+    vim.fn.delete(state_root, "rf")
+    eq(vim.uv.fs_stat(state_root), nil)
   end
+  table.insert(active_harnesses, harness)
   return harness
 end
 
@@ -380,8 +489,16 @@ T["AC-RUN-05 keeps roots, sidebars, Jobs, and events isolated"] = function()
   local calls = {}
   local runtime_a, runtime_b = Runtime.new(first), Runtime.new(second)
   runtime_a.state, runtime_b.state = "ready", "ready"
-  runtime_a.sidebar = { show_root = function() calls.first = true end }
-  runtime_b.sidebar = { show_root = function() calls.second = true end }
+  runtime_a.sidebar = {
+    show_root = function()
+      calls.first = true
+    end,
+  }
+  runtime_b.sidebar = {
+    show_root = function()
+      calls.second = true
+    end,
+  }
   local session_a = { id = "session-a", active_job_key = "session-a:message-a" }
   local session_b = { id = "session-b", active_job_key = "session-b:message-b" }
   local job_a = {
@@ -410,7 +527,9 @@ T["AC-RUN-05 keeps roots, sidebars, Jobs, and events isolated"] = function()
   eq(calls.second, true)
   runtime_a:route_event({
     type = "message.updated",
-    properties = { info = { sessionID = session_a.id, role = "assistant", parentID = job_a.user_message_id, id = "assistant-a" } },
+    properties = {
+      info = { sessionID = session_a.id, role = "assistant", parentID = job_a.user_message_id, id = "assistant-a" },
+    },
   })
   eq(job_a.assistant_message_ids["assistant-a"], true)
   eq(job_b.assistant_message_ids["assistant-a"], nil)
@@ -432,6 +551,8 @@ T["AC-RUN-06 stops owned processes, Jobs, temp data, and manifest"] = function()
   vim.fn.mkdir(runtime.temp_root, "p")
   vim.fn.writefile({ "private" }, temporary)
   eq(vim.uv.fs_stat(runtime.owner_manifest) ~= nil, true)
+  eq(runtime.owner_manifest:sub(1, #harness.state_root), harness.state_root)
+  eq(vim.uv.fs_stat(harness.log_path) ~= nil, true)
   runtime:stop()
   eq(runtime.state, "stopped")
   eq(job.state, "cancelled")
@@ -505,6 +626,32 @@ T["AC-RUN-07 cleans stale ownership only after identity and root checks"] = func
   vim.uv.fs_unlink(mismatch_path)
 end
 
+T["supplemental stale cleanup retries after the blocking problem is corrected"] = function()
+  local previous_runtime = package.loaded["opencode.runtime"]
+  package.loaded["opencode.runtime"] = nil
+  local fresh_runtime = require("opencode.runtime")
+  package.loaded["opencode.runtime"] = previous_runtime
+
+  local problem_present = true
+  local harness = runtime_harness({
+    Runtime = fresh_runtime,
+    cleanup_stale_manifests = function()
+      return not problem_present
+    end,
+  })
+  local runtime, error = await(harness.runtime:start())
+  eq(runtime, nil)
+  eq(error, { error_class = "manual_cleanup" })
+  eq(harness.calls.stale_cleanups, 1)
+
+  problem_present = false
+  local started, start_error = await(harness.runtime:start())
+  eq(start_error, nil)
+  eq(started.state, "ready")
+  eq(harness.calls.stale_cleanups, 2)
+  harness.restore()
+end
+
 T["AC-RUN-08 recovers TUI without restarting Server or Job"] = function()
   local root = temp_root()
   local runtime = Runtime.new(root)
@@ -530,9 +677,12 @@ T["AC-RUN-08 recovers TUI without restarting Server or Job"] = function()
     end,
   }
   runtime:handle_tui_exit(4)
-  eq(vim.wait(1000, function()
-    return selected ~= nil
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return selected ~= nil
+    end),
+    true
+  )
   eq(runtime.sidebar_command, { "opencode", "attach", "http://127.0.0.1:4300", "--dir", root })
   eq(selected, runtime.selected_session_id)
   eq(runtime.server_job, 41)
@@ -541,11 +691,11 @@ T["AC-RUN-08 recovers TUI without restarting Server or Job"] = function()
   vim.fn.delete(root, "rf")
 end
 
-T["AC-RUN-09 blocks passive and effective custom extensions"] = function()
+T["AC-RUN-09 ignores plugins and MCPs but blocks custom tools"] = function()
   for _, entry in ipairs({
-    { config = { plugin = { custom = {} } }, error_class = "custom_plugin" },
-    { config = { tool = { custom = {} } }, error_class = "custom_tool" },
-    { config = { mcp = { custom = { command = "sensitive-command" } } }, error_class = "enabled_mcp" },
+    { config = { plugin = { custom = {} } }, error_class = "server_spawn", starts = 1 },
+    { config = { mcp = { custom = { command = "sensitive-command" } } }, error_class = "server_spawn", starts = 1 },
+    { config = { tool = { custom = {} } }, error_class = "custom_tool", starts = 0 },
   }) do
     local root = temp_root()
     local path = root .. "/opencode.json"
@@ -562,23 +712,36 @@ T["AC-RUN-09 blocks passive and effective custom extensions"] = function()
     eq(started, nil)
     eq(error.error_class, entry.error_class)
     eq(runtime.state, "stopped")
-    eq(starts, 0)
+    eq(starts, entry.starts)
     vim.fn.jobstart = old_jobstart
     Runtime.registry[root] = nil
     vim.fn.delete(root, "rf")
+  end
+
+  for _, config in ipairs({
+    { plugin = { custom = {} } },
+    { mcp = { custom = { command = "sensitive-command" } } },
+  }) do
+    local harness = runtime_harness({ config = config })
+    local runtime, error = await(harness.runtime:start())
+    eq(error, nil)
+    eq(runtime.state, "ready")
+    eq(contains(harness.calls.client, "config"), true)
+    eq(contains(harness.calls.client, "subscribe"), true)
+    harness.restore()
   end
 
   local harness = runtime_harness({ config = { tools = { custom = true } } })
   local runtime, error = await(harness.runtime:start())
   eq(runtime, nil)
   eq(error.error_class, "custom_tool")
-  eq(harness.calls.client.subscribe, nil)
-  eq(harness.calls.client.mcp, nil)
+  eq(contains(harness.calls.client, "subscribe"), false)
   harness.restore()
 end
 
 T["AC-EVT-05 disconnects on Server crash and restarts with fail-closed reconciliation"] = function()
-  local harness = runtime_harness({ real_reconcile = true, inventory = {}, session_status = { crashed = "idle" }, messages = {} })
+  local harness =
+    runtime_harness({ real_reconcile = true, inventory = {}, session_status = { crashed = "idle" }, messages = {} })
   local runtime, error = await(harness.runtime:start())
   eq(error, nil)
   local old_client = runtime.client
@@ -617,6 +780,72 @@ T["AC-EVT-05 disconnects on Server crash and restarts with fail-closed reconcili
   eq(contains(harness.calls.client, "questions"), true)
   eq(contains(harness.calls.client, "permissions"), true)
   harness.restore()
+end
+
+T["startup readiness waits for server.connected before exposing SSE"] = function()
+  local harness = runtime_harness({ sse_connected = false })
+  local readiness = harness.runtime:start()
+  local settled = false
+  readiness
+    :next(function()
+      settled = true
+    end)
+    :catch(function()
+      settled = true
+    end)
+  eq(
+    vim.wait(50, function()
+      return settled
+    end),
+    false
+  )
+  eq(
+    vim.wait(1000, function()
+      return contains(harness.calls.client, "subscribe")
+    end),
+    true
+  )
+  eq({ harness.runtime.sse_live, harness.runtime.tui_live }, { false, false })
+  harness.emit_sse_connected()
+  local runtime, error = await(readiness)
+  eq(error, nil)
+  eq({ runtime.state, runtime.sse_live, runtime.tui_live, runtime.tui_status }, { "ready", true, true, "live" })
+  harness.restore()
+end
+
+T["startup fails closed when SSE exits before its first connected event"] = function()
+  local harness = runtime_harness({ sse_connected = false, sse_exit_before_connected = true })
+  local runtime, error = await(harness.runtime:start())
+  eq(runtime, nil)
+  eq(error, { error_class = "sse_disconnected", status = 1 })
+  eq({ harness.runtime.state, harness.runtime.sse_live, harness.runtime.tui_starts }, { "stopped", false, nil })
+  harness.restore()
+end
+
+T["startup fails closed when the TUI exits before becoming valid"] = function()
+  local harness = runtime_harness({ tui_exit_before_ready = true })
+  local runtime, error = await(harness.runtime:start())
+  eq(runtime, nil)
+  eq(error, { error_class = "tui_attach" })
+  eq(
+    { harness.runtime.state, harness.runtime.sse_live, harness.runtime.tui_live, harness.runtime.tui_status },
+    { "stopped", false, false, "stopped" }
+  )
+  harness.restore()
+end
+
+T["startup requires both primary Build and Plan agents"] = function()
+  for _, agents in ipairs({
+    { { name = "build", mode = "primary" } },
+    { { name = "build", mode = "secondary" }, { name = "plan", mode = "primary" } },
+  }) do
+    local harness = runtime_harness({ agents = agents })
+    local runtime, error = await(harness.runtime:start())
+    eq(runtime, nil)
+    eq(error, { error_class = "agent_unavailable" })
+    eq(harness.runtime.tui_starts, nil)
+    harness.restore()
+  end
 end
 
 return T

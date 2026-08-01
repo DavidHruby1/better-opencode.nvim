@@ -2,6 +2,7 @@
 set -eu
 
 : "${OPENCODE_VERSION:?set OPENCODE_VERSION to 1.17.3 or 1.18.9}"
+: "${SNACKS_PATH:?set SNACKS_PATH to a snacks.nvim checkout}"
 
 source_data=${XDG_DATA_HOME:-"$HOME/.local/share"}
 source_auth="$source_data/opencode/auth.json"
@@ -17,5 +18,6 @@ XDG_CONFIG_HOME="$temporary/config" \
   XDG_DATA_HOME="$temporary/data" \
   XDG_STATE_HOME="$temporary/state" \
   nvim --headless -u NONE \
+  -c "set rtp+=$SNACKS_PATH" \
   -c "set rtp+=$PWD" \
   -c "lua local ok, err = pcall(dofile, 'tests/e2e/smoke.lua'); if not ok then vim.api.nvim_err_writeln(tostring(err)); vim.cmd('cquit 1') end"

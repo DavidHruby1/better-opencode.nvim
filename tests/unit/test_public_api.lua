@@ -30,8 +30,8 @@ end
 T["public ask dispatches explicit Plan and default Build modes"] = function()
   local ask_calls, prompt_calls = {}, {}
   local runtime = {
-    accepts_prompts = function()
-      return true
+    prompt_blocker = function()
+      return nil
     end,
   }
   local context_module = {
@@ -46,11 +46,23 @@ T["public ask dispatches explicit Plan and default Build modes"] = function()
 
   with_modules({
     ["opencode.context"] = context_module,
-    ["opencode.context.preflight"] = { run = function(context) return Promise.resolve(context) end },
-    ["opencode.runtime"] = { get_or_start = function() return Promise.resolve(runtime) end },
+    ["opencode.context.preflight"] = {
+      run = function(context)
+        return Promise.resolve(context)
+      end,
+    },
+    ["opencode.runtime"] = {
+      acquire = function()
+        return runtime, Promise.resolve(runtime)
+      end,
+    },
     ["opencode.ui.ask"] = {
-      ask = function(default, context, mode, opts)
-        table.insert(ask_calls, { default = default, context = context, mode = mode, opts = opts })
+      ask = function(default, context, mode, opts, readiness, submit)
+        table.insert(
+          ask_calls,
+          { default = default, context = context, mode = mode, opts = opts, readiness = readiness }
+        )
+        submit(mode .. " input")
         return Promise.resolve(mode .. " input")
       end,
     },
@@ -61,8 +73,10 @@ T["public ask dispatches explicit Plan and default Build modes"] = function()
       end,
     },
   }, function()
-    opencode.ask(nil, { mode = "plan" })
-    opencode.ask()
+    local plan = opencode.ask(nil, { mode = "plan" })
+    local build = opencode.ask()
+    eq(type(plan.next), "function")
+    eq(type(build.next), "function")
   end)
 
   eq(#prompt_calls, 2)
@@ -72,6 +86,21 @@ T["public ask dispatches explicit Plan and default Build modes"] = function()
   eq(ask_calls[2].mode, "build")
   eq(prompt_calls[2].text, "build input")
   eq(prompt_calls[2].opts, nil)
+end
+
+T["operator rejects an invalid mode before installing an operator"] = function()
+  local opencode = require("opencode")
+  local original_notify = vim.notify
+  local message
+  local original_operator = vim.o.operatorfunc
+  vim.notify = function(value)
+    message = value
+  end
+  local result = opencode.operator("ignored", { mode = "review" })
+  vim.notify = original_notify
+  eq(result, "")
+  eq(message:find("mode_unavailable", 1, true) ~= nil, true)
+  eq(vim.o.operatorfunc, original_operator)
 end
 
 T["public startup rejection reaches the safe notification boundary"] = function()
@@ -98,8 +127,8 @@ T["public startup rejection reaches the safe notification boundary"] = function(
         end,
       },
       ["opencode.runtime"] = {
-        get_or_start = function()
-          return Promise.reject(rejection)
+        acquire = function()
+          return nil, Promise.reject(rejection)
         end,
       },
     }, function()

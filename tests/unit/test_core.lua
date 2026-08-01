@@ -15,13 +15,14 @@ T["JSONC preserves comment-like strings"] = function()
   eq(guard.validate(value), true)
 end
 
-T["config rejects executable extensions"] = function()
+T["config ignores plugins and MCPs but rejects custom tools"] = function()
   local guard = require("opencode.runtime.config_guard")
-  eq(select(2, guard.validate({ plugin = { "x" } })), "custom_plugin")
-  eq(select(2, guard.validate({ mcp = { x = { enabled = true } } })), "enabled_mcp")
+  eq(guard.validate({ plugin = { "x" }, mcp = { x = { enabled = true } } }), true)
+  eq(guard.validate({ plugins = { x = "plugin.js" }, mcp = { x = { command = "secret" } } }), true)
+  eq(select(2, guard.validate({ tool = { "x" } })), "custom_tool")
 end
 
-T["config guard scans standard global executable directories"] = function()
+T["config guard ignores plugin directories and scans tool directories"] = function()
   local root = vim.fn.tempname()
   local home = root .. "/home"
   local config_home = root .. "/config"
@@ -31,15 +32,37 @@ T["config guard scans standard global executable directories"] = function()
   local old_home, old_config = vim.env.HOME, vim.env.XDG_CONFIG_HOME
   vim.env.HOME, vim.env.XDG_CONFIG_HOME = home, config_home
   local ok, reason = require("opencode.runtime.config_guard").scan(root)
+  vim.fn.mkdir(config_home .. "/opencode/tools", "p")
+  vim.fn.writefile({ "return {}" }, config_home .. "/opencode/tools/unsafe.lua")
+  local tool_ok, tool_reason = require("opencode.runtime.config_guard").scan(root)
   vim.env.HOME, vim.env.XDG_CONFIG_HOME = old_home, old_config
   vim.fn.delete(root, "rf")
-  eq({ ok, reason }, { false, "custom_plugin" })
+  eq({ ok, reason }, { true, nil })
+  eq({ tool_ok, tool_reason }, { false, "custom_tool" })
 end
 
 T["message IDs and Job keys are OpenCode compatible"] = function()
   local job = require("opencode.job").new("ses_1", { root = "/r", buf = 1, path = "/r/a" })
   eq(job.user_message_id:match("^msg_[0-9A-HJKMNP-TV-Z]+$") ~= nil, true)
   eq(job.key, "ses_1:" .. job.user_message_id)
+end
+
+T["Promise executor errors become rejections"] = function()
+  local rejection
+  require("opencode.promise")
+    .new(function()
+      error("executor failed")
+    end)
+    :catch(function(reason)
+      rejection = reason
+    end)
+  eq(
+    vim.wait(100, function()
+      return rejection ~= nil
+    end),
+    true
+  )
+  eq(tostring(rejection):find("executor failed", 1, true) ~= nil, true)
 end
 
 T["permission profile keeps hard denies last"] = function()
@@ -97,7 +120,9 @@ T["assistant routing keeps old turn identity during Session reuse"] = function()
   runtime.sessions.ses_1 = { id = "ses_1", active_job_key = current.key }
   runtime:route_event({
     type = "message.updated",
-    properties = { info = { id = "msg_assistant_old", role = "assistant", sessionID = "ses_1", parentID = old.user_message_id } },
+    properties = {
+      info = { id = "msg_assistant_old", role = "assistant", sessionID = "ses_1", parentID = old.user_message_id },
+    },
   })
   runtime:route_event({
     type = "message.updated",
@@ -143,7 +168,12 @@ T["disk decoding preserves empty and trailing logical lines"] = function()
   eq(snapshot.decode_disk("a\r\n", { fileformat = "dos", endofline = true }), "a")
   eq(select(2, snapshot.decode_disk("a\r\nb\n", { fileformat = "dos", endofline = true })), "mixed_eol")
   eq(snapshot.valid_utf8("až中"), true)
-  for _, invalid in ipairs({ string.char(0x80), string.char(0xc0, 0x80), string.char(0xed, 0xa0, 0x80), string.char(0xf4, 0x90, 0x80, 0x80) }) do
+  for _, invalid in ipairs({
+    string.char(0x80),
+    string.char(0xc0, 0x80),
+    string.char(0xed, 0xa0, 0x80),
+    string.char(0xf4, 0x90, 0x80, 0x80),
+  }) do
     eq(snapshot.valid_utf8(invalid), false)
   end
 end
@@ -252,7 +282,11 @@ T["merge backend reports clean, conflict, and process failure"] = function()
     end)
   eq(
     vim.wait(1000, function()
-      return results.clean and results.conflict and results.error and results.invocation_error and results.non_conflict_exit
+      return results.clean
+        and results.conflict
+        and results.error
+        and results.invocation_error
+        and results.non_conflict_exit
     end),
     true
   )
@@ -403,9 +437,12 @@ T["cancel one is local and isolated even when abort fails"] = function()
   require("opencode.job").cancel(runtime, a.key):next(function(value)
     report = value
   end)
-  eq(vim.wait(100, function()
-    return report ~= nil
-  end), true)
+  eq(
+    vim.wait(100, function()
+      return report ~= nil
+    end),
+    true
+  )
   eq({ a.state, b.state, report.cancelled, report.errors }, { "cancelled", "running", 1, 1 })
   eq(runtime.sessions.ses_a.active_job_key, nil)
   eq(runtime.sessions.ses_b.active_job_key, b.key)

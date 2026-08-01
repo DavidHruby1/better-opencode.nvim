@@ -19,6 +19,22 @@ T["unsupported unnamed buffer fails before Runtime"] = function()
   eq(select(2, require("opencode.context").capture()), "unnamed_buffer")
 end
 
+T["context file read failure returns disk_read"] = function()
+  local path = vim.fn.tempname()
+  vim.fn.writefile({ "read me" }, path)
+  vim.cmd.edit(path)
+  local snapshot = require("opencode.snapshot")
+  local old_read_raw = snapshot.read_raw
+  snapshot.read_raw = function()
+    return nil
+  end
+  local capture, error = require("opencode.context").capture()
+  snapshot.read_raw = old_read_raw
+  eq({ capture, error }, { nil, "disk_read" })
+  vim.cmd.bwipeout({ bang = true })
+  vim.uv.fs_unlink(path)
+end
+
 T["extmark scope tracks insertion with configured gravity"] = function()
   local buf = vim.api.nvim_create_buf(true, false)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "alpha", "beta" })
@@ -141,7 +157,8 @@ T["disk races block every automatic and conflict apply path"] = function()
       marks = marks,
       theirs = "one\nTWO\nthree",
     }
-    local runtime = { root = job.root, generation = 1, sessions = { [session.id] = session }, jobs = { [job.key] = job } }
+    local runtime =
+      { root = job.root, generation = 1, sessions = { [session.id] = session }, jobs = { [job.key] = job } }
     return path, buf, job, runtime
   end
   local function cleanup(path, buf, job)
@@ -239,18 +256,27 @@ T["two non-overlapping Jobs apply in either completion order"] = function()
       runtime.sessions[session_id], runtime.jobs[job.key], jobs[name] = session, job, job
     end
     require("opencode.apply").start(jobs[order[1]], runtime)
-    eq(vim.wait(1000, function()
-      return jobs[order[1]].state == "completed"
-    end), true)
+    eq(
+      vim.wait(1000, function()
+        return jobs[order[1]].state == "completed"
+      end),
+      true
+    )
     local remaining = assert(require("opencode.scope").current_range(jobs[order[2]]))
     local current = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
     local expected = order[2] == "a" and "1" or "2"
     eq(current:sub(remaining.start_byte + 1, remaining.end_byte), expected)
     require("opencode.apply").start(jobs[order[2]], runtime)
-    eq(vim.wait(1000, function()
-      return jobs[order[2]].state == "completed"
-    end), true)
-    eq(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"), original:gsub("1", "10", 1):gsub("2", "20", 1))
+    eq(
+      vim.wait(1000, function()
+        return jobs[order[2]].state == "completed"
+      end),
+      true
+    )
+    eq(
+      table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"),
+      original:gsub("1", "10", 1):gsub("2", "20", 1)
+    )
     eq(table.concat(vim.fn.readfile(path), "\n"), original)
     vim.cmd.undo()
     vim.cmd.undo()

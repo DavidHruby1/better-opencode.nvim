@@ -80,9 +80,7 @@ T["structured startup notifications keep only safe actionable transport details"
 
   local ok, failure = xpcall(function()
     local cases = {
-      { error_class = "custom_plugin", expected = "custom OpenCode plugins are blocked" },
       { error_class = "custom_tool", expected = "custom OpenCode tools are blocked" },
-      { error_class = "enabled_mcp", expected = "enabled OpenCode MCPs are blocked" },
       { error_class = "config_parse", expected = "OpenCode config could not be parsed" },
       {
         error_class = "http",
@@ -164,8 +162,7 @@ T["configuration documentation names every supported option"] = function()
     "runtime.reconnect.max_backoff_ms",
     "sidebar.width",
     "contexts",
-    "ask.completion",
-    "ask.snacks",
+    "ask.snacks.win",
     "notify.enabled",
     "notify.opts",
   }) do

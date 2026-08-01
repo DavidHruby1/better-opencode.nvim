@@ -30,9 +30,12 @@ local function await(promise)
     :catch(function(reason)
       err = reason
     end)
-  eq(vim.wait(1000, function()
-    return value ~= nil or err ~= nil
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return value ~= nil or err ~= nil
+    end),
+    true
+  )
   return value, err
 end
 
@@ -54,7 +57,11 @@ local function ready_runtime(root, calls, session_id)
     reconciling = false,
     sessions = {},
     jobs = {},
-    sidebar = { show = function() calls.sidebar_shown = true end },
+    sidebar = {
+      show = function()
+        calls.sidebar_shown = true
+      end,
+    },
     selected_session_id = nil,
   }
   ---Returns one owned Session detail with the exact permission suffix expected before reuse.
@@ -72,6 +79,7 @@ local function ready_runtime(root, calls, session_id)
     create_session = function(_, payload)
       calls.creates = calls.creates + 1
       calls.create_payload = payload
+      table.insert(calls.create_payloads, payload)
       return Promise.resolve(detail(session_id))
     end,
     update_session = function(_, id, payload)
@@ -110,7 +118,69 @@ end
 ---Creates call storage shared by the fake HTTP boundary and keeps assertions about dispatch explicit.
 ---@return table
 local function calls()
-  return { creates = 0, updates = 0, gets = 0, selects = 0, selected = {}, prompts = {} }
+  return { creates = 0, create_payloads = {}, updates = 0, gets = 0, selects = 0, selected = {}, prompts = {} }
+end
+
+---Replaces only the Snacks window constructor so ask tests still exercise the real editor callbacks and Promise flow.
+---The fake owns a real scratch buffer, giving multiline text and close/focus behavior the same observable boundary as a float.
+---@param callback fun(captured: table, window: table)
+local function with_prompt_window(callback)
+  local old_win, old_lsp, old_notify = package.loaded["snacks.win"], vim.lsp.start, vim.notify
+  local captured, fake = {}, {}
+  vim.lsp.start = function() end
+  vim.notify = function() end
+  package.loaded["snacks.win"] = function(opts)
+    for key, value in pairs(opts) do
+      captured[key] = value
+    end
+    local buf = vim.api.nvim_create_buf(true, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(opts.text or "", "\n", { plain = true }))
+    vim.api.nvim_set_current_buf(buf)
+    local opened = {
+      buf = buf,
+      win = vim.api.nvim_get_current_win(),
+      opts = opts,
+      valid = function(self)
+        return self.buf ~= nil and vim.api.nvim_buf_is_valid(self.buf)
+      end,
+      text = function(self)
+        return table.concat(vim.api.nvim_buf_get_lines(self.buf, 0, -1, false), "\n")
+      end,
+      update = function(self)
+        for key, value in pairs(self.opts) do
+          captured[key] = value
+        end
+      end,
+      close = function(self)
+        if self.buf then
+          opts.on_close(self)
+          vim.api.nvim_buf_delete(self.buf, { force = true })
+          self.buf = nil
+        end
+      end,
+    }
+    for key, value in pairs(opened) do
+      fake[key] = value
+    end
+    for _, key in ipairs({ "newline", "newline_fallback", "submit" }) do
+      local mapping = opts.keys[key]
+      vim.keymap.set("i", mapping[1], function()
+        return mapping[2]()
+      end, { buffer = buf, expr = mapping.expr == true })
+    end
+    opts.on_buf(fake)
+    opts.on_win(fake)
+    return fake
+  end
+  local ok, err = xpcall(function()
+    callback(captured, fake)
+  end, debug.traceback)
+  package.loaded["snacks.win"] = old_win
+  vim.lsp.start, vim.notify = old_lsp, old_notify
+  if fake and fake.buf and vim.api.nvim_buf_is_valid(fake.buf) then
+    vim.api.nvim_buf_delete(fake.buf, { force = true })
+  end
+  assert(ok, err)
 end
 
 T["AC-UI-01 inline prompt shows Build root function scope and restores source focus"] = function()
@@ -118,23 +188,158 @@ T["AC-UI-01 inline prompt shows Build root function scope and restores source fo
   vim.api.nvim_win_set_cursor(source_win, { 2, 2 })
   local capture = assert(require("opencode.context").capture())
   local context = require("opencode.context").new(capture, { root = vim.fs.dirname(path) })
-  local original_input = vim.ui.input
-  local input_opts, submitted
-  vim.ui.input = function(opts, callback)
-    input_opts = opts
-    callback("follow-up")
-  end
-
-  submitted = await(require("opencode.ui.ask").ask(nil, context, "build"))
-
-  vim.ui.input = original_input
-  eq(submitted, "follow-up")
-  eq(input_opts.history, false)
-  eq(input_opts.prompt:find("Build", 1, true) ~= nil, true)
-  eq(input_opts.prompt:find(vim.fs.dirname(path), 1, true) ~= nil, true)
-  eq(input_opts.prompt:find("function", 1, true) ~= nil, true)
+  with_prompt_window(function(captured, fake)
+    local result = require("opencode.ui.ask").ask(nil, context, "build")
+    captured.keys.submit_normal[2]()
+    eq(await(result), "")
+    eq(captured.title:find("Build", 1, true) ~= nil, true)
+    eq(captured.title:find(vim.fs.dirname(path), 1, true) ~= nil, true)
+    eq(captured.title:find("function", 1, true) ~= nil, true)
+    eq(fake:text(), "")
+  end)
   eq(vim.api.nvim_get_current_win(), source_win)
-  eq(input_opts.default, nil)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["multiline Enter queues unchanged text until Runtime readiness resolves"] = function()
+  local path, buf, source_win = source_buffer({ "source" }, "text")
+  local context =
+    require("opencode.context").new(assert(require("opencode.context").capture()), { root = vim.fs.dirname(path) })
+  local readiness, resolve = Promise.with_resolvers()
+  local submitted
+  local initial = "first line\nsecond line"
+  with_prompt_window(function(captured, fake)
+    local result = require("opencode.ui.ask").ask(initial, context, "build", nil, readiness, function(text)
+      submitted = text
+      return Promise.resolve(nil)
+    end)
+    captured.keys.submit[2]()
+    eq(
+      vim.wait(50, function()
+        return submitted ~= nil
+      end),
+      false
+    )
+    eq(fake:text(), initial)
+    resolve(true)
+    eq(
+      vim.wait(500, function()
+        return submitted ~= nil
+      end),
+      true
+    )
+    eq(submitted, initial)
+    local value = await(result)
+    eq(value, initial)
+  end)
+  eq(vim.api.nvim_get_current_win(), source_win)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["startup or dispatch failure keeps multiline input available for retry"] = function()
+  local path, buf = source_buffer({ "source" }, "text")
+  local context =
+    require("opencode.context").new(assert(require("opencode.context").capture()), { root = vim.fs.dirname(path) })
+  local readiness = Promise.reject({ error_class = "startup_timeout" })
+  local attempts, submitted = 0, {}
+  local initial = "keep this\nand this"
+  with_prompt_window(function(captured, fake)
+    local result = require("opencode.ui.ask").ask(initial, context, "plan", nil, readiness, function(text)
+      attempts = attempts + 1
+      table.insert(submitted, text)
+      return attempts == 1 and Promise.reject({ error_class = "prompt_http" }) or Promise.resolve(nil)
+    end)
+    eq(
+      vim.wait(500, function()
+        return captured.footer ~= nil
+      end),
+      true
+    )
+    eq(fake:text(), initial)
+    captured.keys.submit[2]()
+    eq(
+      vim.wait(500, function()
+        return attempts == 1
+      end),
+      true
+    )
+    eq(fake:text(), initial)
+    captured.keys.submit[2]()
+    local value = await(result)
+    eq(value, initial)
+    eq(submitted, { initial, initial })
+  end)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["multiline editor mappings create real lines and visible completion is accepted"] = function()
+  local path, buf = source_buffer({ "source" }, "text")
+  local context =
+    require("opencode.context").new(assert(require("opencode.context").capture()), { root = vim.fs.dirname(path) })
+  local old_pumvisible = vim.fn.pumvisible
+  local submitted = 0
+  with_prompt_window(function(captured, fake)
+    local result = require("opencode.ui.ask").ask("first", context, "plan", nil, nil, function()
+      submitted = submitted + 1
+      return Promise.resolve(nil)
+    end)
+    captured.keys.newline[2]()
+    captured.keys.newline_fallback[2]()
+    eq(vim.api.nvim_buf_get_lines(fake.buf, 0, -1, false), { "first", "", "" })
+    vim.fn.pumvisible = function()
+      return 1
+    end
+    eq(captured.keys.submit[2](), "<C-y>")
+    eq(submitted, 0)
+    vim.fn.pumvisible = old_pumvisible
+    captured.keys.submit_normal[2]()
+    eq(await(result), "first\n\n")
+  end)
+  vim.fn.pumvisible = old_pumvisible
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["prompt title follows the selected Build or Plan mode"] = function()
+  local path, buf = source_buffer({ "source" }, "text")
+  local context =
+    require("opencode.context").new(assert(require("opencode.context").capture()), { root = vim.fs.dirname(path) })
+  for _, mode in ipairs({ "build", "plan" }) do
+    with_prompt_window(function(captured)
+      local result = require("opencode.ui.ask").ask(nil, context, mode)
+      local expected = mode:gsub("^%l", string.upper)
+      eq(captured.title:match("^" .. expected), expected)
+      captured.keys.cancel[2]()
+      eq(select(2, await(result)).error_class, "cancelled")
+    end)
+  end
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["prompt geometry stays visible at an edge and grows with multiline input"] = function()
+  local path, buf, source_win = source_buffer({ "edge", "edge", "edge" }, "text")
+  vim.api.nvim_win_set_cursor(source_win, { 3, 4 })
+  local capture = assert(require("opencode.context").capture())
+  local context = require("opencode.context").new(capture, { root = vim.fs.dirname(path) })
+  with_prompt_window(function(captured, fake)
+    local result = require("opencode.ui.ask").ask("one\ntwo", context, "plan")
+    local lines = math.max(vim.o.lines - vim.o.cmdheight, 1)
+    eq(captured.row >= 0, true)
+    eq(captured.col >= 0, true)
+    eq(captured.row + captured.height + 2 <= lines, true)
+    eq(captured.col + captured.width + 2 <= vim.o.columns, true)
+    local old_height = captured.height
+    vim.api.nvim_buf_set_lines(fake.buf, 0, -1, false, { "1", "2", "3", "4", "5", "6", "7", "8" })
+    vim.api.nvim_exec_autocmds("TextChanged", { buffer = fake.buf })
+    eq(captured.height > old_height, true)
+    captured.keys.cancel[2]()
+    local _, error = await(result)
+    eq(error.error_class, "cancelled")
+  end)
   vim.api.nvim_buf_delete(buf, { force = true })
   vim.fn.delete(path)
 end
@@ -180,6 +385,32 @@ T["AC-UI-02 sidebar shows the active root without stealing focus and applies wid
   sidebar:stop()
   config.opts.sidebar.width = old_width
   vim.fn.jobstart = original_jobstart
+  vim.fn.delete(root, "rf")
+end
+
+T["sidebar split uses the captured source window without stealing transient focus"] = function()
+  local root = vim.fn.tempname()
+  vim.fn.mkdir(root, "p")
+  local source_win = vim.api.nvim_get_current_win()
+  local source_buf = vim.api.nvim_get_current_buf()
+  vim.cmd.vsplit()
+  local transient_win = vim.api.nvim_get_current_win()
+  local runtime = { root = root, client = { url = "http://127.0.0.1:1" }, username = "u", password = "p" }
+  local old_jobstart = vim.fn.jobstart
+  vim.fn.jobstart = function()
+    return 4343
+  end
+  local sidebar = assert(require("opencode.ui.sidebar").new(runtime))
+  runtime.sidebar = sidebar
+  sidebar:show_root(runtime, source_win)
+  eq(vim.api.nvim_get_current_win(), transient_win)
+  eq(vim.api.nvim_win_get_buf(sidebar.win), sidebar.buf)
+  eq(vim.api.nvim_win_is_valid(transient_win), true)
+  eq(vim.api.nvim_win_get_buf(source_win), source_buf)
+  sidebar:stop()
+  vim.fn.jobstart = old_jobstart
+  vim.api.nvim_set_current_win(source_win)
+  vim.cmd.only()
   vim.fn.delete(root, "rf")
 end
 
@@ -316,22 +547,45 @@ T["AC-CTX-01 context placeholders resolve file ranges and remain completable"] =
   eq(rendered.plaintext:find("quickfix note", 1, true) ~= nil, true)
   eq(rendered.plaintext:find("value is unusual", 1, true) ~= nil, true)
   eq(context:render("Explain").plaintext:find(path:match("[^/]+$"), 1, true) ~= nil, true)
-  local before = require("opencode.scope").resolve(context, { text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") })
+  local before = require("opencode.scope").resolve(
+    context,
+    { text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") }
+  )
   context:render("@this")
-  local after = require("opencode.scope").resolve(context, { text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") })
+  local after = require("opencode.scope").resolve(
+    context,
+    { text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") }
+  )
   eq({ before.kind, before.start_byte, before.end_byte }, { after.kind, after.start_byte, after.end_byte })
-  local ask = require("opencode.ui.ask")
-  local completion = _G.opencode_completion(nil, "@buf")
-  eq(vim.tbl_contains(completion, "@buffer"), true)
-  local original_input = vim.ui.input
-  local input_opts
-  vim.ui.input = function(opts, callback)
-    input_opts = opts
-    callback("@buf")
-  end
-  await(ask.ask(nil, context, "plan"))
-  vim.ui.input = original_input
-  eq(type(input_opts.highlight("@buf")), "table")
+  with_prompt_window(function(captured, fake)
+    local prompt = require("opencode.ui.ask").ask("@buffer", context, "plan")
+    local completion
+    local server = require("opencode.ui.ask.cmp").cmd()
+    server.request("textDocument/completion", {
+      textDocument = { uri = vim.uri_from_bufnr(fake.buf) },
+    }, function(_, result)
+      completion = result
+    end)
+    eq(
+      vim.wait(100, function()
+        return completion ~= nil
+      end),
+      true
+    )
+    eq(
+      vim.tbl_contains(
+        vim.tbl_map(function(item)
+          return item.label
+        end, completion),
+        "@buffer"
+      ),
+      true
+    )
+    local namespace = vim.api.nvim_get_namespaces().opencode_ask
+    eq(#vim.api.nvim_buf_get_extmarks(fake.buf, namespace, 0, -1, {}) > 0, true)
+    captured.keys.cancel[2]()
+    eq(select(2, await(prompt)).error_class, "cancelled")
+  end)
   vim.api.nvim_set_current_win(source_win)
   vim.cmd.only()
   vim.api.nvim_buf_delete(buf, { force = true })
@@ -346,7 +600,8 @@ T["AC-CTX-02 managed commands reject slash dispatch without duplicating command 
   local call_log = calls()
   local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_ctx_02")
   local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
-  local job = await(require("opencode.api.prompt").prompt("Use the project command and skill", context, { mode = "plan" }))
+  local job =
+    await(require("opencode.api.prompt").prompt("Use the project command and skill", context, { mode = "plan" }))
   eq(#call_log.prompts, 1)
   eq(call_log.prompts[1].parts[1].text:find("#command", 1, true), nil)
   eq(call_log.prompts[1].parts[1].text:find("#skill", 1, true), nil)
@@ -467,9 +722,12 @@ T["AC-CTX-05 unsupported targets fail with a specific reason before Job creation
   end
   vim.cmd.enew()
   require("opencode").prompt("build")
-  eq(vim.wait(100, function()
-    return #notifications > 0
-  end), true)
+  eq(
+    vim.wait(100, function()
+      return #notifications > 0
+    end),
+    true
+  )
   vim.notify = original_notify
   eq(notifications[1]:find("unnamed_buffer", 1, true) ~= nil, true)
   vim.api.nvim_buf_delete(buf, { force = true })
@@ -590,6 +848,26 @@ T["AC-MODE-03 Plan to Build follow-up reuses the Session with a new Job identity
   eq(second_job.base.text, "local value = 1")
   eq(call_log.prompts[2].format.type, "json_schema")
   require("opencode.job").finish(second_job, runtime.sessions.ses_mode_03, "completed")
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["Plan and Build use mode-correct Session titles and payload profiles"] = function()
+  local path, buf = source_buffer({ "local value = 1" }, "lua")
+  local call_log = calls()
+  local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_mode_titles")
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
+  local plan = await(require("opencode.api.prompt").prompt("inspect", context, { mode = "plan", new_session = true }))
+  require("opencode.job").finish(plan, runtime.sessions.ses_mode_titles, "completed")
+  local build = await(require("opencode.api.prompt").prompt("change", context, { mode = "build", new_session = true }))
+
+  eq(call_log.create_payloads[1].title, "Plan " .. vim.fs.basename(path))
+  eq(call_log.create_payloads[2].title, "Build " .. vim.fs.basename(path))
+  eq({ call_log.prompts[1].agent, call_log.prompts[1].format }, { "plan", nil })
+  eq(call_log.prompts[2].agent, "build")
+  eq(call_log.prompts[2].format.type, "json_schema")
+  eq(call_log.prompts[2].format.schema, require("opencode.proposal").schema)
+  require("opencode.job").finish(build, runtime.sessions.ses_mode_titles, "completed")
   vim.api.nvim_buf_delete(buf, { force = true })
   vim.fn.delete(path)
 end

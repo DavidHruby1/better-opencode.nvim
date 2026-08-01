@@ -19,7 +19,10 @@ local function run_health(spec)
   local binary = vim.fn.tempname()
   local root = spec.root or (vim.fn.tempname() .. "/health-private-path")
   vim.fn.mkdir(root, "p")
-  vim.fn.writefile({ "#!/bin/sh", spec.version_error and "exit 1" or "printf '%s\\n' '" .. (spec.version or "") .. "'" }, binary)
+  vim.fn.writefile({
+    "#!/bin/sh",
+    spec.version_error and "exit 1" or "printf '%s\\n' '" .. (spec.version or "") .. "'",
+  }, binary)
   assert(vim.uv.fs_chmod(binary, 493))
   local observations = { start = {}, ok = {}, warn = {}, error = {} }
   local calls = { executable = {}, system = {}, jobstart = {} }
@@ -276,22 +279,19 @@ T["AC-SEC-02 health reports actionable local capability failures without discove
   }) do
     local supported, supported_calls = run_health({ version = profile.version })
     eq(
-      contains(
-        supported.ok,
-        "OpenCode " .. profile.version .. " selected; fixture SHA-256 " .. profile.fixture_sha256
-      ),
+      contains(supported.ok, "OpenCode " .. profile.version .. " selected; fixture SHA-256 " .. profile.fixture_sha256),
       true
     )
     assert_private_health(supported, supported_calls)
   end
 end
 
-T["health passively reports config classes without config content or paths"] = function()
+T["health ignores plugins and MCPs without config content or paths"] = function()
   local fixtures = {
     {
       name = "custom plugin",
       content = '{"plugin":{"private-plugin":"PLUGIN_SECRET_BODY"}}',
-      error = "custom OpenCode plugins are blocked; use a clean config for this plugin; see docs/RECOVERY.md",
+      ok = "local OpenCode config parsed; plugins and MCPs are ignored; custom tools remain blocked",
       secret = "PLUGIN_SECRET_BODY",
     },
     {
@@ -303,7 +303,7 @@ T["health passively reports config classes without config content or paths"] = f
     {
       name = "enabled MCP",
       content = '{"mcp":{"private-mcp":{"command":"MCP_SECRET_BODY"}}}',
-      error = "enabled OpenCode MCPs are blocked; disable them or use a clean config for this plugin; see docs/RECOVERY.md",
+      ok = "local OpenCode config parsed; plugins and MCPs are ignored; custom tools remain blocked",
       secret = "MCP_SECRET_BODY",
     },
     {
@@ -316,7 +316,9 @@ T["health passively reports config classes without config content or paths"] = f
 
   for _, fixture in ipairs(fixtures) do
     local observations, calls = run_health({ config_content = fixture.content })
-    eq(contains(observations.error, fixture.error), true, fixture.name)
+    local messages = fixture.ok or fixture.error
+    local level = fixture.ok and observations.ok or observations.error
+    eq(contains(level, messages), true, fixture.name)
     local output = {}
     for _, level in ipairs({ "start", "ok", "warn", "error" }) do
       vim.list_extend(output, observations[level])
@@ -329,7 +331,10 @@ T["health passively reports config classes without config content or paths"] = f
   end
 
   local clean, clean_calls = run_health({ config_content = '{"mcp":{"disabled":{"enabled":false}}}' })
-  eq(contains(clean.ok, "local OpenCode config contains no custom plugins, custom tools, or enabled MCPs"), true)
+  eq(
+    contains(clean.ok, "local OpenCode config parsed; plugins and MCPs are ignored; custom tools remain blocked"),
+    true
+  )
   eq(contains(clean.error, "local OpenCode config is blocked"), false)
   assert_private_health(clean, clean_calls)
   eq(#clean_calls.jobstart, 0)
