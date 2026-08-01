@@ -61,7 +61,7 @@ local function runtime_harness(spec)
   local saved_modules, saved_functions = {}, {}
   local live, pid_for_job = {}, {}
   local subscriptions = {}
-  local next_job, next_tui = 100, 200
+  local next_job = 100
   local old_startup_timeout = require("opencode.config").opts.runtime.startup_timeout
   local runtime_module = spec.Runtime or Runtime
 
@@ -235,64 +235,34 @@ local function runtime_harness(spec)
     })
   end
   replace("opencode.ui.sidebar", {
+    available = function()
+      return true
+    end,
     new = function(runtime)
-      local pid = next_tui
-      next_tui = next_tui + 1
-      live[pid] = true
-      pid_for_job[pid] = pid
-      local sidebar = {
-        job = pid,
-        buf = vim.api.nvim_create_buf(false, true),
+      return {
+        runtime = runtime,
         show_root = function(_, shown_runtime)
           calls.shown_root = shown_runtime.root
+          return true
         end,
         show = function()
           calls.sidebar_shown = true
+          return true
         end,
-        stop = function(self)
+        stop = function()
           calls.sidebar_stopped = true
-          if self.job then
-            vim.fn.jobstop(self.job)
-          end
-          if self.buf and vim.api.nvim_buf_is_valid(self.buf) then
-            if self.terminal_channel then
-              pcall(vim.fn.chanclose, self.terminal_channel)
-            end
-            vim.api.nvim_buf_delete(self.buf, { force = true })
-          end
-          self.job, self.buf = nil, nil
         end,
-        dead = function(self)
+        dead = function()
           calls.sidebar_dead = true
-          self.job, self.buf = nil, nil
-        end,
-        recover = function()
-          calls.sidebar_recovered = true
-          return Promise.resolve(runtime)
         end,
         is_visible = function()
           return false
         end,
-        valid_terminal = function(self)
-          return self.job ~= nil
-            and self.job > 0
-            and self.buf ~= nil
-            and vim.api.nvim_buf_is_valid(self.buf)
-            and vim.bo[self.buf].buftype == "terminal"
+        select_session = function(_, session_id)
+          table.insert(calls.selected_sessions, session_id)
+          return Promise.resolve(nil)
         end,
       }
-      sidebar.terminal_channel = vim.api.nvim_open_term(sidebar.buf, {})
-      if spec.tui_exit_before_ready then
-        vim.defer_fn(function()
-          runtime:handle_tui_exit(runtime.tui_generation)
-        end, 1)
-      end
-      calls.tui = {
-        runtime = runtime,
-        command = { require("opencode.config").opts.runtime.binary, "attach", client.url, "--dir", root },
-      }
-      calls.tui_starts = (calls.tui_starts or 0) + 1
-      return sidebar
     end,
   })
 
@@ -404,8 +374,9 @@ T["AC-RUN-01 starts one owned root-bound Runtime"] = function()
   eq(harness.calls.jobs[1].argv[4], "127.0.0.1")
   eq(harness.calls.jobs[1].options.cwd, harness.root)
   eq(harness.calls.jobs[1].options.env.OPENCODE_SERVER_PASSWORD, runtime.password)
-  eq(harness.calls.tui.command, { "opencode", "attach", runtime.client.url, "--dir", harness.root })
-  eq(harness.calls.tui_starts, 1)
+  eq(harness.calls.tui_starts, nil)
+  eq(runtime.tui_live, false)
+  eq(runtime.tui_status, "stopped")
   eq(harness.calls.client, { "health", "doc", "path", "config", "agents", "subscribe" })
 
   local fake_runner, command_calls = require("tests.helpers.fake_opencode").runner({
@@ -450,7 +421,7 @@ T["AC-RUN-02 routes requests only to the Runtime-owned endpoint"] = function()
   eq(runtime.client.root, harness.root)
   eq(runtime.client.url:match("^http://127%.0%.0%.1:%d+$") ~= nil, true)
   eq(runtime.client.url:find("foreign", 1, true), nil)
-  eq(harness.calls.tui.command[3], runtime.client.url)
+  eq(harness.calls.tui, {})
   eq(#harness.calls.jobs, 1)
   harness.restore()
 end
@@ -480,7 +451,7 @@ T["AC-RUN-04 times out owned startup and stops partial processes"] = function()
   eq(harness.runtime.state, "stopped")
   eq(#harness.calls.jobs, 1)
   eq(contains(harness.calls.jobstops, harness.calls.jobs[1].job), true)
-  eq(harness.calls.tui.runtime, nil)
+  eq(harness.calls.tui_starts, nil)
   harness.restore()
 end
 
@@ -652,42 +623,23 @@ T["supplemental stale cleanup retries after the blocking problem is corrected"] 
   harness.restore()
 end
 
-T["AC-RUN-08 recovers TUI without restarting Server or Job"] = function()
+T["AC-RUN-08 TUI loss is independent from Server, SSE, and Job state"] = function()
   local root = temp_root()
+  local old_sidebar_module = package.loaded["opencode.ui.sidebar"]
+  package.loaded["opencode.ui.sidebar"] = nil
+  local Sidebar = require("opencode.ui.sidebar")
   local runtime = Runtime.new(root)
-  runtime.state, runtime.sse_live, runtime.tui_generation = "ready", true, 4
-  runtime.username, runtime.password = "opencode", "runtime-secret"
-  runtime.port = 4300
-  runtime.selected_session_id = "session-visible"
-  runtime.sessions[runtime.selected_session_id] = { id = runtime.selected_session_id }
+  runtime.state, runtime.sse_live, runtime.tui_live = "ready", true, true
+  runtime.tui_status = "live"
   runtime.jobs["session-visible:job"] = { key = "session-visible:job", state = "running" }
   runtime.server_job = 41
-  runtime.sidebar = {
-    recover = function()
-      runtime.tui_generation = runtime.tui_generation + 1
-      runtime.sidebar_command = { "opencode", "attach", "http://127.0.0.1:4300", "--dir", root }
-      return runtime.client:select_session(runtime.selected_session_id)
-    end,
-  }
-  local selected
-  runtime.client = {
-    select_session = function(_, id)
-      selected = id
-      return Promise.resolve(nil)
-    end,
-  }
-  runtime:handle_tui_exit(4)
-  eq(
-    vim.wait(1000, function()
-      return selected ~= nil
-    end),
-    true
-  )
-  eq(runtime.sidebar_command, { "opencode", "attach", "http://127.0.0.1:4300", "--dir", root })
-  eq(selected, runtime.selected_session_id)
+  runtime.sidebar = Sidebar.new(runtime)
+  runtime.sidebar:dead()
+  eq({ runtime.tui_live, runtime.tui_status }, { false, "dead" })
   eq(runtime.server_job, 41)
   eq(runtime.jobs["session-visible:job"].state, "running")
-  eq(runtime.state, "ready")
+  eq({ runtime.state, runtime.sse_live }, { "ready", true })
+  package.loaded["opencode.ui.sidebar"] = old_sidebar_module
   vim.fn.delete(root, "rf")
 end
 
@@ -773,7 +725,7 @@ T["AC-EVT-05 disconnects on Server crash and restarts with fail-closed reconcili
   eq(job.state, "error")
   eq(session.active_job_key, nil)
   eq(runtime.server_job ~= old_server, true)
-  eq(harness.calls.tui_starts, 2)
+  eq(harness.calls.tui_starts, nil)
   eq(harness.calls.reconciled, nil)
   eq(contains(harness.calls.client, "session_status"), true)
   eq(contains(harness.calls.client, "messages:crashed"), true)
@@ -809,7 +761,7 @@ T["startup readiness waits for server.connected before exposing SSE"] = function
   harness.emit_sse_connected()
   local runtime, error = await(readiness)
   eq(error, nil)
-  eq({ runtime.state, runtime.sse_live, runtime.tui_live, runtime.tui_status }, { "ready", true, true, "live" })
+  eq({ runtime.state, runtime.sse_live, runtime.tui_live, runtime.tui_status }, { "ready", true, false, "stopped" })
   harness.restore()
 end
 
@@ -822,15 +774,12 @@ T["startup fails closed when SSE exits before its first connected event"] = func
   harness.restore()
 end
 
-T["startup fails closed when the TUI exits before becoming valid"] = function()
-  local harness = runtime_harness({ tui_exit_before_ready = true })
+T["startup does not attach or wait for the lazy TUI"] = function()
+  local harness = runtime_harness()
   local runtime, error = await(harness.runtime:start())
-  eq(runtime, nil)
-  eq(error, { error_class = "tui_attach" })
-  eq(
-    { harness.runtime.state, harness.runtime.sse_live, harness.runtime.tui_live, harness.runtime.tui_status },
-    { "stopped", false, false, "stopped" }
-  )
+  eq(error, nil)
+  eq({ runtime.state, runtime.sse_live, runtime.tui_live, runtime.tui_status }, { "ready", true, false, "stopped" })
+  eq(harness.calls.tui_starts, nil)
   harness.restore()
 end
 

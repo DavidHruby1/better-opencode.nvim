@@ -22,7 +22,7 @@ Scénáře definují pozorovatelné chování, nikoli konkrétní test framework
 | End-to-end | Skutečný plugin-owned Server + TUI + Neovim workflow |
 | Failure injection | Crash, disconnect, late event, save failure, invalid proposal, merge error |
 
-Contract suite MUSÍ obsahovat dva neměnné `/doc` fixtures: OpenCode `v1.17.3` z commitu `8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74` a OpenCode `v1.18.9` z commitu `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`. Všechny povinné contract scénáře a end-to-end suite MUSÍ běžet proti oběma přesně odpovídajícím binárkám; rozdíl smí obsloužit pouze explicitní version profile, ne best-effort fallback.
+Contract suite MUSÍ obsahovat dva neměnné `/doc` fixtures: OpenCode `v1.17.3` z commitu `8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74` a OpenCode `v1.18.9` z commitu `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`. Všechny povinné contract scénáře a end-to-end suite MUSÍ běžet proti oběma přesně odpovídajícím binárkám; rozdíl smí obsloužit pouze explicitní version profile, ne best-effort fallback. Profil `v1.18.9` navíc může nést delta/diagnostické eventy, ale completion pořád rozhoduje jen exact `parentID` a jedna structured assistant message.
 
 ## Společné testovací fixture
 
@@ -53,12 +53,13 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Požadavky:** RUN-01, RUN-03, RUN-04, RUN-11
 
 **Given** pro project root neexistuje Runtime  
-**When** uživatel otevře první Plan nebo Build prompt  
+**When** uživatel otevře první Build nebo Plan prompt
 **Then** plugin spustí nový Server na `127.0.0.1` s náhodným portem a HTTP heslem  
 **And** Server i TUI mají process working directory rovný canonical project rootu  
+**And** TUI klient vznikne jako sdílený pravý pane a otevře se až při Plan nebo ruční show/focus
 **And** TUI je spuštěn s `attach --dir` rovným tomuto rootu  
 **And** každý HTTP/SSE request nese stejný `x-opencode-directory`  
-**And** spustí právě jeden TUI klient připojený k tomuto Serveru  
+**And** spustí právě jeden sdílený TUI klient připojený k tomuto Serveru
 **And** `/global/health` vrátí přesně verzi zvoleného testovacího profilu `1.17.3` nebo `1.18.9`<br>
 **And** `/doc` obsahuje všechny endpointy z architektury  
 **And** port ani heslo nejsou v logu.
@@ -86,7 +87,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 
 ### AC-RUN-04: Startup timeout
 
-**Priorita:** P1  
+**Priorita:** P1
 **Požadavky:** RUN-05, RUN-08
 
 **Given** vlastněný Server se nestane healthy do timeoutu  
@@ -104,7 +105,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **And** v prvním rootu běží background Job  
 **When** uživatel odešle prompt ve druhém rootu  
 **Then** vznikne druhý samostatný Runtime  
-**And** sidebar zobrazí TUI druhého rootu  
+**And** pane zobrazí TUI druhého rootu
 **And** Job prvního rootu pokračuje a jeho eventy se nepřimíchají.
 
 ### AC-RUN-06: Bezpečný shutdown
@@ -140,7 +141,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **When** skončí pouze TUI child proces  
 **Then** Runtime nepřeruší Server ani Job  
 **And** spustí nový `attach --dir` proti témuž Serveru  
-**And** obnoví dříve zobrazenou Session přes `/tui/select-session`.
+**And** obnoví dříve zobrazenou Session přes `/tui/select-session` jen když pane existuje.
 
 ### AC-RUN-09: Pluginy a MCP se ignorují, custom tools blokují Runtime
 
@@ -155,7 +156,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Then** Runtime nepřejde do `ready` a žádný prompt se neodešle  
 **And** diagnostika pojmenuje nepodporované rozšíření bez načtení jeho citlivé konfigurace do logu.
 
-## Prompt, sidebar a kontext
+## Prompt, pane a kontext
 
 ### AC-UI-01: Inline prompt zobrazuje závazné údaje
 
@@ -168,19 +169,21 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **And** zobrazí se ještě během startu OpenCode a zachová text při startup nebo dispatch chybě<br>
 **And** `<CR>` odešle nebo přijme viditelnou completion, zatímco `<S-CR>` a `<C-j>` vloží skutečný newline<br>
 **And** po odeslání se focus vrátí do původního source window  
+**And** po úspěšném odeslání se Build float zavře a neotevře žádný sidebar ani tmux pane
 **And** předchozí prompt se nenabídne jako input historie.
 
-### AC-UI-02: Sidebar bez focus steal
+### AC-UI-02: Sdílený tmux pane bez focus steal
 
 **Priorita:** P1  
 **Požadavky:** UI-04, UI-05
 
-**Given** sidebar je zavřený  
-**When** se odešle prompt  
-**Then** pravý sidebar zobrazí TUI aktivního rootu  
+**Given** sdílený pane je zavřený
+**When** uživatel otevře Plan nebo ruční show/focus
+**Then** pravý tmux pane zobrazí TUI aktivního rootu jako 70:30 split
 **And** source window zůstane current  
-**And** sidebar lze samostatně focusovat, skrýt a znovu zobrazit  
-**And** změna konfigurované šířky se projeví bez restartu Runtime.
+**And** Build dispatch pane neotevře
+**And** pane lze samostatně focusovat, skrýt a znovu zobrazit
+**And** změna rootu neukončí background Joby.
 
 ### AC-UI-03: Čitelná identita bez barvy
 
@@ -201,7 +204,19 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **When** plugin zobrazí jejich notifikace  
 **Then** každá notifikace obsahuje správný root, Session short ID a Job stav  
 **And** completion, conflict, question i error mají odlišitelný text  
-**And** žádná notifikace sama nezmění current window, cursor ani sidebar Session.
+**And** žádná notifikace sama nezmění current window, cursor ani pane Session.
+
+### AC-UI-05: Inline Build status a reasoning preview
+
+**Priorita:** P1
+**Požadavky:** UI-08, RUN-09
+
+**Given** běží Build Job nad rozpoznaným scope
+**When** přijde průběh nebo delta update
+**Then** u scope startu je vidět spinner `⠙ Implementing`
+**And** případný reasoning preview je na jednom řádku, whitespace-collapsed a oříznutý podle source window
+**And** po terminálním stavu nebo konfliktu oba inline prvky zmizí
+**And** reasoning preview se neuloží do logu ani notifikace.
 
 ### AC-CTX-01: Zachované context placeholders
 
@@ -570,7 +585,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Given** Runtime má dvě Session s odlišnými transcripts  
 **When** uživatel vybere druhou Session v pickeru  
 **Then** plugin zavolá `/tui/select-session` pro správný Runtime  
-**And** sidebar zobrazí transcript druhé Session  
+**And** pane zobrazí transcript druhé Session
 **And** background event první Session se do něj nevloží.
 
 ### AC-JOB-03: Dva nepřekrývající se Joby ve stejném bufferu
@@ -624,7 +639,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Priorita:** P0  
 **Požadavky:** JOB-02, JOB-05, JOB-09, JOB-12
 
-**Given** uživatel focusuje plugin-owned TUI sidebar  
+**Given** uživatel focusuje plugin-owned TUI pane
 **When** použije `i`, `a`, `startinsert`, terminal-mode mapping nebo pluginovou input akci  
 **Then** buffer zůstane v Terminal-Normal a žádný input se neodešle TUI channelu  
 **And** transcript lze scrollovat a přepínat přes plugin Session picker  
@@ -679,7 +694,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 
 ### AC-EVT-05: Server crash a restart
 
-**Priorita:** P1  
+**Priorita:** P1
 **Požadavky:** RUN-06, RUN-07
 
 **Given** vlastněný Server spadne s aktivním Jobem  
@@ -687,7 +702,18 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Then** Runtime přejde `disconnected` a zablokuje prompty  
 **And** automaticky se nepřipojí k jinému Serveru  
 **When** uživatel zvolí restart  
-**Then** vznikne nový vlastněný Server/TUI a před použitím proběhne reconciliation nebo fail-closed ukončení starého Jobu.
+**Then** vznikne nový vlastněný Server a před použitím proběhne reconciliation nebo fail-closed ukončení starého Jobu; TUI zůstane lazy.
+
+### AC-EVT-06: Delta a updated eventy neobcházejí structured completion
+
+**Priorita:** P1
+**Požadavky:** JOB-09, JOB-10, MODE-02
+
+**Given** profily `v1.17.3` i `v1.18.9` emitují `message.part.updated` a `message.part.delta` ve svém pinovaném tvaru
+**When** Runtime dostane reasoning update a následné delta eventy pro tentýž Job
+**Then** Build dokončení se uzná jen z jedné assistant response s exact `parentID`
+**And** delta eventy nesmí změnit scope, completion count ani výsledný proposal
+**And** obě verze zůstávají contract-kompatibilní.
 
 ## Questions, permissions a dialog queue
 
@@ -736,12 +762,12 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Priorita:** P0  
 **Požadavky:** INT-03, INT-04, INT-07
 
-**Given** managed Job vyvolá question nebo permission a permanentně input-locked TUI sidebar je viditelný  
+**Given** managed Job vyvolá question nebo permission a permanentně input-locked TUI pane je viditelný
 **When** plugin request přijme  
 **Then** ve stejném callbacku TUI skryje, visibility-lockne jeho toggle/focus a otevře Snacks dialog  
 **And** podporovaný workflow nemůže odeslat odpověď přes TUI  
 **When** canonical API reply/reject potvrdí matching event  
-**Then** plugin visibility lock zruší a obnoví předchozí visibility bez focus steal, ale permanentní input lock zachová  
+**Then** plugin visibility lock zruší a obnoví předchozí visibility jen pokud byl pane předtím viditelný, bez focus steal, ale permanentní input lock zachová
 **And** na requestID existuje právě jedna uživatelská odpověď.
 
 ## Stavový model
@@ -777,34 +803,36 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Priorita:** P0  
 **Požadavky:** RUN-09
 
-**Given** prompt, Base a replacement obsahují unikátní secrets  
+**Given** prompt, reasoning preview, Base a replacement obsahují unikátní secrets
 **When** proběhne úspěch, conflict, scope violation, HTTP error a reconnect  
-**Then** žádný default log neobsahuje secret, source text, diff, absolute home path, port password ani authorization header  
+**Then** žádný default log neobsahuje secret, reasoning preview, source text, diff, absolute home path, port password ani authorization header
 **And** obsahuje pouze povolená metadata z architektury.
 
 ### AC-SEC-02: Health check je praktický
 
 **Priorita:** P2  
-**Požadavky:** RUN-04, RUN-05
+**Požadavky:** RUN-04, RUN-05, RUN-12
 
-**Given** chybí postupně podporovaný Neovim, OpenCode, správná verze, `git merge-file`, Snacks input/picker nebo Tree-sitter parser  
+**Given** chybí postupně podporovaný Neovim, OpenCode, správná verze, `git merge-file`, Snacks input/picker, Tree-sitter parser nebo tmux stack požadavky
 **When** uživatel spustí health check  
 **Then** hard dependencies jsou errors s konkrétní nápravou  
 **And** chybějící Tree-sitter parser je warning s file-scope fallbackem  
-**And** health check nevyžaduje `pgrep` ani `lsof`.
+**And** health check jasně pojmenuje `$TMUX`, verzi tmux, `extended-keys` a `client_termfeatures` s `extkeys`, pokud nejsou splněné
+**And** health check nevyžaduje `pgrep` ani `lsof` a nemění tmux global config
+**And** manuální WezTerm→WSL→tmux→Neovim protokol je reprodukovatelný a `<C-j>` zůstává fallback.
 
 ## Traceability matrix
 
 | Oblast požadavků | Pokrývající scénáře |
 |---|---|
-| UI-01 až UI-07 | AC-UI-01 až AC-UI-04, AC-JOB-02 |
+| UI-01 až UI-08 | AC-UI-01 až AC-UI-05, AC-JOB-02 |
 | MODE-01 až MODE-05 | AC-MODE-01 až AC-MODE-03, AC-PROP-01 |
 | CTX-01 až CTX-10 | AC-CTX-01 až AC-CTX-06 |
 | SCOPE-01 až SCOPE-10 | AC-SCOPE-01 až AC-SCOPE-06, AC-PROP-01 až AC-PROP-03 |
-| JOB-01 až JOB-12 | AC-JOB-01 až AC-JOB-07, AC-EVT-01 až AC-EVT-05, AC-STATE-01 až AC-STATE-02 |
+| JOB-01 až JOB-12 | AC-JOB-01 až AC-JOB-07, AC-EVT-01 až AC-EVT-06, AC-STATE-01 až AC-STATE-02 |
 | MERGE-01 až MERGE-17 | AC-PROP-01 až AC-PROP-03, AC-MERGE-01 až AC-MERGE-12, AC-JOB-03 |
 | INT-01 až INT-07 | AC-MODE-01 až AC-MODE-02, AC-EVT-02, AC-INT-01 až AC-INT-04 |
-| RUN-01 až RUN-11 | AC-RUN-01 až AC-RUN-09, AC-EVT-03 až AC-EVT-05, AC-SEC-01 až AC-SEC-02 |
+| RUN-01 až RUN-12 | AC-RUN-01 až AC-RUN-09, AC-EVT-03 až AC-EVT-06, AC-SEC-01 až AC-SEC-02 |
 
 ## Release gate
 
@@ -812,6 +840,6 @@ Release candidate je přijatelný pouze tehdy, když:
 
 1. všechny delivery slices jsou dokončené a všechny P0 a P1 scénáře procházejí,
 2. žádný scenario skip nezakrývá unsupported platform nebo API drift,
-3. real OpenCode contract a end-to-end suite procházejí pro profily `v1.17.3` i `v1.18.9` bez neznámého legacy fallbacku,
+3. real OpenCode contract a end-to-end suite procházejí pro profily `v1.17.3` i `v1.18.9`, včetně delta/updated coverage a runtime/integration/multi-root scénářů, bez neznámého legacy fallbacku,
 4. failure-injection suite neprokáže diskový write, stale apply, cross-Job event nebo ztrátu Ours,
 5. P2 scénáře mají automatizovaný výsledek nebo uložený reprodukovatelný manuální protokol.

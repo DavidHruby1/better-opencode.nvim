@@ -11,6 +11,7 @@ This fork owns one loopback OpenCode Server and one input-locked TUI client per 
 - `curl`
 - `git` with `git merge-file -p --diff3`
 - `snacks.nvim` with input and picker enabled
+- `tmux` with extended keyboard support enabled
 
 OpenCode support is an exact compatibility matrix, not a semver range. Other versions fail the preflight.
 
@@ -60,6 +61,26 @@ end)
 
 The multiline prompt opens while OpenCode starts. `<CR>` submits or accepts visible completion, `<S-CR>` inserts a newline, `<C-j>` is the terminal-safe newline fallback, and `<Esc>` cancels. Failed startup or dispatch keeps the text available for retry.
 
+### Terminal transport setup
+
+Modified Enter keys must survive every layer between the terminal and Neovim. For WezTerm, enable the Kitty keyboard protocol:
+
+```lua
+config.enable_kitty_keyboard = true
+```
+
+In tmux, enable extended keys and attach the `extkeys` feature to the actual client terminal name, not an assumed `$TERM` value:
+
+```sh
+tmux set -g extended-keys on
+tmux display-message -p '#{client_termname}'
+tmux set -as terminal-features ',<actual-client_termname>:extkeys'
+```
+
+Put the equivalent `set` lines in `~/.tmux.conf` for future sessions, replacing `<actual-client_termname>` with the exact output from `display-message`. Restart the tmux client after changing terminal transport settings, then run `:checkhealth opencode` inside tmux. If `<S-CR>` is unavailable, use `<C-j>` for a newline.
+
+To reproduce the full path, start WezTerm with Kitty keyboard support, enter WSL, attach tmux, start Neovim, and try `<S-CR>` in the multiline prompt. This verifies the raw WezTerm -> WSL -> tmux -> Neovim input transport. A direct Lua call to the prompt's newline callback checks only the callback and does not verify that raw key input reaches it.
+
 The select menu provides Session selection, cancel current Job, cancel all Jobs, TUI attach retry, sidebar toggle/focus, runtime restart, and metadata-only diagnostics. Run `:checkhealth opencode` for dependencies and the selected compatibility profile.
 
 ## Safety model
@@ -76,7 +97,7 @@ The select menu provides Session selection, cancel current Job, cancel all Jobs,
 - A conflict offers `keep my changes`, `accept agent changes`, or `open manual diff`. External changes offer `open external diff`, `retry apply`, or `cancel`.
 - A Plan Session can be reused for a new Build after it becomes reusable. Active Sessions never queue a follow-up.
 - Parallel non-overlapping Build scopes are allowed in one buffer. Overlap is rejected before dispatch and rechecked before application.
-- Multiple canonical roots have separate Servers, Sessions, Jobs, and event streams; the shared sidebar only changes which TUI is visible.
+- Multiple canonical roots have separate Servers, Sessions, Jobs, and event streams; at most one lazy tmux pane shows the selected root's TUI.
 
 ## Deferred
 

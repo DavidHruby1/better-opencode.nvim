@@ -37,8 +37,38 @@ local function parser_capability()
   return false, language
 end
 
----Collects local capability and OpenCode config facts without starting a Server or initializing Runtime state.
----The version probe is a local command; the passive config guard matches startup's root and environment.
+---Reads a command's trimmed standard output without invoking a shell.
+---A failed command returns nil so health reporting can give a safe, command-specific correction.
+local function command_output(argv)
+  local result = vim.system(argv, { text = true }):wait()
+  if result.code ~= 0 then
+    return nil
+  end
+  return vim.trim(result.stdout or "")
+end
+
+---Collects the tmux settings that carry modified Enter keys from the terminal to Neovim.
+---It reads only global options and the current client's public terminal fields, and never changes tmux configuration.
+local function tmux_capabilities()
+  local in_tmux = type(vim.env.TMUX) == "string" and vim.env.TMUX ~= ""
+  local tmux_ok = executable("tmux")
+  local report = {
+    in_tmux = in_tmux,
+    executable_ok = tmux_ok,
+    version = tmux_ok and command_output({ "tmux", "-V" }) or nil,
+  }
+  if not in_tmux or not tmux_ok then
+    return report
+  end
+
+  report.extended_keys = command_output({ "tmux", "show-options", "-gv", "extended-keys" })
+  report.client_termfeatures = command_output({ "tmux", "display-message", "-p", "#{client_termfeatures}" })
+  report.client_termname = command_output({ "tmux", "display-message", "-p", "#{client_termname}" })
+  return report
+end
+
+---Collects local capability, tmux transport, and OpenCode config facts without starting a Server or Runtime state.
+---Command probes are read-only; the passive config guard matches startup's root and environment.
 ---@return table
 function M.capabilities()
   local parser_ok, parser_name = parser_capability()
@@ -70,6 +100,7 @@ function M.capabilities()
     parser_name = parser_name,
     lua_adapter_ok = pcall(require, "opencode.scope.adapters.lua"),
     terminal_ok = vim.fn.exists("*jobstart") == 1,
+    tmux = tmux_capabilities(),
     loopback_ok = M.loopback_available(),
     state_dir_ok = writable_directory(vim.fn.stdpath("state") .. "/opencode.nvim"),
     temp_dir_ok = writable_directory(vim.fn.stdpath("state") .. "/opencode.nvim/runtimes"),
@@ -77,6 +108,57 @@ function M.capabilities()
     config_guard_ok = guard_ok,
     config_guard_error = guard_error,
   }
+end
+
+---Reports whether tmux can carry extended keyboard input from the current terminal client.
+---Each read-only probe is reported separately so users can fix the exact missing layer without exposing environment contents.
+local function report_tmux(report)
+  local tmux = report.tmux
+  if not tmux.in_tmux then
+    vim.health.error("tmux is required; start Neovim inside tmux (TMUX is not set)")
+  else
+    vim.health.ok("Neovim is running inside tmux")
+  end
+
+  if not tmux.executable_ok then
+    vim.health.error("tmux executable is required; install tmux and restart Neovim inside tmux")
+    return
+  elseif tmux.version then
+    vim.health.ok("tmux available: " .. tmux.version)
+  else
+    vim.health.error("tmux version could not be read; ensure `tmux -V` succeeds")
+  end
+
+  if not tmux.in_tmux then
+    return
+  end
+  if tmux.extended_keys == "on" or tmux.extended_keys == "always" then
+    vim.health.ok("tmux global extended-keys is " .. tmux.extended_keys)
+  else
+    vim.health.error("tmux extended keys are disabled or unreadable; run `tmux set -g extended-keys on`")
+  end
+
+  if tmux.client_termname and tmux.client_termname ~= "" then
+    vim.health.ok("tmux current client termname: " .. tmux.client_termname)
+  else
+    vim.health.error("tmux current client termname is unavailable; run `tmux display-message -p '#{client_termname}'`")
+  end
+
+  local features = tmux.client_termfeatures
+  local has_extkeys = features and ("," .. features .. ","):find(",extkeys,", 1, true) ~= nil
+  if has_extkeys then
+    vim.health.ok("tmux current client terminal features include extkeys")
+  elseif tmux.client_termname and tmux.client_termname ~= "" then
+    vim.health.error(
+      "tmux current client lacks extkeys; run `tmux set -as terminal-features ',"
+        .. tmux.client_termname
+        .. ":extkeys'`"
+    )
+  else
+    vim.health.error(
+      "tmux current client terminal features are unavailable; add extkeys for its actual client termname"
+    )
+  end
 end
 
 ---Checks the loopback capability only; it never connects to an existing server or opens a discovery query.
@@ -110,12 +192,14 @@ local function report_config(report)
   if report.config_guard_ok then
     vim.health.ok("local OpenCode config parsed; plugins and MCPs are ignored; custom tools remain blocked")
   else
-    vim.health.error((messages[report.config_guard_error] or "local OpenCode config is blocked") .. "; see docs/RECOVERY.md")
+    vim.health.error(
+      (messages[report.config_guard_error] or "local OpenCode config is blocked") .. "; see docs/RECOVERY.md"
+    )
   end
 end
 
 ---Reports hard dependencies and actionable warnings without starting a Server, MCP, plugin, or tool.
----The only external probes read the local OpenCode version and exercise Git with empty /dev/null operands.
+---External probes read local tool versions and tmux settings, and exercise Git with empty /dev/null operands.
 function M.check()
   vim.health.start("opencode.nvim")
   local report = M.capabilities()
@@ -145,10 +229,7 @@ function M.check()
   end
   if report.git_ok then
     local result = vim
-      .system(
-        { "git", "merge-file", "-p", "--diff3", "/dev/null", "/dev/null", "/dev/null" },
-        { text = true }
-      )
+      .system({ "git", "merge-file", "-p", "--diff3", "/dev/null", "/dev/null", "/dev/null" }, { text = true })
       :wait()
     if result.code == 0 then
       vim.health.ok("git merge-file -p --diff3 available")
@@ -171,10 +252,11 @@ function M.check()
     vim.health.error("cannot bind 127.0.0.1; allow a loopback listener")
   end
   if report.terminal_ok then
-    vim.health.ok("jobstart(term=true) terminal API available")
+    vim.health.ok("jobstart process API available")
   else
-    vim.health.error("jobstart(term=true) terminal API is required; use Neovim 0.11.0 or newer")
+    vim.health.error("jobstart process API is required; use Neovim 0.11.0 or newer")
   end
+  report_tmux(report)
   if report.state_dir_ok and report.temp_dir_ok then
     vim.health.ok("private state and runtime temp directories are writable")
   else

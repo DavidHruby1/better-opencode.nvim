@@ -21,6 +21,8 @@ local function resolve(request)
   return runtime, job
 end
 
+---Reopens prompt dispatch after a remote dialog and restores only the pane that the dialog hid.
+---The saved root is resolved again because its Runtime may have shut down while the question or permission was open.
 local function unlock(request)
   if not remote_kinds[request.kind] then
     return
@@ -29,14 +31,23 @@ local function unlock(request)
   if runtime then
     runtime.interaction_locked = false
     runtime.prompt_locked = request.prompt_was_locked or runtime.reconciling or runtime.reconciliation_required == true
-    if request.sidebar_was_visible then
-      runtime.sidebar:show()
+    if request.sidebar_root then
+      local visible_runtime = require("opencode.runtime").for_root(request.sidebar_root)
+      if visible_runtime and visible_runtime.sidebar then
+        local shown = visible_runtime.sidebar:show_root(visible_runtime)
+        if shown and visible_runtime.selected_session_id then
+          visible_runtime.sidebar:select_session(visible_runtime.selected_session_id):catch(function()
+            require("opencode.ui.notify").error("session_select")
+          end)
+        end
+      end
     end
   end
 end
 
 ---Displays the oldest queued request after resolving its Runtime and Job from immutable identity.
----Only this function changes queued to shown, which guarantees one visible managed interaction globally.
+---Only this function changes queued to shown. Remote questions and permissions hide the one shared pane and remember its root,
+---so completion restores it only when a verified pane was visible before the dialog.
 function M.advance()
   if M.current then
     return
@@ -48,10 +59,16 @@ function M.advance()
       M.current = request
       request.state = "shown"
       if remote_kinds[request.kind] then
-        request.sidebar_was_visible = runtime.sidebar:is_visible()
+        local Sidebar = require("opencode.ui.sidebar")
+        request.sidebar_root = Sidebar.visible_root()
         request.prompt_was_locked = runtime.prompt_locked == true
         runtime.interaction_locked, runtime.prompt_locked = true, true
-        runtime.sidebar:hide()
+        if request.sidebar_root then
+          local visible_runtime = require("opencode.runtime").for_root(request.sidebar_root)
+          if visible_runtime and visible_runtime.sidebar then
+            visible_runtime.sidebar:hide()
+          end
+        end
       end
       require("opencode.ui.dialog").show(request)
       return

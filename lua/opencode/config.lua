@@ -1,6 +1,6 @@
 ---@class opencode.Opts
 ---@field runtime? { binary?: string, startup_timeout?: integer, reconnect?: { max_attempts?: integer, backoff_ms?: integer, max_backoff_ms?: integer }, shutdown_timeout?: integer }
----@field sidebar? { width?: number }
+---@field sidebar? { width?: integer }
 ---@field contexts? table<string, function>
 ---@field ask? { snacks?: { win?: snacks.win.Config } }
 ---@field notify? { enabled?: boolean, opts?: table }
@@ -15,7 +15,7 @@ local defaults = {
     reconnect = { max_attempts = 5, backoff_ms = 100, max_backoff_ms = 2000 },
     shutdown_timeout = 2000,
   },
-  sidebar = { width = 0.30 },
+  sidebar = { width = 30 },
   notify = { enabled = true, opts = {} },
   contexts = {
     ["@this"] = require("opencode.context.builtins").this,
@@ -134,7 +134,7 @@ local function validate(value)
         return failure("sidebar." .. key, "unsupported_key")
       end
     end
-    local ok, err = check_number(value.sidebar.width or defaults.sidebar.width, "sidebar.width", 0.05, 0.95, false)
+    local ok, err = check_number(value.sidebar.width or defaults.sidebar.width, "sidebar.width", 5, 95, true)
     if not ok then
       return ok, err
     end

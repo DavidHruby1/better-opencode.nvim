@@ -16,9 +16,11 @@ Tento dokument je autoritou pro produktové chování a rozsah. `docs/ARCHITECTU
 
 ## Shrnutí produktu
 
-Fork mění `opencode.nvim` z tenkého bridge na Neovim-native nástroj pro inline vývoj. Uživatel zadává víceřádkový prompt přes `Snacks.win` u kurzoru, vidí zvolený režim a hard scope a sleduje transcript v pravém OpenCode TUI sidebaru. Build je výchozí režim pro změny kódu, Plan je technicky needitující režim pro analýzu.
+Fork mění `opencode.nvim` z tenkého bridge na Neovim-native nástroj pro inline vývoj. Uživatel zadává Build i Plan přes víceřádkový `Snacks.win` float u kurzoru. Build je input-only: po úspěšném dispatchi se float zavře, neotevře sidebar ani tmux pane a stav běhu se ukazuje jen inline v cílovém bufferu. Inline Build stav používá dvě `virt_lines` u začátku scope: spinner `⠙ Implementing` a volitelný jednorádkový preview skutečného OpenCode reasoning, které se whitespace-collapse, ořízne na šířku source window a po terminálním stavu nebo konfliktu zmizí. Nic z toho se nepersistuje, neloguje ani neposílá přes notifikaci.
 
 Build agent nikdy nezapisuje přímo do source souborů. Vrací strukturovaný návrh změny autorizovaného rozsahu. Plugin z něj vytvoří Theirs, ověří hard scope a provede třícestný merge Base/Ours/Theirs do živého Neovim bufferu. Výsledek se nezapisuje na disk a zůstává jedním undo krokem.
+
+Pro Plan a ruční show/focus existuje jeden sdílený lazy pravý tmux pane napříč rooty. Otevírá se jen tehdy, když je transcript opravdu potřeba; input je zamčený a root switch nezastaví background Joby.
 
 Více Build Jobů může běžet paralelně ve stejném souboru a stejné branch, pokud mají nepřekrývající se hard scopes. Worktrees ani kopie workspace se pro tento workflow nepoužívají.
 
@@ -56,7 +58,7 @@ Upstream integrace poskytuje hodnotný input, kontext, completion, event základ
 10. Vlastní `#command` nebo `#skill` namespace.
 11. Specializovaný Review artefakt, Plan-to-scaffold a vlastní Search-to-quickfix workflow.
 12. Blockwise visual Build; verze 2.0 podporuje pouze souvislý characterwise nebo linewise range.
-13. Přímý TUI prompt jako managed inline edit workflow; podporovaná cesta pro Joby je pluginem vlastněný víceřádkový `Snacks.win` editor.
+13. Přímý TUI prompt jako Build workflow; Build Joby používají float editor a TUI slouží jen jako transcript pro Plan a ruční show/focus.
 14. Spouštění OpenCode custom commands; command templates nejsou součástí bezpečného proposal-only workflow verze 2.0.
 
 ## Cílový uživatel a hlavní workflow
@@ -68,7 +70,7 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 3. zkontroluje Build/Plan a effective scope,
 4. odešle Job do nové nebo reusable Session,
 5. pokračuje v editaci,
-6. sleduje stav ve status UI a transcript v sidebaru,
+6. sleduje stav ve status UI a transcript v pravém tmux pane,
 7. dostane čistý merge automaticky do bufferu nebo vyřeší skutečný konflikt,
 8. může výsledek vrátit standardním Neovim undo.
 
@@ -77,7 +79,7 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 | Termín | Význam |
 |---|---|
 | Server | Pluginem spuštěný headless OpenCode HTTP server pro jeden project root |
-| TUI klient | Pluginem spuštěný `opencode attach` proces zobrazený v sidebar terminal bufferu |
+| TUI klient | Pluginem spuštěný `opencode attach` proces zobrazený v pravém tmux pane |
 | Runtime | Vlastněná dvojice Server + TUI klient pro jeden canonical project root |
 | Session | Persistentní OpenCode konverzace; může obsahovat více Jobů v čase |
 | Job | Jeden prompt a jeho lokální transakce, identifikovaná `sessionID + userMessageID` |
@@ -93,7 +95,7 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 
 ## Produktové invarianty
 
-1. Neovim je primární pracovní plocha; sidebar zůstává skutečný OpenCode TUI.
+1. Neovim je primární pracovní plocha; Build prompt je float-only a sdílený TUI pane se otevírá lazily jen pro Plan nebo ruční show/focus.
 2. Plugin MUSÍ vlastnit Server i TUI klient a NESMÍ se připojit na cizí proces.
 3. Build MUSÍ být výchozí primární agent; Plan MUSÍ být explicitně dostupný primární agent.
 4. Režim a effective scope MUSÍ být viditelné před odesláním.
@@ -117,13 +119,14 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 
 | ID | Požadavek |
 |---|---|
-| UI-01 | Prompt MUSÍ používat ohraničený víceřádkový `Snacks.win` poblíž kurzoru a po úspěšném odeslání vrátit focus do stále stejného source bufferu. |
+| UI-01 | Prompt MUSÍ používat ohraničený víceřádkový `Snacks.win` poblíž kurzoru; Build po úspěšném odeslání float zavře, vrátí focus do stejného source bufferu a neponechá za sebou žádný sidebar ani tmux pane. |
 | UI-02 | Input MUSÍ ukázat Build/Plan, project root a effective scope před odesláním. |
 | UI-03 | Prompt input history MUSÍ být vypnutá; `<CR>` odesílá nebo přijímá viditelnou completion, `<S-CR>` a `<C-j>` vkládají newline a Session transcript tím není dotčen. |
-| UI-04 | Sidebar MUSÍ automaticky zobrazit aktivní TUI při odeslání, nesmí ukrást focus a musí být toggleovatelný i focusovatelný v input-locked Terminal-Normal režimu. |
-| UI-05 | Výchozí sidebar MÁ zabírat přibližně 30 % šířky a MUSÍ být konfigurovatelný. |
+| UI-04 | Sdílený pravý tmux pane MUSÍ zobrazit aktivní TUI jen pro Plan nebo ruční show/focus, nesmí ukrást focus a Build dispatch jej nesmí otevřít automaticky. |
+| UI-05 | Pravý pane MUSÍ vzniknout jako 70:30 split vůči aktuálnímu `$TMUX_PANE`; další root jen přepne obsah a background Joby zůstávají běžet. |
 | UI-06 | Status UI MUSÍ ukázat Session title, short ID, Job stav a režim; barva nesmí být jediný identifikátor. |
-| UI-07 | Background dokončení, konflikt, otázka a chyba MUSÍ vyvolat neinvazivní notifikaci s identitou Jobu. |
+| UI-07 | Background dokončení, konflikt, otázka a chyba MUSÍ vyvolat neinvazivní notifikaci s identitou Jobu; reasoning preview a inline Build stav se do notifikace nepřepisují. |
+| UI-08 | Inline Build stav MUSÍ u scope startu vykreslit dvě `virt_lines`: spinner `⠙ Implementing` a volitelný jednorádkový reasoning preview; preview se whitespace-collapse, ořízne na source-window width a po terminálním stavu nebo konfliktu se oboje odstraní. |
 
 ### Režimy
 
@@ -214,23 +217,24 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 | INT-04 | OpenCode `question` managed Jobu MUSÍ přijít do nativního pickeru/inputu a odpověď MUSÍ pokračovat ve správném Jobu. |
 | INT-05 | Současné dialogy z více Jobů MUSÍ být serializovány ve FIFO frontě; question/permission Job zůstává `waiting_user` a conflict Job zůstává `conflict`. |
 | INT-06 | Zavření nebo odmítnutí dialogu MUSÍ odeslat explicitní reject/cancel a nesmí Job ponechat viset. |
-| INT-07 | Při managed question/permission requestu MUSÍ plugin již input-locked TUI sidebar skrýt do potvrzeného API reply/reject eventu, aby TUI dialog nebyl druhým viditelným interaction UI. |
+| INT-07 | Při managed question/permission requestu MUSÍ plugin již input-locked TUI pane skrýt do potvrzeného API reply/reject eventu, aby TUI dialog nebyl druhým viditelným interaction UI. |
 
 ### Runtime, kompatibilita a soukromí
 
 | ID | Požadavek |
 |---|---|
-| RUN-01 | Runtime MUSÍ být klíčován canonical project rootem; každý root má vlastní plugin-owned Server a TUI klient a každý instance request musí být explicitně routován do tohoto rootu. |
-| RUN-02 | Sidebar MUSÍ zobrazit TUI aktivního rootu; přepnutí rootu nesmí ukončit background Joby jiných rootů. |
+| RUN-01 | Runtime MUSÍ být klíčován canonical project rootem; každý root má vlastní plugin-owned Server, ale všechny Runtime sdílejí nejvýše jeden lazy TUI pane. Každý instance request musí být explicitně routován do svého rootu. |
+| RUN-02 | Sdílený TUI pane MUSÍ zobrazit TUI aktivního rootu; přepnutí rootu nesmí ukončit background Joby jiných rootů ani vytvořit druhý pane. |
 | RUN-03 | Server MUSÍ poslouchat pouze na `127.0.0.1`, použít náhodný volný port a náhodné HTTP Basic credentials uložené pouze v paměti a private mode-0600 ownership manifestu. |
 | RUN-04 | Plugin MUSÍ před použitím ověřit `/global/health`, přesnou podporovanou verzi OpenCode `v1.17.3` nebo `v1.18.9` a odpovídající profil požadovaných `/doc` operací. Jiná verze nebo neshoda s profilem je fail-closed compatibility error. |
 | RUN-05 | Startup MUSÍ mít timeout a diagnostickou chybu; plugin nesmí fallbacknout na cizí Server. |
-| RUN-06 | Pád TUI MUSÍ restartovat jen TUI nad živým Serverem; pád Serveru MUSÍ označit Runtime jako disconnected, zachovat lokální pending data a vyžádat Server reconciliation. |
+| RUN-06 | Pád TUI NESMÍ změnit Server ani Job stav; další Plan nebo ruční show/focus MUSÍ vytvořit nový attach nad živým Serverem. Pád Serveru MUSÍ označit Runtime jako disconnected, zachovat lokální pending data a vyžádat Server reconciliation. |
 | RUN-07 | Reconnect MUSÍ proběhnout až po reconciliation; nedokončený Job bez prokazatelného výsledku skončí `error` bez aplikace. |
 | RUN-08 | Runtime MUSÍ mít private durable ownership manifest; `VimLeavePre` i příští startup smí po kryptografickém ověření ownership ukončit pouze vlastní procesy a odstranit vlastní temp soubory. |
-| RUN-09 | Logy MUSÍ obsahovat pouze metadata jako root ID, short Session/Job ID, state transition a error class. Prompt, replacement a source jsou defaultně zakázané. |
+| RUN-09 | Logy MUSÍ obsahovat pouze metadata jako root ID, short Session/Job ID, state transition a error class. Prompt, reasoning preview, replacement a source jsou defaultně zakázané. |
 | RUN-10 | Passive pre-spawn config guard a následný effective-config preflight MUSÍ ignorovat custom plugins a enabled MCP servery, odmítnout custom tools a nesmí při kontrole plugin/tool kód importovat ani MCP inicializovat. |
 | RUN-11 | TUI MUSÍ použít `attach --dir <canonical-root>` a každý HTTP/SSE request MUSÍ nést `x-opencode-directory` se stejným rootem. |
+| RUN-12 | Health a diagnostics MUSÍ ověřit `$TMUX`, verzi tmux, `extended-keys` a `client_termfeatures` s `extkeys`; mimo tmux startup failuje jasnou chybou. WezTerm musí mít `enable_kitty_keyboard=true`, tmux terminal-features se vážou na skutečný `client_termname` a plugin nesmí mutovat tmux global config. `<C-j>` zůstává terminal-safe fallback a keymap confidence se dokládá reprodukovatelným manuálním protokolem WezTerm→WSL→tmux→Neovim. |
 
 ## Job state model
 
@@ -252,20 +256,20 @@ nonterminal -> error
 ### Build
 
 1. Uživatel vyvolá Build z visual/operator nebo normal mode.
-2. Plugin zachytí skutečný invocation range, rozpozná function/file scope a zobrazí ho v inputu.
+2. Otevře se input-only `Snacks.win` float, který ukáže Build, root a hard scope.
 3. Dirty-context preflight nabídne `save and continue` nebo `cancel`.
 4. Plugin zachytí Base, extmarky, vytvoří `messageID` a odešle async structured prompt.
-5. TUI sidebar se zobrazí bez změny source focusu.
-6. Po odpovědi plugin ověří schema, Base hash, path a scope.
-7. V Insert mode čeká na `InsertLeave`; jinak provede merge okamžitě.
-8. Čistý výsledek se objeví jako neuložená, undoable změna bufferu.
+5. Po úspěšném dispatchi se float zavře; žádný sidebar ani tmux pane se automaticky neotevře.
+6. V cílovém bufferu se u scope startu vykreslí spinner `⠙ Implementing` a volitelný reasoning preview.
+7. Po terminálním stavu nebo konfliktu se inline `virt_lines` odstraní.
+8. Po odpovědi plugin ověří schema, Base hash, path a scope a čistý výsledek se objeví jako neuložená, undoable změna bufferu.
 
 ### Plan a přechod na Build
 
 1. Uživatel zvolí Plan; UI jasně ukáže read-only režim.
 2. Dirty-context preflight nabídne `save and continue` nebo `cancel`, aby Plan četl aktuální diskový obsah.
 3. Plan může číst projekt, ale nemůže použít write-capable nástroj.
-4. Odpověď se zobrazí ve stejném TUI sidebaru.
+4. Odpověď se zobrazí ve sdíleném pravém tmux pane; pane se otevře jen pro Plan nebo ruční show/focus.
 5. Po dokončení může uživatel v téže reusable Session odeslat nový Build Job.
 6. Build převezme transcript context, ale vytvoří nové `userMessageID`, Base a scope.
 
@@ -294,7 +298,7 @@ Zachovat, pokud splňuje kontrakty:
 - keymapy a operator/visual vstupy,
 - statusline/event základ,
 - health checks,
-- TUI terminal/sidebar,
+- sdílený tmux pane,
 - session selector a TUI select-session transport,
 - diff UI jako základ manual conflict workflow.
 
@@ -345,4 +349,4 @@ Každý slice MUSÍ splnit odpovídající scénáře z `docs/ACCEPTANCE.md`; ho
 
 ## Definition of Done
 
-Verze 2.0 je hotová, když jsou dokončeny všechny delivery slices, všechny P0/P1 scénáře v `docs/ACCEPTANCE.md` pro pinovaný OpenCode baseline procházejí a P2 scénáře mají požadovaný důkaz. Build a Plan fungují přes plugin-owned Runtime, každý Job je korelován `sessionID + userMessageID` a assistant-parent vazbou, žádný agent nemůže přímo zapisovat source workspace, hard scope je fail-closed, paralelní nepřekrývající se ranges se bezpečně sloučí, konflikt ani reconnect neztratí uživatelskou práci a aplikovaný výsledek zůstane neuložený a vratný jedním undo krokem.
+Verze 2.0 je hotová, když jsou dokončeny všechny delivery slices, všechny P0/P1 scénáře v `docs/ACCEPTANCE.md` pro pinovaný OpenCode baseline procházejí a P2 scénáře mají požadovaný důkaz. Build a Plan fungují přes plugin-owned Runtime, každý Job je korelován `sessionID + userMessageID` a assistant-parent vazbou, žádný agent nemůže přímo zapisovat source workspace, hard scope je fail-closed, paralelní nepřekrývající se ranges se bezpečně sloučí, konflikt ani reconnect neztratí uživatelskou práci a aplikovaný výsledek zůstane neuložený a vratný jedním undo krokem; ověření musí být doloženo pro oba OpenCode profily a pro runtime/integration/multi-root pokrytí.

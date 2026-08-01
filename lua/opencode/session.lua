@@ -197,8 +197,8 @@ function M.revalidate(runtime, session_id, mode)
     end)
 end
 
----Selects one verified local Session in the owned TUI and records it only after success.
----This field is transcript and follow-up UI state; event routing never reads it.
+---Selects one verified local Session and lazily shows its tmux TUI.
+---The remote TUI selection is sent only after the pane is confirmed live; the local field remains transcript and follow-up UI state.
 ---@param runtime table
 ---@param session_id string
 ---@return Promise<table>
@@ -207,7 +207,11 @@ function M.select(runtime, session_id)
   if not session then
     return require("opencode.promise").reject({ error_class = "unknown_session" })
   end
-  return runtime.client:select_session(session_id):next(function()
+  local shown, err = runtime.sidebar:show()
+  if not shown or not runtime.sidebar:is_visible() then
+    return require("opencode.promise").reject({ error_class = err or "tui_unavailable" })
+  end
+  return runtime.sidebar:select_session(session_id):next(function()
     runtime.selected_session_id = session_id
     return session
   end)

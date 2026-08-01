@@ -173,7 +173,7 @@ end
 T["acceptance manifest matches all documented IDs"] = function()
   local report = dofile("tests/release/validator.lua").validate(".")
   eq(report.ok, true, table.concat(report.errors, "; "))
-  eq(report.manifest_count, 63)
+  eq(report.manifest_count, 65)
 end
 
 T["evidence generator stays failed without result artifacts"] = function()

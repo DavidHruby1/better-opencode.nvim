@@ -26,12 +26,13 @@ function M.message_id()
 end
 
 ---Creates a running Plan or fully captured Build Job before network dispatch.
+---Build Jobs with scope marks also own a transient inline display from this point until conflict or completion.
 ---@param session_id string
 ---@param target table
 ---@return table
 function M.new(session_id, target)
   local message_id = M.message_id()
-  return {
+  local job = {
     key = session_id .. ":" .. message_id,
     merge_key = target.root .. ":" .. session_id .. ":" .. message_id,
     session_id = session_id,
@@ -48,6 +49,10 @@ function M.new(session_id, target)
     marks = target.marks,
     auto_apply = target.auto_apply ~= false,
   }
+  if job.mode == "build" and job.marks then
+    job.request_status = require("opencode.ui.request_status").new(job)
+  end
+  return job
 end
 
 local terminal_states = { completed = true, cancelled = true, error = true, scope_violation = true }
@@ -72,7 +77,7 @@ local transitions = {
 
 ---Moves a Job through the complete managed state machine and owns state-specific cleanup.
 ---Required kinds and payloads are checked before mutation; repeated terminal completion is idempotent.
----The Session is supplied in attrs because only terminal transitions release it.
+---Conflict and terminal states remove transient Build UI immediately; the Session is supplied because only terminal states release it.
 ---@param job table
 ---@param state string
 ---@param attrs? { session?: table, waiting_kind?: "question"|"permission", conflict_kind?: "agent"|"external_change", conflict_payload?: table }
@@ -96,6 +101,10 @@ function M.transition(job, state, attrs)
   end
   local leaving_conflict = job.state == "conflict"
   job.state = state
+  if state == "conflict" or terminal_states[state] then
+    require("opencode.ui.request_status").cleanup(job.request_status)
+    job.request_status = nil
+  end
   job.waiting_kind = state == "waiting_user" and attrs.waiting_kind or nil
   if state ~= "waiting_user" then
     job.waiting_request_id = nil

@@ -57,8 +57,6 @@ local function submit_when_ready(text, context, opts)
     end
   elseif blocker == "disconnected" and runtime.state == "disconnected" then
     readiness = runtime:restart()
-  elseif blocker == "tui_unavailable" then
-    readiness = runtime:retry_tui()
   elseif blocker then
     return Promise.reject({ error_class = blocker })
   end

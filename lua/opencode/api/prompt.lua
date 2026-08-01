@@ -64,7 +64,8 @@ local function build_instruction(context, rendered, base, scope)
 end
 
 ---Dispatches one Plan or scoped Build through Session HTTP after target and dirty preflight.
----The Job is registered before prompt_async so immediate SSE cannot outrun local correlation state.
+---The Job is registered before prompt_async so immediate SSE cannot outrun local correlation state. Build stays editor-only,
+---while Plan must attach the lazy tmux pane before selecting its transcript and sending the prompt.
 ---@param text string
 ---@param context table
 ---@param opts? opencode.PromptOpts
@@ -149,10 +150,16 @@ function M.prompt(text, context, opts)
           return Promise.reject({ error_class = dispatch_blocker })
         end
         runtime.selected_session_id = session.id
-        return runtime.client
-          :select_session(session.id)
+        local tui_ready = Promise.resolve(nil)
+        if mode == "plan" then
+          local shown, show_error = runtime.sidebar:show()
+          if not shown or not runtime.sidebar:is_visible() then
+            return Promise.reject({ error_class = show_error or "tui_unavailable" })
+          end
+          tui_ready = runtime.sidebar:select_session(session.id)
+        end
+        return tui_ready
           :next(function()
-            runtime.sidebar:show(context.win)
             local payload = {
               messageID = job.user_message_id,
               agent = mode,

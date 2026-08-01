@@ -1,244 +1,266 @@
 local Sidebar = {}
 Sidebar.__index = Sidebar
 
-local shared = { win = nil, active_root = nil }
+local shared = { pane_id = nil, pane_pid = nil, runtime = nil }
 
-local function valid_window(win)
-  return win and vim.api.nvim_win_is_valid(win)
+---Runs one tmux command as argv and captures its result without shell interpolation.
+---@param args string[]
+---@param opts? table
+---@return vim.SystemCompleted
+local function tmux(args, opts)
+  local command = { "tmux" }
+  vim.list_extend(command, args)
+  return vim.system(command, vim.tbl_extend("force", { text = true }, opts or {})):wait()
 end
 
----Spawns an input-locked attach client in a Runtime-local terminal buffer.
-local function spawn(runtime, buf, on_exit)
-  buf = buf or vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].bufhidden = "hide"
-  local command =
-    { require("opencode.config").opts.runtime.binary, "attach", runtime.client.url, "--dir", runtime.root }
-  local source = vim.api.nvim_get_current_win()
-  local job
-  vim.api.nvim_buf_call(buf, function()
-    job = vim.fn.jobstart(command, {
-      term = true,
-      cwd = runtime.root,
-      env = { OPENCODE_SERVER_USERNAME = runtime.username, OPENCODE_SERVER_PASSWORD = runtime.password },
-      on_exit = function(_, code)
-        vim.schedule(function()
-          on_exit(job, code)
-        end)
-      end,
-    })
-  end)
-  vim.api.nvim_set_current_win(source)
-  if job <= 0 then
-    if vim.api.nvim_buf_is_valid(buf) then
-      vim.api.nvim_buf_delete(buf, { force = true })
-    end
-    return nil, "tui_spawn"
-  end
-  return { job = job, buf = buf }
-end
-
----Installs the permanent Terminal-Normal guard and disables plugin-buffer input mappings.
-local function install_lock(buf)
-  local group = vim.api.nvim_create_augroup("OpencodeSidebar" .. buf, { clear = true })
-  vim.api.nvim_create_autocmd({ "TermEnter", "BufEnter", "ModeChanged" }, {
-    group = group,
-    buffer = buf,
-    callback = function()
-      if vim.api.nvim_get_current_buf() == buf and vim.fn.mode():sub(1, 1) == "t" then
-        vim.cmd.stopinsert()
-      end
-    end,
-  })
-  for _, key in ipairs({ "i", "a", "I", "A", "o", "O" }) do
-    vim.keymap.set("n", key, "<Nop>", { buffer = buf, nowait = true })
-  end
-end
-
----Creates the one owned TUI client for a Runtime without creating a root-specific window.
----The terminal buffer remains Runtime-local; the shared sidebar window only displays the currently active root.
----@param runtime table
+---Reads the pane ID and pane process ID that tmux currently associates with a target.
+---Both values are needed because tmux pane IDs may be reused after the owned pane exits.
+---@param pane_id string?
 ---@return table?
----@return string?
+local function pane_details(pane_id)
+  if not pane_id then
+    return nil
+  end
+  local result = tmux({ "display-message", "-p", "-t", pane_id, "#{pane_id}\t#{pane_pid}" })
+  if result.code ~= 0 then
+    return nil
+  end
+  local id, pid = vim.trim(result.stdout or ""):match("^(%%[^%s]+)\t(%d+)$")
+  return id and { pane_id = id, pane_pid = tonumber(pid) } or nil
+end
+
+---Stores one TUI process identity in the Runtime's private ownership manifest.
+---Clearing it after verified pane removal prevents later shutdown from targeting an unrelated reused process ID.
+---@param runtime table
+---@param identity table?
+local function update_manifest(runtime, identity)
+  runtime.tui_identity = identity
+  if runtime.manifest then
+    runtime.manifest.tui = identity
+    require("opencode.runtime.ownership").write(runtime.owner_manifest, runtime.manifest)
+  end
+end
+
+---Forgets the shared pane and records its last known status on the Runtime that displayed it.
+---@param status? string
+local function clear_shared(status)
+  local runtime = shared.runtime
+  shared.pane_id, shared.pane_pid, shared.runtime = nil, nil, nil
+  if runtime then
+    runtime.tui_live = false
+    runtime.tui_status = status or "stopped"
+    update_manifest(runtime, nil)
+  end
+end
+
+---Reports whether the stored pane still has the same tmux pane ID and process ID.
+---A missing or reused pane is forgotten without sending a signal, so unrelated tmux panes are never treated as plugin-owned.
+---@return boolean
+local function shared_is_live()
+  if not shared.pane_id then
+    return false
+  end
+  local actual = pane_details(shared.pane_id)
+  if actual and actual.pane_id == shared.pane_id and actual.pane_pid == shared.pane_pid then
+    return true
+  end
+  clear_shared("dead")
+  return false
+end
+
+---Kills the stored pane only after tmux confirms both its pane ID and process ID.
+---The pane record and Runtime manifest are cleared even when the pane has already exited.
+---@return boolean
+local function kill_shared()
+  if not shared.pane_id then
+    return true
+  end
+  if not shared_is_live() then
+    return true
+  end
+  local result = tmux({ "kill-pane", "-t", shared.pane_id })
+  if result.code ~= 0 then
+    return false
+  end
+  clear_shared("stopped")
+  return true
+end
+
+---Creates a lazy handle for one Runtime; it does not start or display a TUI.
+---@param runtime table
+---@return table
 function Sidebar.new(runtime)
-  local generation = runtime.tui_generation
-  local result, err = spawn(runtime, nil, function(job)
-    if runtime.tui_generation == generation and runtime.sidebar and runtime.sidebar.job == job then
-      runtime:handle_tui_exit(generation)
-    end
-  end)
-  if not result then
-    return nil, err
-  end
-  install_lock(result.buf)
-  local self = setmetatable({ runtime = runtime, buf = result.buf, job = result.job, win = shared.win }, Sidebar)
-  return self
+  return setmetatable({ runtime = runtime }, Sidebar)
 end
 
----Shows one Runtime's terminal beside an explicit source window without changing source focus or another Runtime's process.
----Using the captured source avoids splitting transient prompt or dialog windows that happen to be current.
+---Reports whether tmux commands can safely target the Neovim pane from this process.
+---@return boolean
+function Sidebar.available()
+  return vim.fn.executable("tmux") == 1
+    and vim.env.TMUX ~= nil
+    and vim.env.TMUX ~= ""
+    and vim.env.TMUX_PANE ~= nil
+    and vim.env.TMUX_PANE ~= ""
+end
+
+---Shows this Runtime in the one detached, input-disabled tmux pane shared by all roots.
+---A different root's verified pane is removed first, then `opencode attach` is passed as argv in the canonical root with Runtime auth.
+---The detached split preserves the user's current pane and uses `$TMUX_PANE` as the explicit split target.
 ---@param runtime? table
----@param source_win? integer
-function Sidebar:show_root(runtime, source_win)
+---@return boolean
+---@return string?
+function Sidebar:show_root(runtime)
   runtime = runtime or self.runtime
-  if runtime.interaction_locked or not runtime.sidebar.buf or not vim.api.nvim_buf_is_valid(runtime.sidebar.buf) then
-    return
+  if runtime.interaction_locked then
+    return false, "interaction_locked"
   end
-  shared.active_root = runtime.root
-  local width = math.floor(vim.o.columns * require("opencode.config").opts.sidebar.width)
-  local return_win = vim.api.nvim_get_current_win()
-  local source = valid_window(source_win) and source_win or vim.api.nvim_get_current_win()
-  if not valid_window(shared.win) then
-    vim.api.nvim_win_call(source, function()
-      vim.cmd("botright vsplit")
-      shared.win = vim.api.nvim_get_current_win()
-    end)
+  if shared_is_live() and shared.runtime == runtime then
+    runtime.tui_live, runtime.tui_status = true, "live"
+    return true
   end
-  vim.api.nvim_win_set_buf(shared.win, runtime.sidebar.buf)
-  vim.api.nvim_win_set_width(shared.win, width)
-  if valid_window(return_win) then
-    vim.api.nvim_set_current_win(return_win)
-  elseif valid_window(source) then
-    vim.api.nvim_set_current_win(source)
+  if shared.pane_id and not kill_shared() then
+    return false, "tui_attach"
   end
-  self.win = shared.win
+  if not Sidebar.available() then
+    return false, "tmux_required"
+  end
+
+  local percentage = require("opencode.config").opts.sidebar.width
+  local format = "#{pane_id}\t#{pane_pid}"
+  local binary = require("opencode.config").opts.runtime.binary
+  local result = tmux({
+    "split-window",
+    "-h",
+    "-d",
+    "-p",
+    tostring(percentage),
+    "-t",
+    vim.env.TMUX_PANE,
+    "-P",
+    "-F",
+    format,
+    "-e",
+    "OPENCODE_SERVER_USERNAME=" .. runtime.username,
+    "-e",
+    "OPENCODE_SERVER_PASSWORD=" .. runtime.password,
+    binary,
+    "attach",
+    runtime.client.url,
+    "--dir",
+    runtime.root,
+  }, { cwd = runtime.root })
+  if result.code ~= 0 then
+    runtime.tui_live, runtime.tui_status = false, "error"
+    return false, "tui_attach"
+  end
+  local pane_id, pane_pid = vim.trim(result.stdout or ""):match("^(%%[^%s]+)\t(%d+)$")
+  pane_pid = tonumber(pane_pid)
+  if not pane_id or not pane_pid then
+    runtime.tui_live, runtime.tui_status = false, "error"
+    return false, "tui_attach"
+  end
+  shared.pane_id, shared.pane_pid, shared.runtime = pane_id, pane_pid, runtime
+  local disabled = tmux({ "select-pane", "-d", "-t", pane_id })
+  local identity = require("opencode.runtime.ownership").identity(pane_pid)
+  if disabled.code ~= 0 or not identity then
+    kill_shared()
+    runtime.tui_live, runtime.tui_status = false, "error"
+    return false, disabled.code ~= 0 and "tui_attach" or "tui_identity"
+  end
+  runtime.tui_live, runtime.tui_status = true, "live"
+  update_manifest(runtime, identity)
+  return true
 end
 
----@param source_win? integer
-function Sidebar:show(source_win)
-  local active = require("opencode.runtime").current()
-  if active == self.runtime then
-    self:show_root(self.runtime, source_win)
+---Lazily shows this Runtime only while it remains the active root.
+---@return boolean
+---@return string?
+function Sidebar:show()
+  if require("opencode.runtime").current() ~= self.runtime then
+    return false, "inactive_root"
   end
+  return self:show_root(self.runtime)
 end
 
----Reports visibility for this Runtime only, excluding a stale window reference left after switching roots.
+---Reports whether this Runtime owns the currently live shared tmux pane.
 ---@return boolean
 function Sidebar:is_visible()
-  return shared.active_root == self.runtime.root
-    and valid_window(shared.win)
-    and vim.api.nvim_win_get_buf(shared.win) == self.buf
+  return shared.runtime == self.runtime and shared_is_live()
 end
 
-function Sidebar:hide()
-  if self:is_visible() then
-    vim.api.nvim_win_close(shared.win, true)
-    shared.win = nil
+---Selects a transcript only while this Runtime's pane is reverified as live.
+---Keeping the liveness check beside the endpoint call prevents Build and dead-pane paths from addressing TUI state.
+---@param session_id string
+---@return Promise<any>
+function Sidebar:select_session(session_id)
+  if not self:is_visible() then
+    return require("opencode.promise").reject({ error_class = "tui_unavailable" })
   end
-  self.win = nil
+  return self.runtime.client:select_session(session_id)
 end
 
+---Returns the root whose plugin-owned pane is currently live.
+---@return string?
+function Sidebar.visible_root()
+  return shared_is_live() and shared.runtime.root or nil
+end
+
+---Hides this Runtime by killing only its reverified plugin-owned pane.
+---@return boolean
+function Sidebar:hide()
+  if shared.runtime ~= self.runtime then
+    return true
+  end
+  return kill_shared()
+end
+
+---Lazily shows this Runtime, or hides it when its owned pane is already live.
 function Sidebar:toggle()
   if self.runtime.interaction_locked then
     return
   end
-  if valid_window(shared.win) and shared.active_root == self.runtime.root then
+  if self:is_visible() then
     self:hide()
   else
-    self:show_root(self.runtime)
+    local shown = self:show()
+    if shown and self.runtime.selected_session_id then
+      self:select_session(self.runtime.selected_session_id):catch(function()
+        require("opencode.ui.notify").error("session_select")
+      end)
+    end
   end
 end
 
+---Lazily shows this Runtime and asks tmux to focus its reverified pane.
+---The initial split remains detached; only this explicit manual action changes tmux focus.
 function Sidebar:focus()
   if self.runtime.interaction_locked then
     return
   end
-  self:show_root(self.runtime)
-  if valid_window(shared.win) then
-    vim.api.nvim_set_current_win(shared.win)
+  local shown = self:show()
+  if shown and self:is_visible() then
+    if self.runtime.selected_session_id then
+      self:select_session(self.runtime.selected_session_id):catch(function()
+        require("opencode.ui.notify").error("session_select")
+      end)
+    end
+    tmux({ "select-pane", "-t", shared.pane_id })
   end
 end
 
----Reports whether the attach process still owns a valid terminal buffer.
----Runtime startup uses this after spawn because jobstart success alone does not prove the sidebar can render.
----@return boolean
-function Sidebar:valid_terminal()
-  return self.job ~= nil
-    and self.job > 0
-    and self.buf ~= nil
-    and vim.api.nvim_buf_is_valid(self.buf)
-    and vim.bo[self.buf].buftype == "terminal"
-end
-
----Marks a TUI process dead and removes only its terminal buffer while preserving the Server and Job state.
----The next recovery attach reuses the same Runtime credentials and selected Session.
+---Marks a missing TUI without changing Server, SSE, Session, or Job state.
 function Sidebar:dead()
-  if self.job then
-    local ownership = require("opencode.runtime.ownership")
-    local verified, running = ownership.verified(self.runtime.tui_identity)
-    if verified and running then
-      vim.fn.jobstop(self.job)
+  if shared.runtime == self.runtime then
+    if shared_is_live() then
+      kill_shared()
     end
   end
-  if valid_window(shared.win) and vim.api.nvim_win_get_buf(shared.win) == self.buf then
-    vim.api.nvim_win_close(shared.win, true)
-    shared.win = nil
-  end
-  if vim.api.nvim_buf_is_valid(self.buf) then
-    vim.api.nvim_buf_delete(self.buf, { force = true })
-  end
-  self.job, self.buf = nil, nil
+  self.runtime.tui_live, self.runtime.tui_status = false, "dead"
 end
 
----Attaches a replacement TUI to the same owned Server and restores the selected transcript after process readiness.
----A failed attach leaves the existing Runtime and Jobs intact so the user can retry explicitly.
----@return Promise<table>
-function Sidebar:recover()
-  local Promise = require("opencode.promise")
-  local was_visible = valid_window(shared.win) and shared.active_root == self.runtime.root
-  self:dead()
-  self.runtime.tui_generation = self.runtime.tui_generation + 1
-  local generation = self.runtime.tui_generation
-  local result, err = spawn(self.runtime, nil, function(job)
-    if self.runtime.tui_generation == generation and self.job == job then
-      self.runtime:handle_tui_exit(generation)
-    end
-  end)
-  if not result then
-    self.runtime.tui_recovery_error = err
-    require("opencode.ui.notify").error("tui_attach")
-    return Promise.reject({ error_class = err })
-  end
-  install_lock(result.buf)
-  self.buf, self.job = result.buf, result.job
-  self.runtime.tui_identity = require("opencode.runtime.ownership").identity(vim.fn.jobpid(self.job))
-  if not self.runtime.tui_identity then
-    self:dead()
-    return Promise.reject({ error_class = "tui_identity" })
-  end
-  self.runtime.manifest.tui = self.runtime.tui_identity
-  require("opencode.runtime.ownership").write(self.runtime.owner_manifest, self.runtime.manifest)
-  local selected = self.runtime.selected_session_id
-  local selected_result = selected and self.runtime.client:select_session(selected) or Promise.resolve(nil)
-  return selected_result
-    :next(function()
-      if was_visible and not self.runtime.interaction_locked then
-        self:show_root(self.runtime)
-      end
-      self.runtime.tui_recovery_error = nil
-      return self.runtime
-    end)
-    :catch(function(err)
-      self.runtime.tui_recovery_error = type(err) == "table" and err.error_class or "session_select"
-      return Promise.reject(err)
-    end)
-end
-
+---Stops only this Runtime's reverified shared pane during owned shutdown.
 function Sidebar:stop()
-  if valid_window(shared.win) and shared.active_root == self.runtime.root then
-    self:hide()
-  end
-  if self.job then
-    local ownership = require("opencode.runtime.ownership")
-    local verified, running = ownership.verified(self.runtime.tui_identity)
-    if verified and running then
-      vim.fn.jobstop(self.job)
-    end
-  end
-  self.job = nil
-  if self.buf and vim.api.nvim_buf_is_valid(self.buf) then
-    vim.api.nvim_buf_delete(self.buf, { force = true })
-  end
-  self.buf = nil
+  self:hide()
 end
 
 return Sidebar

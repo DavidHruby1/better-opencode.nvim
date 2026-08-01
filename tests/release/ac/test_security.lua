@@ -10,6 +10,44 @@ local function contains(messages, expected)
   return false
 end
 
+---Converts an argv array into a stable comparison key without treating it as shell text.
+---The NUL separator keeps each argument boundary visible when the test checks exact probes.
+local function argv_key(command)
+  return table.concat(command, "\0")
+end
+
+---Rejects shell-style, discovery, and tmux-mutating probes at the command boundary.
+---It accepts only the fixed Git and read-only tmux argv used by health, while requiring version checks to stay argv-based.
+local function assert_read_only_commands(calls)
+  local allowed = {
+    ["git\0merge-file\0-p\0--diff3\0/dev/null\0/dev/null\0/dev/null"] = true,
+    ["tmux\0-V"] = true,
+    ["tmux\0show-options\0-gv\0extended-keys"] = true,
+    ["tmux\0display-message\0-p\0#{client_termfeatures}"] = true,
+    ["tmux\0display-message\0-p\0#{client_termname}"] = true,
+  }
+  for _, command in ipairs(calls.system) do
+    eq(type(command), "table")
+    eq(allowed[argv_key(command)], true, "unexpected or mutating system command")
+  end
+  for _, command in ipairs(calls.fn_system) do
+    eq(type(command), "table")
+    eq(command[2], "--version")
+  end
+end
+
+---Checks the exact tmux argv emitted for one health observation.
+---The expected order follows capability collection so extra probes or mutation commands fail visibly.
+local function assert_tmux_argv(calls, expected)
+  local actual = {}
+  for _, command in ipairs(calls.system) do
+    if command[1] == "tmux" then
+      table.insert(actual, argv_key(command))
+    end
+  end
+  eq(actual, expected)
+end
+
 ---Runs the public health check against local capability boundaries without starting OpenCode.
 ---The returned observations preserve health levels and command probes for privacy assertions.
 ---@param spec? table
@@ -25,7 +63,7 @@ local function run_health(spec)
   }, binary)
   assert(vim.uv.fs_chmod(binary, 493))
   local observations = { start = {}, ok = {}, warn = {}, error = {} }
-  local calls = { executable = {}, system = {}, jobstart = {} }
+  local calls = { executable = {}, system = {}, fn_system = {}, jobstart = {} }
   local config = require("opencode.config")
   local health = require("opencode.health")
   local old = {
@@ -43,6 +81,7 @@ local function run_health(spec)
     new_tcp = vim.uv.new_tcp,
     version_ge = vim.version.ge,
     vim_system = vim.system,
+    fn_system = vim.fn.system,
     cwd = vim.uv.cwd,
     binary = config.opts.runtime.binary,
     snacks = package.loaded.snacks,
@@ -52,6 +91,7 @@ local function run_health(spec)
       OPENCODE_CONFIG = vim.env.OPENCODE_CONFIG,
       OPENCODE_CONFIG_DIR = vim.env.OPENCODE_CONFIG_DIR,
       OPENCODE_CONFIG_CONTENT = vim.env.OPENCODE_CONFIG_CONTENT,
+      TMUX = vim.env.TMUX,
     },
   }
 
@@ -70,6 +110,7 @@ local function run_health(spec)
     vim.uv.new_tcp = old.new_tcp
     vim.version.ge = old.version_ge
     vim.system = old.vim_system
+    vim.fn.system = old.fn_system
     vim.uv.cwd = old.cwd
     config.opts.runtime.binary = old.binary
     package.loaded.snacks = old.snacks
@@ -78,6 +119,7 @@ local function run_health(spec)
     vim.env.OPENCODE_CONFIG = old.env.OPENCODE_CONFIG
     vim.env.OPENCODE_CONFIG_DIR = old.env.OPENCODE_CONFIG_DIR
     vim.env.OPENCODE_CONFIG_CONTENT = old.env.OPENCODE_CONFIG_CONTENT
+    vim.env.TMUX = old.env.TMUX
     vim.uv.fs_unlink(binary)
     if spec.root == nil then
       vim.fn.delete(root, "rf")
@@ -106,6 +148,7 @@ local function run_health(spec)
   vim.env.OPENCODE_CONFIG = nil
   vim.env.OPENCODE_CONFIG_DIR = nil
   vim.env.OPENCODE_CONFIG_CONTENT = spec.config_content
+  vim.env.TMUX = spec.in_tmux and "health-fixture-tmux" or nil
   vim.fn.executable = function(name)
     table.insert(calls.executable, name)
     if name == binary and spec.opencode_available == false then
@@ -160,8 +203,39 @@ local function run_health(spec)
   vim.version.ge = function()
     return spec.nvim_available ~= false
   end
+  vim.fn.system = function(command, ...)
+    table.insert(calls.fn_system, vim.deepcopy(command))
+    return old.fn_system(command, ...)
+  end
   vim.system = function(command)
     table.insert(calls.system, vim.deepcopy(command))
+    if command[1] == "tmux" then
+      local tmux = spec.tmux or {}
+      if command[2] == "-V" then
+        return {
+          code = spec.tmux_version_error and 1 or 0,
+          stdout = spec.tmux_version or "tmux 3.4",
+          wait = function(self)
+            return self
+          end,
+        }
+      end
+      local output
+      if command[2] == "show-options" then
+        output = tmux.extended_keys or "on"
+      elseif command[2] == "display-message" and command[4] == "#{client_termfeatures}" then
+        output = tmux.client_termfeatures or "terminal:extkeys"
+      elseif command[2] == "display-message" and command[4] == "#{client_termname}" then
+        output = tmux.client_termname or "fixture-terminal"
+      end
+      return {
+        code = output == nil and 1 or 0,
+        stdout = output or "",
+        wait = function(self)
+          return self
+        end,
+      }
+    end
     return {
       code = spec.git_probe_code or 0,
       wait = function(self)
@@ -209,7 +283,13 @@ local function assert_private_health(observations, calls)
   eq(text:find("lsof", 1, true), nil)
   eq(contains(calls.executable, "pgrep"), false)
   eq(contains(calls.executable, "lsof"), false)
+  assert_read_only_commands(calls)
   for _, command in ipairs(calls.system) do
+    local command_text = table.concat(command, "\0")
+    eq(command_text:find("pgrep", 1, true), nil)
+    eq(command_text:find("lsof", 1, true), nil)
+  end
+  for _, command in ipairs(calls.fn_system) do
     local command_text = table.concat(command, "\0")
     eq(command_text:find("pgrep", 1, true), nil)
     eq(command_text:find("lsof", 1, true), nil)
@@ -217,6 +297,86 @@ local function assert_private_health(observations, calls)
   if vim.env.HOME and vim.env.HOME ~= "" then
     eq(text:find(vim.env.HOME, 1, true), nil)
   end
+end
+
+T["AC-SEC-02 health reports tmux transport boundaries without mutation"] = function()
+  local outside, outside_calls = run_health({ in_tmux = false })
+  eq(contains(outside.error, "tmux is required; start Neovim inside tmux (TMUX is not set)"), true)
+  eq(contains(outside.error, "tmux extended keys are disabled or unreadable"), false)
+  assert_tmux_argv(outside_calls, { "tmux\0-V" })
+  assert_private_health(outside, outside_calls)
+
+  local missing_executable, missing_executable_calls = run_health({
+    in_tmux = true,
+    executable = { tmux = false },
+  })
+  eq(
+    contains(missing_executable.error, "tmux executable is required; install tmux and restart Neovim inside tmux"),
+    true
+  )
+  assert_tmux_argv(missing_executable_calls, {})
+  assert_private_health(missing_executable, missing_executable_calls)
+
+  local missing_version, missing_version_calls = run_health({ in_tmux = true, tmux_version_error = true })
+  eq(contains(missing_version.error, "tmux version could not be read; ensure `tmux -V` succeeds"), true)
+  assert_tmux_argv(missing_version_calls, {
+    "tmux\0-V",
+    "tmux\0show-options\0-gv\0extended-keys",
+    "tmux\0display-message\0-p\0#{client_termfeatures}",
+    "tmux\0display-message\0-p\0#{client_termname}",
+  })
+  assert_private_health(missing_version, missing_version_calls)
+
+  local extended_off, extended_off_calls = run_health({
+    in_tmux = true,
+    tmux = { extended_keys = "off", client_termfeatures = "terminal:RGB,extkeys", client_termname = "actual-client" },
+  })
+  eq(
+    contains(extended_off.error, "tmux extended keys are disabled or unreadable; run `tmux set -g extended-keys on`"),
+    true
+  )
+  eq(contains(extended_off.ok, "tmux current client terminal features include extkeys"), true)
+  assert_private_health(extended_off, extended_off_calls)
+
+  local missing_extkeys, missing_extkeys_calls = run_health({
+    in_tmux = true,
+    tmux = { extended_keys = "on", client_termfeatures = "terminal:RGB", client_termname = "actual-client-termname" },
+  })
+  eq(contains(missing_extkeys.ok, "tmux current client termname: actual-client-termname"), true)
+  eq(
+    contains(
+      missing_extkeys.error,
+      "tmux current client lacks extkeys; run `tmux set -as terminal-features ',actual-client-termname:extkeys'`"
+    ),
+    true
+  )
+  assert_private_health(missing_extkeys, missing_extkeys_calls)
+
+  local healthy, healthy_calls = run_health({
+    in_tmux = true,
+    version = "1.17.3",
+    tmux = {
+      extended_keys = "on",
+      client_termfeatures = "actual-client:RGB,extkeys",
+      client_termname = "actual-client-termname",
+    },
+  })
+  for _, message in ipairs({
+    "Neovim is running inside tmux",
+    "tmux available: tmux 3.4",
+    "tmux global extended-keys is on",
+    "tmux current client termname: actual-client-termname",
+    "tmux current client terminal features include extkeys",
+  }) do
+    eq(contains(healthy.ok, message), true, message)
+  end
+  assert_tmux_argv(healthy_calls, {
+    "tmux\0-V",
+    "tmux\0show-options\0-gv\0extended-keys",
+    "tmux\0display-message\0-p\0#{client_termfeatures}",
+    "tmux\0display-message\0-p\0#{client_termname}",
+  })
+  assert_private_health(healthy, healthy_calls)
 end
 
 T["AC-SEC-02 health reports actionable local capability failures without discovery"] = function()
@@ -240,7 +400,7 @@ T["AC-SEC-02 health reports actionable local capability failures without discove
     "git is required for three-way merge; install Git and restart Neovim",
     "OpenCode executable is unavailable; configure runtime.binary or install exactly 1.17.3 or 1.18.9",
     "cannot bind 127.0.0.1; allow a loopback listener",
-    "jobstart(term=true) terminal API is required; use Neovim 0.11.0 or newer",
+    "jobstart process API is required; use Neovim 0.11.0 or newer",
     "private state/temp directories are not writable; fix permissions on stdpath(state)",
   }) do
     eq(contains(missing.error, message), true, message)

@@ -1,0 +1,10 @@
+{
+  "type": "message.part.delta",
+  "properties": {
+    "sessionID": "ses_fixture",
+    "messageID": "assistant_fixture",
+    "partID": "part_reasoning",
+    "field": "text",
+    "delta": " delta 1.18.9"
+  }
+}

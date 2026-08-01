@@ -18,7 +18,7 @@ T["Runtime prompt blocker exposes the concrete lifecycle gate"] = function()
   runtime.state = "starting"
   eq(runtime:prompt_blocker(), "starting")
   runtime.state, runtime.sse_live = "ready", true
-  eq(runtime:prompt_blocker(), "tui_unavailable")
+  eq(runtime:prompt_blocker(), nil)
   runtime.tui_live = true
   runtime.state, runtime.reconciling = "disconnected", true
   eq(runtime:prompt_blocker(), "disconnected")

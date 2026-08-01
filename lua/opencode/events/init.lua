@@ -78,6 +78,50 @@ local function exact(runtime, job)
   return true
 end
 
+---Feeds transient reasoning only to the exact mapped, active Build Job that owns the status.
+---Full reasoning updates register part identity first; text deltas for any unregistered identity are discarded.
+local function route_reasoning(job, event, session_id, assistant_id)
+  if job.mode ~= "build" or not job.request_status then
+    return
+  end
+  local properties = event.properties or {}
+  if event.type == "message.part.updated" then
+    local part = properties.part
+    if
+      type(part) == "table"
+      and part.type == "reasoning"
+      and part.sessionID == session_id
+      and part.messageID == assistant_id
+      and type(part.id) == "string"
+      and type(part.text) == "string"
+    then
+      require("opencode.ui.request_status").replace_reasoning(
+        job.request_status,
+        session_id,
+        assistant_id,
+        part.id,
+        part.text
+      )
+    end
+    return
+  end
+  if
+    event.type == "message.part.delta"
+    and properties.sessionID == session_id
+    and properties.messageID == assistant_id
+    and type(properties.partID) == "string"
+    and properties.field == "text"
+  then
+    require("opencode.ui.request_status").append_reasoning(
+      job.request_status,
+      session_id,
+      assistant_id,
+      properties.partID,
+      properties.delta
+    )
+  end
+end
+
 ---Reconciles one part that arrived before its assistant bootstrap through exact message detail.
 ---The prompt gate reopens only after the fetched assistant parent proves a registered Job identity.
 ---Failures remain fail-closed and never replay the discarded part into another Job.
@@ -150,7 +194,7 @@ local function route_message(runtime, event)
   end
   local properties = event.properties or {}
   local info = properties.info or properties.message or properties.part or properties
-  local session_id = info.sessionID or properties.sessionID
+  local session_id = properties.sessionID or info.sessionID
   if event.type == "message.updated" then
     local key
     if info.role == "user" then
@@ -190,7 +234,9 @@ local function route_message(runtime, event)
     reconcile_part(runtime, session_id, assistant_id)
     return true
   end
-  exact(runtime, job)
+  if exact(runtime, job) then
+    route_reasoning(job, event, session_id, assistant_id)
+  end
   return true
 end
 

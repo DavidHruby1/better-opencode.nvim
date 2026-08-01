@@ -4,6 +4,12 @@ local profiles = { "1.17.3", "1.18.9" }
 local unit = "MINI_TEST_PATH=$MINI_TEST_PATH nvim --headless -u tests/minimal_init.lua"
 
 local function acceptance_test(id)
+  if id == "AC-UI-05" then
+    return "tests/integration/test_request_status.lua"
+  end
+  if id == "AC-EVT-06" then
+    return "tests/contract/test_reasoning_events.lua"
+  end
   if id:match("^AC%-RUN%-") or id == "AC-EVT-05" then
     return "tests/release/ac/test_runtime.lua"
   end
@@ -59,6 +65,7 @@ add("AC-UI-01", "P1", "F03", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-UI-02", "P1", "F02", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-UI-03", "P2", "F11", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-UI-04", "P2", "F11", unit .. " -c 'lua MiniTest.run()'", nil)
+add("AC-UI-05", "P1", "F11", unit .. " -c 'lua MiniTest.run()'", nil)
 
 add("AC-CTX-01", "P1", "F02", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-CTX-02", "P1", "F02", unit .. " -c 'lua MiniTest.run()'", nil)
@@ -108,6 +115,7 @@ add("AC-EVT-02", "P0", "F06", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-EVT-03", "P0", "F09", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-EVT-04", "P0", "F09", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-EVT-05", "P1", "F09", unit .. " -c 'lua MiniTest.run()'", nil)
+add("AC-EVT-06", "P1", "F07", unit .. " -c 'lua MiniTest.run()'", nil)
 
 add("AC-INT-01", "P0", "F06", unit .. " -c 'lua MiniTest.run()'", nil)
 add("AC-INT-02", "P0", "F06", unit .. " -c 'lua MiniTest.run()'", nil)

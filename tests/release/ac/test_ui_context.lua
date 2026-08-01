@@ -58,8 +58,21 @@ local function ready_runtime(root, calls, session_id)
     sessions = {},
     jobs = {},
     sidebar = {
+      visible = false,
       show = function()
+        table.insert(calls.order, "split")
+        runtime.sidebar.visible = true
         calls.sidebar_shown = true
+        return true
+      end,
+      is_visible = function()
+        return runtime.sidebar.visible
+      end,
+      select_session = function(_, id)
+        table.insert(calls.order, "select")
+        calls.selects = calls.selects + 1
+        table.insert(calls.selected, id)
+        return Promise.resolve(nil)
       end,
     },
     selected_session_id = nil,
@@ -98,6 +111,7 @@ local function ready_runtime(root, calls, session_id)
       return Promise.resolve({})
     end,
     prompt_async = function(_, id, payload)
+      table.insert(calls.order, "prompt")
       calls.prompt_session = id
       table.insert(calls.prompts, payload)
       return Promise.resolve({})
@@ -118,7 +132,77 @@ end
 ---Creates call storage shared by the fake HTTP boundary and keeps assertions about dispatch explicit.
 ---@return table
 local function calls()
-  return { creates = 0, create_payloads = {}, updates = 0, gets = 0, selects = 0, selected = {}, prompts = {} }
+  return {
+    creates = 0,
+    create_payloads = {},
+    updates = 0,
+    gets = 0,
+    selects = 0,
+    selected = {},
+    prompts = {},
+    order = {},
+  }
+end
+
+---Fakes tmux only at the process boundary and gives every pane a deterministic ID/PID pair.
+---The caller can replace or remove the live identity to prove revalidation without touching a real tmux server.
+---@param callback fun(state: table)
+local function with_tmux(callback)
+  local old_system, old_executable = vim.system, vim.fn.executable
+  local old_tmux, old_tmux_pane = vim.env.TMUX, vim.env.TMUX_PANE
+  local old_ownership = package.loaded["opencode.runtime.ownership"]
+  local state = {
+    pane_id = "%pane-1",
+    pane_pid = 7001,
+    pane_live = false,
+    calls = {},
+  }
+  local function completed(code, stdout)
+    return {
+      code = code,
+      stdout = stdout or "",
+      stderr = "",
+      wait = function(self)
+        return self
+      end,
+    }
+  end
+  vim.env.TMUX, vim.env.TMUX_PANE = "session-1", "%source"
+  vim.fn.executable = function(name)
+    return name == "tmux" and 1 or old_executable(name)
+  end
+  package.loaded["opencode.runtime.ownership"] = {
+    identity = function(pid)
+      return { pid = pid, start = "start-" .. pid, executable = "/fake/opencode" }
+    end,
+    write = function() end,
+  }
+  vim.system = function(command, opts)
+    table.insert(state.calls, { command = vim.deepcopy(command), opts = opts })
+    local action = command[2]
+    if action == "display-message" then
+      if not state.pane_live then
+        return completed(1)
+      end
+      return completed(0, state.pane_id .. "\t" .. state.pane_pid)
+    end
+    if action == "split-window" then
+      state.pane_live = true
+      return completed(0, state.pane_id .. "\t" .. state.pane_pid)
+    end
+    if action == "kill-pane" then
+      state.pane_live = false
+      return completed(0)
+    end
+    return completed(0)
+  end
+  local ok, err = xpcall(function()
+    callback(state)
+  end, debug.traceback)
+  vim.system, vim.fn.executable = old_system, old_executable
+  vim.env.TMUX, vim.env.TMUX_PANE = old_tmux, old_tmux_pane
+  package.loaded["opencode.runtime.ownership"] = old_ownership
+  assert(ok, err)
 end
 
 ---Replaces only the Snacks window constructor so ask tests still exercise the real editor callbacks and Promise flow.
@@ -344,73 +428,157 @@ T["prompt geometry stays visible at an edge and grows with multiline input"] = f
   vim.fn.delete(path)
 end
 
-T["AC-UI-02 sidebar shows the active root without stealing focus and applies width changes"] = function()
+T["AC-UI-02 sidebar lazily splits the active root and leaves focus detached"] = function()
   local root = vim.fn.tempname()
   vim.fn.mkdir(root, "p")
-  local runtime = { root = root, client = { url = "http://127.0.0.1:1" }, username = "u", password = "p" }
-  local original_jobstart = vim.fn.jobstart
-  local command, options
-  vim.fn.jobstart = function(argv, opts)
-    command, options = argv, opts
-    return 4242
-  end
-  local sidebar = assert(require("opencode.ui.sidebar").new(runtime))
-  runtime.sidebar = sidebar
-  local source_win = vim.api.nvim_get_current_win()
-  local config = require("opencode.config")
-  local old_width = config.opts.sidebar.width
-  config.opts.sidebar.width = 0.25
-  sidebar:show_root(runtime)
-  local sidebar_win = sidebar.win
-  eq(vim.api.nvim_get_current_win(), source_win)
-  eq(sidebar:is_visible(), true)
-  eq(vim.api.nvim_win_get_width(sidebar_win), math.floor(vim.o.columns * 0.25))
-  eq(
-    { command[1], command[2], command[4], command[5], options.cwd },
-    { require("opencode.config").opts.runtime.binary, "attach", "--dir", root, root }
-  )
-  eq(options.env, { OPENCODE_SERVER_USERNAME = "u", OPENCODE_SERVER_PASSWORD = "p" })
+  with_tmux(function(state)
+    local runtime = { root = root, client = { url = "http://127.0.0.1:1" }, username = "u", password = "p" }
+    local source_win = vim.api.nvim_get_current_win()
+    local sidebar = assert(require("opencode.ui.sidebar").new(runtime))
+    runtime.sidebar = sidebar
+    local Runtime = require("opencode.runtime")
+    Runtime.registry[root] = runtime
+    eq(Runtime.show_root(root), runtime)
+    eq(sidebar:is_visible(), true)
+    eq(vim.api.nvim_get_current_win(), source_win)
+    eq(state.calls[1].command, {
+      "tmux",
+      "split-window",
+      "-h",
+      "-d",
+      "-p",
+      "30",
+      "-t",
+      "%source",
+      "-P",
+      "-F",
+      "#{pane_id}\t#{pane_pid}",
+      "-e",
+      "OPENCODE_SERVER_USERNAME=u",
+      "-e",
+      "OPENCODE_SERVER_PASSWORD=p",
+      "opencode",
+      "attach",
+      "http://127.0.0.1:1",
+      "--dir",
+      root,
+    })
+    eq(state.calls[1].opts.cwd, root)
+    eq(state.calls[2].command, { "tmux", "select-pane", "-d", "-t", "%pane-1" })
+    sidebar:show_root(runtime)
+    eq(#state.calls, 4)
+    eq(state.calls[4].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
 
-  sidebar:focus()
-  eq(vim.api.nvim_get_current_win(), sidebar_win)
-  sidebar:toggle()
-  eq(sidebar:is_visible() == true, false)
-  sidebar:toggle()
-  eq(sidebar:is_visible(), true)
-  sidebar_win = sidebar.win
-  config.opts.sidebar.width = 0.40
-  sidebar:show_root(runtime)
-  eq(vim.api.nvim_win_get_width(sidebar_win), math.floor(vim.o.columns * 0.40))
-
-  sidebar:stop()
-  config.opts.sidebar.width = old_width
-  vim.fn.jobstart = original_jobstart
+    sidebar:focus()
+    eq(state.calls[5].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[6].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[7].command, { "tmux", "select-pane", "-t", "%pane-1" })
+    sidebar:toggle()
+    eq(state.calls[8].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[9].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[10].command, { "tmux", "kill-pane", "-t", "%pane-1" })
+    eq(sidebar:is_visible(), false)
+    sidebar:toggle()
+    eq(sidebar:is_visible(), true)
+    eq(state.calls[11].command[2], "split-window")
+    sidebar:stop()
+    eq(state.calls[14].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[15].command, { "tmux", "kill-pane", "-t", "%pane-1" })
+    Runtime.registry[root], Runtime.active_root = nil, nil
+  end)
   vim.fn.delete(root, "rf")
 end
 
-T["sidebar split uses the captured source window without stealing transient focus"] = function()
+T["sidebar stop removes the detached pane without changing Neovim focus"] = function()
   local root = vim.fn.tempname()
   vim.fn.mkdir(root, "p")
-  local source_win = vim.api.nvim_get_current_win()
-  local source_buf = vim.api.nvim_get_current_buf()
-  vim.cmd.vsplit()
-  local transient_win = vim.api.nvim_get_current_win()
-  local runtime = { root = root, client = { url = "http://127.0.0.1:1" }, username = "u", password = "p" }
-  local old_jobstart = vim.fn.jobstart
-  vim.fn.jobstart = function()
-    return 4343
+  with_tmux(function(state)
+    local runtime = { root = root, client = { url = "http://127.0.0.1:1" }, username = "u", password = "p" }
+    local source_win = vim.api.nvim_get_current_win()
+    local sidebar = assert(require("opencode.ui.sidebar").new(runtime))
+    sidebar:show_root(runtime)
+    eq(vim.api.nvim_get_current_win(), source_win)
+    sidebar:stop()
+    eq(state.calls[3].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[4].command, { "tmux", "kill-pane", "-t", "%pane-1" })
+  end)
+  vim.fn.delete(root, "rf")
+end
+
+T["sidebar reports every missing tmux boundary clearly"] = function()
+  for _, missing in ipairs({ "tmux", "TMUX", "TMUX_PANE" }) do
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, "p")
+    with_tmux(function(state)
+      if missing == "tmux" then
+        vim.fn.executable = function(name)
+          return name == "tmux" and 0 or 1
+        end
+      elseif missing == "TMUX" then
+        vim.env.TMUX = nil
+      else
+        vim.env.TMUX_PANE = nil
+      end
+      local runtime = { root = root, client = { url = "http://127.0.0.1:1" } }
+      local shown, err = require("opencode.ui.sidebar").new(runtime):show_root(runtime)
+      eq({ shown, err, #state.calls }, { false, "tmux_required", 0 }, missing)
+    end)
+    vim.fn.delete(root, "rf")
   end
-  local sidebar = assert(require("opencode.ui.sidebar").new(runtime))
-  runtime.sidebar = sidebar
-  sidebar:show_root(runtime, source_win)
-  eq(vim.api.nvim_get_current_win(), transient_win)
-  eq(vim.api.nvim_win_get_buf(sidebar.win), sidebar.buf)
-  eq(vim.api.nvim_win_is_valid(transient_win), true)
-  eq(vim.api.nvim_win_get_buf(source_win), source_buf)
-  sidebar:stop()
-  vim.fn.jobstart = old_jobstart
-  vim.api.nvim_set_current_win(source_win)
-  vim.cmd.only()
+end
+
+T["sidebar replaces roots and stops only a revalidated pane identity"] = function()
+  local first_root, second_root = vim.fn.tempname(), vim.fn.tempname()
+  vim.fn.mkdir(first_root, "p")
+  vim.fn.mkdir(second_root, "p")
+  with_tmux(function(state)
+    local first = {
+      root = first_root,
+      username = "one",
+      password = "one-secret",
+      client = { url = "http://127.0.0.1:1" },
+      server_job = 11,
+      jobs = { active = { state = "running" } },
+    }
+    local second = {
+      root = second_root,
+      username = "two",
+      password = "two-secret",
+      client = { url = "http://127.0.0.1:2" },
+      server_job = 22,
+      jobs = { active = { state = "running" } },
+    }
+    local first_sidebar = require("opencode.ui.sidebar").new(first)
+    local second_sidebar = require("opencode.ui.sidebar").new(second)
+    first_sidebar:show_root(first)
+    second_sidebar:show_root(second)
+    eq(state.calls[3].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[4].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[5].command, { "tmux", "kill-pane", "-t", "%pane-1" })
+    eq(state.calls[6].command[2], "split-window")
+    eq({ first.tui_live, second.tui_live, first.server_job, second.server_job }, { false, true, 11, 22 })
+    eq({ first.jobs.active.state, second.jobs.active.state }, { "running", "running" })
+    second_sidebar:stop()
+  end)
+  vim.fn.delete(first_root, "rf")
+  vim.fn.delete(second_root, "rf")
+end
+
+T["sidebar refuses to kill a pane whose ID was reused with another PID"] = function()
+  local root = vim.fn.tempname()
+  vim.fn.mkdir(root, "p")
+  with_tmux(function(state)
+    local runtime = { root = root, client = { url = "http://127.0.0.1:1" }, username = "u", password = "p" }
+    local sidebar = require("opencode.ui.sidebar").new(runtime)
+    sidebar:show_root(runtime)
+    state.pane_pid = 7002
+    eq(sidebar:hide(), true)
+    eq(state.calls[3].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(runtime.tui_status, "dead")
+    for _, call in ipairs(state.calls) do
+      eq(call.command[2] == "kill-pane", false)
+    end
+  end)
   vim.fn.delete(root, "rf")
 end
 
@@ -815,6 +983,8 @@ T["AC-MODE-02 Build sends structured proposal with denied source-write tools and
   eq(call_log.prompts[1].parts[1].text:find("Return a structured replacement", 1, true) ~= nil, true)
   eq(call_log.prompts[1].parts[1].text:find("Base SHA-256:", 1, true) ~= nil, true)
   eq(table.concat(vim.fn.readfile(path), "\n"), original)
+  eq(call_log.order, { "prompt" })
+  eq({ call_log.selects, call_log.selected }, { 0, {} })
   local denied = {}
   for _, rule in ipairs(call_log.create_payload.permission) do
     if rule.action == "deny" then
@@ -839,8 +1009,8 @@ T["AC-MODE-03 Plan to Build follow-up reuses the Session with a new Job identity
   eq(call_log.creates, 1)
   eq(call_log.updates > 0, true)
   eq(#call_log.prompts, 2)
-  eq(call_log.selected[1], "ses_mode_03")
-  eq(call_log.selected[2], "ses_mode_03")
+  eq(call_log.order, { "split", "select", "prompt", "prompt" })
+  eq(call_log.selected, { "ses_mode_03" })
   eq(plan_job.session_id, second_job.session_id)
   eq(plan_job.user_message_id ~= second_job.user_message_id, true)
   eq(plan_job.state, "completed")

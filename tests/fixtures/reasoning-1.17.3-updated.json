@@ -1,0 +1,16 @@
+{
+  "type": "message.part.updated",
+  "properties": {
+    "sessionID": "ses_fixture",
+    "part": {
+      "id": "part_reasoning",
+      "sessionID": "ses_fixture",
+      "messageID": "assistant_fixture",
+      "type": "reasoning",
+      "text": "reasoning 1.17.3",
+      "time": {
+        "start": 1710000000000
+      }
+    }
+  }
+}

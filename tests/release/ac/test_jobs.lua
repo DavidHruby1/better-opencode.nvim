@@ -427,41 +427,20 @@ T["AC-JOB-06 picker retains only owned Sessions and revalidates before reuse"] =
   clear_fixture(runtime)
 end
 
-T["AC-JOB-07 sidebar stays input-locked and rejects focus actions"] = function()
+T["AC-JOB-07 locked sidebar rejects manual focus and toggle without starting a pane"] = function()
   local Sidebar = require("opencode.ui.sidebar")
   local root = "/acceptance/job-07"
   local runtime = Runtime.new(root)
-  runtime.client = { url = "http://127.0.0.1:4321" }
-  runtime.username, runtime.password, runtime.tui_generation = "opencode", "secret", 1
-  local old_jobstart = vim.fn.jobstart
-  local jobstart_calls = {}
-  vim.fn.jobstart = function(command, opts)
-    table.insert(jobstart_calls, { command = command, opts = opts })
-    return 77
-  end
-  local source = vim.api.nvim_get_current_win()
-  local sidebar = assert(Sidebar.new(runtime))
-  local buf = sidebar.buf
-  local maps = vim.api.nvim_buf_get_keymap(buf, "n")
-  local locked = {}
-  for _, map in ipairs(maps) do
-    locked[map.lhs] = map
-  end
-  local lock_autocmds = vim.api.nvim_get_autocmds({ group = "OpencodeSidebar" .. buf, buffer = buf })
-  eq(jobstart_calls[1].command, { "opencode", "attach", runtime.client.url, "--dir", root })
-  for _, key in ipairs({ "i", "a", "I", "A", "o", "O" }) do
-    eq(locked[key] ~= nil, true, key)
-    eq(locked[key].rhs == "" or locked[key].rhs == "<Nop>", true, key)
-  end
-  eq(#lock_autocmds, 3)
   runtime.interaction_locked = true
+  local old_system, system_calls = vim.system, 0
+  vim.system = function()
+    system_calls = system_calls + 1
+  end
+  local sidebar = assert(Sidebar.new(runtime))
   sidebar:focus()
   sidebar:toggle()
-  eq(vim.api.nvim_get_current_win(), source)
-  eq(sidebar:is_visible(), false)
-
-  vim.fn.jobstart = old_jobstart
-  sidebar:stop()
+  eq(system_calls, 0)
+  vim.system = old_system
 end
 
 T["AC-EVT-01 Runtime routes assistant parts by exact Session and Message identity"] = function()
@@ -940,6 +919,12 @@ T["AC-INT-04 canonical reply restores sidebar visibility without unlocking TUI i
     end,
   })
   local runtime = runtime_fixture(root, client)
+  local old_sidebar_module = package.loaded["opencode.ui.sidebar"]
+  package.loaded["opencode.ui.sidebar"] = {
+    visible_root = function()
+      return runtime.sidebar.visible and runtime.root or nil
+    end,
+  }
   local job = { key = "job_interaction", root = root, session_id = "ses_interaction", state = "running" }
   runtime.jobs[job.key], runtime.sessions[job.session_id] = job, { id = job.session_id, active_job_key = job.key }
   local old_select = vim.ui.select
@@ -978,7 +963,64 @@ T["AC-INT-04 canonical reply restores sidebar visibility without unlocking TUI i
   )
   eq(job.state, "running")
   vim.ui.select = old_select
+  package.loaded["opencode.ui.sidebar"] = old_sidebar_module
   clear_fixture(runtime)
+end
+
+T["question and permission replies do not restore a pane that was hidden already"] = function()
+  local events = require("opencode.events")
+  local old_sidebar_module, old_select = package.loaded["opencode.ui.sidebar"], vim.ui.select
+  for _, kind in ipairs({ "question", "permission" }) do
+    local root = "/acceptance/int-04-hidden-" .. kind
+    local replies = {}
+    local client = fake_client({
+      question_reply = function(_, id)
+        table.insert(replies, { kind = "question", id = id })
+        return Promise.resolve({})
+      end,
+      permission_reply = function(_, id, action)
+        table.insert(replies, { kind = "permission", id = id, action = action })
+        return Promise.resolve({})
+      end,
+    })
+    local runtime = runtime_fixture(root, client)
+    runtime.sidebar.visible = false
+    package.loaded["opencode.ui.sidebar"] = {
+      visible_root = function()
+        return nil
+      end,
+    }
+    vim.ui.select = function(items, _, callback)
+      callback(items[1])
+    end
+    local job = { key = "job_" .. kind, root = root, session_id = "ses_" .. kind, state = "running" }
+    runtime.jobs[job.key], runtime.sessions[job.session_id] = job, { id = job.session_id, active_job_key = job.key }
+    events.route(runtime, {
+      type = kind .. ".asked",
+      properties = {
+        sessionID = job.session_id,
+        requestID = "request-" .. kind,
+        questions = kind == "question" and { { options = { { label = "yes" } } } } or nil,
+        permission = kind == "permission" and "read" or nil,
+      },
+    })
+    local interaction = require("opencode.interaction")
+    interaction.advance()
+    eq(
+      vim.wait(1000, function()
+        return #replies == 1
+      end),
+      true
+    )
+    events.route(runtime, {
+      type = kind .. ".replied",
+      properties = { sessionID = job.session_id, requestID = "request-" .. kind },
+    })
+    eq({ runtime.sidebar.hide_calls, runtime.sidebar.show_calls, runtime.sidebar.visible }, { 0, 0, false }, kind)
+    clear_fixture(runtime)
+  end
+  vim.ui.select = old_select
+  package.loaded["opencode.ui.sidebar"] = old_sidebar_module
 end
 
 T["AC-STATE-01 Job transition matrix accepts only declared transitions and required kinds"] = function()

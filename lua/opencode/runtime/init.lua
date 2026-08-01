@@ -155,7 +155,6 @@ function Runtime.new(root)
     generation = 0,
     server_generation = 0,
     stream_generation = 0,
-    tui_generation = 0,
     reconciling = false,
     sse_live = false,
     tui_live = false,
@@ -193,9 +192,6 @@ function Runtime:prompt_blocker()
   end
   if self.state ~= "ready" or not self.sse_live then
     return "disconnected"
-  end
-  if not self.tui_live then
-    return "tui_unavailable"
   end
   if self.reconciliation_required then
     return "reconciling"
@@ -437,50 +433,6 @@ local function spawn_server(runtime)
   return runtime
 end
 
----Starts the single TUI client and resolves after its process survives one event-loop turn with a valid terminal buffer.
----Early process exit rejects startup instead of leaving a ready Runtime with a dead sidebar.
-local function start_tui(runtime, deadline)
-  local Promise = require("opencode.promise")
-  runtime.tui_generation = runtime.tui_generation + 1
-  runtime.tui_live = false
-  runtime.tui_status = "starting"
-  local sidebar, err = require("opencode.ui.sidebar").new(runtime)
-  if not sidebar then
-    runtime.tui_status = "error"
-    return Promise.reject({ error_class = err })
-  end
-  runtime.sidebar = sidebar
-  runtime.tui_identity = require("opencode.runtime.ownership").identity(vim.fn.jobpid(sidebar.job))
-  if not runtime.tui_identity then
-    sidebar:stop()
-    runtime.tui_status = "error"
-    return Promise.reject({ error_class = "tui_identity" })
-  end
-  write_manifest(runtime)
-  local selected = runtime.selected_session_id and runtime.sessions[runtime.selected_session_id]
-  local selection = selected and runtime.client:select_session(selected.id) or Promise.resolve(nil)
-  return selection:next(function()
-    return Promise.new(function(resolve, reject)
-      runtime.tui_start_reject = reject
-      vim.defer_fn(function()
-        runtime.tui_start_reject = nil
-        local running = runtime.sidebar and runtime.sidebar.job and vim.fn.jobwait({ runtime.sidebar.job }, 0)[1] == -1
-        local valid = runtime.sidebar and runtime.sidebar:valid_terminal()
-        if runtime.state ~= "starting" or vim.uv.now() >= deadline then
-          reject({ error_class = "startup_timeout" })
-        elseif not running or not valid then
-          runtime.tui_status = "dead"
-          reject({ error_class = "tui_attach" })
-        else
-          runtime.tui_live = true
-          runtime.tui_status = "live"
-          resolve(runtime)
-        end
-      end, math.min(100, math.max(1, deadline - vim.uv.now())))
-    end)
-  end)
-end
-
 ---Loads persisted managed Sessions and runs the same exact recovery snapshot used after reconnect.
 ---Inventory failure is fatal because startup cannot safely declare reconciliation complete without it.
 local function initial_reconcile(runtime)
@@ -531,8 +483,9 @@ local function validate_agents(agents)
   return required.build and required.plan and agents or nil
 end
 
----Starts or restarts only the owned Server/TUI pair, performs compatibility preflight, and opens prompts after reconciliation.
+---Starts or restarts the owned Server, performs compatibility preflight, and opens prompts after reconciliation.
 ---A disconnected Runtime is restarted in place so local Job snapshots and edit marks survive until fail-closed reconciliation decides them.
+---The tmux TUI remains lazy and is not part of Runtime readiness, but tmux is required so later Plan and manual UI actions have a safe host.
 ---@return Promise<table>
 function Runtime:start()
   local Promise = require("opencode.promise")
@@ -544,6 +497,10 @@ function Runtime:start()
   end
   if self.state == "stopping" then
     return Promise.reject({ error_class = "runtime_stopping" })
+  end
+  if not require("opencode.ui.sidebar").available() then
+    vim.notify("opencode.nvim requires Neovim to run inside tmux with $TMUX_PANE set", vim.log.levels.ERROR)
+    return Promise.reject({ error_class = "cancelled" })
   end
   self.lifecycle_generation = self.lifecycle_generation + 1
   local lifecycle = self.lifecycle_generation
@@ -567,6 +524,7 @@ function Runtime:start()
     self:stop()
     return Promise.reject(spawn_error)
   end
+  self.sidebar = self.sidebar or require("opencode.ui.sidebar").new(self)
   local timeout = require("opencode.config").opts.runtime.startup_timeout
   local deadline = vim.uv.now() + timeout
   self.startup_deadline = deadline
@@ -611,9 +569,6 @@ function Runtime:start()
       if self.state ~= "starting" or not self.sse_live then
         return Promise.reject({ error_class = "sse_disconnected" })
       end
-      return startup_step(self, lifecycle, deadline, start_tui(self, deadline))
-    end)
-    :next(function()
       return startup_step(self, lifecycle, deadline, initial_reconcile(self))
     end)
     :next(function()
@@ -649,7 +604,6 @@ function Runtime:on_server_exit(generation)
   self.tui_live = false
   self.tui_status = "dead"
   self.stream_generation = self.stream_generation + 1
-  self.tui_generation = self.tui_generation + 1
   if self.sse then
     vim.fn.jobstop(self.sse)
     self.sse = nil
@@ -668,38 +622,6 @@ function Runtime:on_server_exit(generation)
   })
 end
 
----Recovers only a dead TUI when the owning Server and Runtime generation remain valid.
----A Server crash leaves the terminal hidden for explicit Runtime restart instead of attaching to an unverified endpoint.
----@param generation integer
-function Runtime:handle_tui_exit(generation)
-  if generation ~= self.tui_generation then
-    return
-  end
-  self.tui_live = false
-  self.tui_status = "dead"
-  if self.state == "starting" then
-    if self.tui_start_reject then
-      self.tui_start_reject({ error_class = "tui_attach" })
-      self.tui_start_reject = nil
-    end
-    return
-  end
-  if self.state ~= "ready" or not self.sse_live then
-    return
-  end
-  self:retry_tui():catch(function(err)
-    self.tui_recovery_error = type(err) == "table" and err.error_class or "tui_attach"
-    self.tui_status = "error"
-    require("opencode.ui.notify").error("tui_attach")
-    require("opencode.log").write({
-      level = "error",
-      root_hash = self.root_hash,
-      runtime_state = self.state,
-      error_class = self.tui_recovery_error,
-    })
-  end)
-end
-
 ---Restarts an explicitly disconnected owned Runtime and reconciles its persisted Session state before prompts reopen.
 ---@return Promise<table>
 function Runtime:restart()
@@ -709,30 +631,24 @@ function Runtime:restart()
   return self:start()
 end
 
----Retries a failed TUI attach without changing Server, SSE, Session, or Job state.
+---Lazily attaches a TUI without changing Server, SSE, Session, or Job state.
+---A dead pane can be retried while the Runtime remains ready because TUI health is independent from prompt readiness.
 ---@return Promise<table>
 function Runtime:retry_tui()
-  if not self.sidebar or self.tui_recovering or self.state == "stopping" or self.state == "stopped" then
+  local Promise = require("opencode.promise")
+  if not self.sidebar or self.state == "stopping" or self.state == "stopped" then
     return require("opencode.promise").reject({ error_class = "tui_unavailable" })
   end
-  self.tui_recovering = true
-  self.tui_status = "recovering"
-  return self.sidebar
-    :recover()
-    :next(function(value)
-      self.tui_live = true
-      self.tui_status = "live"
-      return require("opencode.promise").resolve(value)
-    end)
-    :catch(function(err)
-      self.tui_live = false
-      self.tui_status = "error"
-      self.tui_recovery_error = type(err) == "table" and err.error_class or "tui_attach"
-      return require("opencode.promise").reject(err)
-    end)
-    :finally(function()
-      self.tui_recovering = false
-    end)
+  local shown, err = self.sidebar:show_root(self)
+  if not shown then
+    return Promise.reject({ error_class = err or "tui_unavailable" })
+  end
+  if not self.selected_session_id then
+    return Promise.resolve(self)
+  end
+  return self.sidebar:select_session(self.selected_session_id):next(function()
+    return self
+  end)
 end
 
 ---Routes events through the owning Runtime and exact Session/Job identities.
@@ -874,7 +790,6 @@ function Runtime:stop()
   self.lifecycle_generation = self.lifecycle_generation + 1
   self:transition("stopping")
   self.server_generation = self.server_generation + 1
-  self.tui_generation = self.tui_generation + 1
   self.prompt_locked = true
   self.reconciling = false
   self.tui_live = false
@@ -1001,7 +916,7 @@ function Runtime.all()
   return result
 end
 
----Makes one Runtime's TUI the visible sidebar buffer without stopping any other root.
+---Makes one Runtime's lazy tmux TUI visible without stopping another root's Server or Jobs.
 ---@param root string
 ---@return table?
 function Runtime.show_root(root)
@@ -1013,7 +928,12 @@ function Runtime.show_root(root)
   active_root = root
   Runtime.active_root = root
   if runtime.sidebar then
-    runtime.sidebar:show_root(runtime)
+    local shown = runtime.sidebar:show_root(runtime)
+    if shown and runtime.selected_session_id then
+      runtime.sidebar:select_session(runtime.selected_session_id):catch(function()
+        require("opencode.ui.notify").error("session_select")
+      end)
+    end
   end
   return runtime
 end

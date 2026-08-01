@@ -39,7 +39,7 @@ Neovim
   Runtime registry (canonical project root -> Runtime)
     Runtime
       owned OpenCode Server (HTTP + SSE)
-      owned OpenCode TUI client (terminal buffer)
+      owned OpenCode TUI client (shared right tmux pane)
       Session registry
         Session -> zero/one active Job
       Job registry (sessionID + userMessageID)
@@ -48,10 +48,10 @@ Neovim
   Structured proposal validator
   Base/Ours/Theirs merge engine
   Buffer applier
-  Sidebar/status/session picker UI
+  Prompt float / tmux pane / status UI
 ```
 
-Server je headless HTTP proces. TUI je samostatný klient připojený k tomuto Serveru a vložený do terminal bufferu. Plugin neposílá inline prompt přes TUI keyboard emulaci; používá Session HTTP API. TUI slouží jako transcript renderer a přepíná Session přes TUI API. Protože pinovaný plný TUI nemá transcript-only režim, jeho terminal input je po celý život Runtime uzamčený a managed question/permission flow navíc používá visibility lock popsaný níže.
+Server je headless HTTP proces. Build/Plan prompt je float a nepoužívá TUI keyboard emulaci; používá Session HTTP API. TUI je jeden sdílený pravý tmux pane pro všechny rooty, připojený s auth a canonical root cwd. Pane je input-locked a slouží jako transcript renderer; přepnutí Session přes `/tui/select-session` se používá jen když pane existuje.
 
 ## Kompatibilita a API baseline
 
@@ -73,6 +73,10 @@ Nejde o semver rozsah ani best-effort legacy fallback. Každý profil má vlastn
 5. při neshodě skončí fail-closed compatibility chybou.
 
 Žádný best-effort fallback na neznámý payload nebo endpoint není povolen. Rozdíl mezi dvěma podporovanými profily smí řešit pouze explicitní, contract-testovaný adapter vybraný podle přesné health verze. Upgrade OpenCode vyžaduje nový ověřený baseline a contract fixture.
+
+### Terminal stack a tmux
+
+Runtime a health ověřují i terminální prostředí. Když plugin běží uvnitř tmux, musí být dostupný `$TMUX`, verze tmux, `extended-keys` a `client_termfeatures` s `extkeys`; mimo tmux startup failuje jasnou chybou. WezTerm musí mít `enable_kitty_keyboard=true`; tmux `terminal-features` se vážou na skutečný `client_termname`. Plugin global tmux config nemění. `<C-j>` zůstává terminal-safe fallback pro víceřádkový prompt a keymap confidence se dokládá reprodukovatelným manuálním protokolem WezTerm→WSL→tmux→Neovim.
 
 ### Použité endpointy
 
@@ -179,17 +183,17 @@ opencode serve --hostname 127.0.0.1 --port <port>
 7. Proběhne version, `/doc` a effective `/config` preflight. Effective config odmítne pouze enabled tools mimo exact compatibility profil; pluginy a MCP entries nechá OpenCode-owned. Endpoint `/mcp` se při preflightu nesmí volat, protože by MCP inicializoval.
 8. `/agent` musí vrátit oba primary agenty `build` a `plan`; chybějící agent ukončí startup fail-closed.
 9. SSE je live až po prvním garantovaném `server.connected`; samotný spawn `curl` nestačí.
-10. TUI klient se spustí ze stejného canonical rootu ekvivalentem `opencode attach http://127.0.0.1:<port> --dir <canonical-root>` se stejnými auth env hodnotami a jeho identita se doplní do manifestu.
-11. TUI terminal buffer se okamžitě přepne do permanentního input locku a startup ověří přežití procesu i platný terminal buffer.
-12. Proběhne inventory a initial reconciliation. Teprve po jejich úspěchu Runtime přejde do `ready` a přijímá prompty.
+10. Proběhne inventory a initial reconciliation. Teprve po jejich úspěchu Runtime přejde do `ready` a přijímá prompty.
+
+TUI není součástí startupu ani readiness. Plan nebo ruční show/focus později vytvoří sdílený tmux pane a spustí v něm `opencode attach http://127.0.0.1:<port> --dir <canonical-root>` se stejnými auth env hodnotami. Build tento krok neprovádí.
 
 Password, owner nonce ani authorization header se nesmí logovat. Ownership manifest se po normálním shutdownu odstraní. Plugin nesmí použít `pgrep`, `lsof`, mDNS ani server discovery.
 
 Passive guard musí parsovat config data bez importu custom modulů a odmítnout executable soubory pouze v dokumentovaných `tool/tools` adresářích dříve, než se Server spustí. Pluginy a MCP se nekontrolují jako proposal tools; OpenCode je načítá podle vlastní konfigurace. Skills, commands, agents, providers a `AGENTS.md` zůstávají povolené a custom tool stále nesmí rozšířit proposal-only boundary verze 2.0.
 
-### Sidebar a více rootů
+### Sdílený tmux pane a více rootů
 
-Runtime každého rootu vlastní skrytelný terminal buffer. Jeden sidebar window zobrazuje TUI aktivního rootu. Přepnutí aktivního project rootu pouze přepne terminal buffer v sidebaru; procesy a Joby ostatních Runtime pokračují.
+Runtime každého rootu sdílí jeden pravý tmux pane. Pane se vytváří lazy, jen pro Plan nebo ruční show/focus, a drží 70:30 split vůči aktuálnímu `$TMUX_PANE`. Přepnutí aktivního project rootu pouze přepne obsah pane; procesy a Joby ostatních Runtime pokračují a nejvýše jeden pane existuje.
 
 ### Shutdown a crash
 
@@ -197,7 +201,7 @@ Runtime každého rootu vlastní skrytelný terminal buffer. Jeden sidebar windo
 
 1. označení `stopping`,
 2. abort aktivních Session,
-3. ukončení TUI child procesu,
+3. odstranění sdíleného TUI pane, pokud tento Runtime drží jeho znovu ověřenou identitu,
 4. ukončení Server child procesu,
 5. cleanup merge/proposal temp souborů,
 6. odstranění ownership manifestu,
@@ -205,7 +209,7 @@ Runtime každého rootu vlastní skrytelný terminal buffer. Jeden sidebar windo
 
 Při příštím startupu plugin zpracuje stale manifests před vytvořením nového Runtime. Starý Server je považován za vlastněný pouze pokud současně sedí PID start identity, executable, authenticated health na uloženém portu a canonical root vrácený serverem. TUI vyžaduje shodnou PID start identity, executable a manifest vazbu na ověřený Server. Jen potom smí plugin procesy ukončit. Pokud ownership nelze prokázat, proces se nesignalizuje, manifest se ponechá pro diagnostiku a health zobrazí manuální cleanup instrukci.
 
-TUI-only crash nemění Server ani Job state. Runtime skryje mrtvý terminal buffer, spustí nový `attach --dir` proti stejnému Serveru a přes `/tui/select-session` obnoví zobrazenou Session. Server crash nastaví Runtime `disconnected`; pending proposal a Base zůstávají lokálně, nic se neaplikuje a restart vyžaduje plnou Server reconciliation.
+TUI-only crash nemění Server ani Job state. Runtime skryje mrtvý pane, spustí nový `attach --dir` proti stejnému Serveru a přes `/tui/select-session` obnoví zobrazenou Session jen když pane existuje. Server crash nastaví Runtime `disconnected`; pending proposal a Base zůstávají lokálně, nic se neaplikuje a restart vyžaduje plnou Server reconciliation.
 
 ## Permission model
 
@@ -617,17 +621,17 @@ Question nebo permission dialog nastaví Job `waiting_user`; conflict dialog pon
 
 ### Permanentní TUI input lock a managed visibility lock
 
-Pinovaný `opencode attach` je plný TUI a nemá transcript-only přepínač. Plugin proto po vytvoření terminal bufferu trvale vynutí Terminal-Normal režim: `TermEnter` a `startinsert` pro tento buffer okamžitě vrátí Terminal-Normal, pluginové mapy neposílají TUI prompt/control input a focus akce slouží pouze ke scrollu a navigaci transcriptu. Přímé `nvim_chan_send()` mimo plugin API je mimo podporovaný kontrakt.
+Pinovaný `opencode attach` je plný TUI a nemá transcript-only přepínač. Plugin proto po vytvoření pane trvale vynutí Terminal-Normal režim: `TermEnter` a `startinsert` pro tento pane okamžitě vrátí Terminal-Normal, pluginové mapy neposílají TUI prompt/control input a focus akce slouží pouze ke scrollu a navigaci transcriptu. Přímé `nvim_chan_send()` mimo plugin API je mimo podporovaný kontrakt.
 
 Při managed `question.asked` nebo `permission.asked` plugin navíc ve stejném scheduled callbacku:
 
-1. uloží, zda byl sidebar viditelný, a source return window,
+1. uloží, zda byl pane viditelný, a source return window,
 2. nastaví Runtime `interaction_locked = true`,
-3. skryje sidebar window a zablokuje pluginové toggle/focus/select-session akce,
+3. skryje pane a zablokuje pluginové toggle/focus/select-session akce,
 4. otevře autoritativní Snacks dialog z FIFO queue,
 5. odešle odpověď přes canonical question/permission endpoint,
 6. čeká na matching replied/rejected event nebo reconciliation potvrzení,
-7. teprve potom Runtime visibility lock zruší a obnoví předchozí sidebar visibility bez focus steal; permanentní input lock zůstává.
+7. teprve potom Runtime visibility lock zruší a obnoví předchozí pane visibility jen když byl dříve viditelný; permanentní input lock zůstává.
 
 TUI proces během visibility locku dál přijímá Server eventy, ale nemůže přijmout uživatelský input. Proto nemůže vzniknout druhá odpověď na stejný request ID. Pokud TUI proces během locku spadne, request zůstává ve Snacks queue a použije se TUI-only recovery; Server ani Job se nerestartují.
 
@@ -664,7 +668,7 @@ session_short_id, message_short_id, old_state, new_state,
 event_type, endpoint, status_code, error_class
 ```
 
-Nesmí obsahovat prompt, model response, structured replacement, Base/Ours/Theirs, absolute home path, auth secret ani source diff. Explicitní debug-content režim je mimo verzi 2.0.
+Nesmí obsahovat prompt, reasoning preview, model response, structured replacement, Base/Ours/Theirs, absolute home path, auth secret ani source diff. Explicitní debug-content režim je mimo verzi 2.0.
 
 Health check ověří:
 
@@ -673,7 +677,7 @@ Health check ověří:
 - executable `git` a `git merge-file` capability,
 - Tree-sitter parser availability jako informaci, ne hard failure,
 - možnost bindnout loopback port,
-- funkční terminal API.
+- tmux stack: `$TMUX`, `$TMUX_PANE`, verzi tmux, `extended-keys` a `client_termfeatures` s `extkeys`.
 
 ## Implementační hranice komponent
 
@@ -681,7 +685,7 @@ Konkrétní názvy Lua modulů se mohou přizpůsobit upstream struktuře, ale o
 
 | Komponenta | Odpovědnost |
 |---|---|
-| Runtime manager | procesy, root registry, ownership manifest, auth, health, recovery, shutdown |
+| Runtime manager | procesy, root registry, ownership manifest, auth, health, recovery, shutdown, tmux pane lifecycle |
 | OpenCode client | pinované HTTP payloady, root header, endpointy, error mapping |
 | Session registry | picker data, availability, TUI selection |
 | Job registry | state transitions, correlation, cancellation, late-event guard |
@@ -691,7 +695,7 @@ Konkrétní názvy Lua modulů se mohou přizpůsobit upstream struktuře, ale o
 | Merge engine | temp files, `git merge-file`, conflict strategies |
 | Buffer applier | changedtick, disk fingerprint, InsertLeave, minimal undoable mutation, view/extmark preservation |
 | Interaction queue | question/permission/conflict native UI serialization a TUI interaction lock |
-| Sidebar/status UI | terminal buffers, focus lock, notifications, state rendering |
+| Prompt float / tmux pane / status UI | float prompt, inline Build status, tmux pane, focus lock, notifications, state rendering |
 
 ## Reference sources
 
