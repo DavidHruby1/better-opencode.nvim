@@ -267,19 +267,32 @@ local function mark_unowned_remote_work(runtime, statuses, pending)
   end
 end
 
----Closes one reconciliation generation and replays only events received from that same stream.
+---Closes one reconciliation generation, records its prompt blocker, and replays only same-stream events after success.
+---A failed or genuinely blocked snapshot stays fail-closed; only a complete successful snapshot may clear obsolete locks.
 local function finish(runtime, generation, ok, err)
   if runtime.reconcile_generation ~= generation or runtime.state == "stopping" or runtime.state == "stopped" then
     return
   end
   runtime.reconciling = false
   runtime.reconcile_error = err
-  if ok and runtime.sse_live and runtime.state == "disconnected" then
-    runtime:transition("ready")
+  runtime.reconciliation_failed = not ok
+  if not ok then
+    runtime.prompt_locked = true
+    runtime.reconciliation_required = true
+    require("opencode.ui.notify").error(err)
+  end
+  if ok and runtime.sse_live and (runtime.state == "starting" or runtime.state == "disconnected") then
+    if runtime.state ~= "starting" or not runtime.startup_deadline or vim.uv.now() < runtime.startup_deadline then
+      runtime:transition("ready")
+    end
+  end
+  if ok then
+    runtime.reconcile_error = nil
+    runtime.reconciliation_failed = nil
+    runtime.reconciliation_required = runtime.reconciliation_blocked == true
   end
   if ok and runtime.state == "ready" and not runtime.interaction_locked and not runtime.reconciliation_blocked then
     runtime.prompt_locked = false
-    runtime.reconciliation_required = false
   end
   if ok then
     local buffered = runtime.buffered_events or {}
@@ -337,8 +350,7 @@ function M.run(runtime, generation)
                 job.error_class = type(err) == "table" and err.error_class or "message_reconciliation"
                 job.error_endpoint = type(err) == "table" and err.endpoint or nil
                 job.error_status = type(err) == "table" and err.status or nil
-                require("opencode.job").finish(job, session, "error")
-                return { job = job, session = session, status = status, messages = {} }
+                return Promise.reject(err)
               end)
           )
         end

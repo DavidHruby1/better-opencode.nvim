@@ -74,30 +74,40 @@ function Sidebar.new(runtime)
   return self
 end
 
----Shows one Runtime's terminal in the shared sidebar without changing source focus or another Runtime's process.
+---Shows one Runtime's terminal beside an explicit source window without changing source focus or another Runtime's process.
+---Using the captured source avoids splitting transient prompt or dialog windows that happen to be current.
 ---@param runtime? table
-function Sidebar:show_root(runtime)
+---@param source_win? integer
+function Sidebar:show_root(runtime, source_win)
   runtime = runtime or self.runtime
   if runtime.interaction_locked or not runtime.sidebar.buf or not vim.api.nvim_buf_is_valid(runtime.sidebar.buf) then
     return
   end
   shared.active_root = runtime.root
   local width = math.floor(vim.o.columns * require("opencode.config").opts.sidebar.width)
-  local source = vim.api.nvim_get_current_win()
+  local return_win = vim.api.nvim_get_current_win()
+  local source = valid_window(source_win) and source_win or vim.api.nvim_get_current_win()
   if not valid_window(shared.win) then
-    vim.cmd("botright vsplit")
-    shared.win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_call(source, function()
+      vim.cmd("botright vsplit")
+      shared.win = vim.api.nvim_get_current_win()
+    end)
   end
   vim.api.nvim_win_set_buf(shared.win, runtime.sidebar.buf)
   vim.api.nvim_win_set_width(shared.win, width)
-  vim.api.nvim_set_current_win(source)
+  if valid_window(return_win) then
+    vim.api.nvim_set_current_win(return_win)
+  elseif valid_window(source) then
+    vim.api.nvim_set_current_win(source)
+  end
   self.win = shared.win
 end
 
-function Sidebar:show()
+---@param source_win? integer
+function Sidebar:show(source_win)
   local active = require("opencode.runtime").current()
   if active == self.runtime then
-    self:show_root(self.runtime)
+    self:show_root(self.runtime, source_win)
   end
 end
 
@@ -136,6 +146,17 @@ function Sidebar:focus()
   if valid_window(shared.win) then
     vim.api.nvim_set_current_win(shared.win)
   end
+end
+
+---Reports whether the attach process still owns a valid terminal buffer.
+---Runtime startup uses this after spawn because jobstart success alone does not prove the sidebar can render.
+---@return boolean
+function Sidebar:valid_terminal()
+  return self.job ~= nil
+    and self.job > 0
+    and self.buf ~= nil
+    and vim.api.nvim_buf_is_valid(self.buf)
+    and vim.bo[self.buf].buftype == "terminal"
 end
 
 ---Marks a TUI process dead and removes only its terminal buffer while preserving the Server and Job state.
@@ -189,15 +210,16 @@ function Sidebar:recover()
   local selected = self.runtime.selected_session_id
   local selected_result = selected and self.runtime.client:select_session(selected) or Promise.resolve(nil)
   return selected_result
-    :catch(function()
-      return nil
-    end)
     :next(function()
       if was_visible and not self.runtime.interaction_locked then
         self:show_root(self.runtime)
       end
       self.runtime.tui_recovery_error = nil
       return self.runtime
+    end)
+    :catch(function(err)
+      self.runtime.tui_recovery_error = type(err) == "table" and err.error_class or "session_select"
+      return Promise.reject(err)
     end)
 end
 

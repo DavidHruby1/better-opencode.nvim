@@ -126,7 +126,10 @@ function Runtime.verify_doc(doc, profile)
       return false, "missing_operation:" .. id
     end
     if
-      not vim.deep_equal(operation_contract(actual_operations[id], doc), operation_contract(expected_operations[id], expected))
+      not vim.deep_equal(
+        operation_contract(actual_operations[id], doc),
+        operation_contract(expected_operations[id], expected)
+      )
     then
       return false, "schema_mismatch:" .. id
     end
@@ -155,6 +158,8 @@ function Runtime.new(root)
     tui_generation = 0,
     reconciling = false,
     sse_live = false,
+    tui_live = false,
+    tui_status = "stopped",
     prompt_locked = false,
     reconciliation_required = false,
     interaction_locked = false,
@@ -167,15 +172,45 @@ function Runtime.new(root)
   return self
 end
 
+---Returns the one reason this Runtime cannot accept a new prompt, or nil when prompts are safe.
+---Lifecycle and recovery facts are ordered here so callers do not invent competing blocker rules.
+---@return string?
+function Runtime:prompt_blocker()
+  if self.state == "starting" then
+    return "starting"
+  end
+  if self.state == "disconnected" then
+    return "disconnected"
+  end
+  if self.reconciling then
+    return "reconciling"
+  end
+  if self.interaction_locked then
+    return "interaction_locked"
+  end
+  if self.reconciliation_failed or self.reconcile_error then
+    return "reconciliation_failed"
+  end
+  if self.state ~= "ready" or not self.sse_live then
+    return "disconnected"
+  end
+  if not self.tui_live then
+    return "tui_unavailable"
+  end
+  if self.reconciliation_required then
+    return "reconciling"
+  end
+  if self.prompt_locked or self.reconciliation_blocked then
+    return "reconciliation_blocked"
+  end
+  return nil
+end
+
 ---Reports whether this Runtime can accept a new prompt.
----Readiness, live SSE, reconciliation, and interaction policy are evaluated together so callers never maintain a second gate.
+---It delegates to the authoritative blocker reason so every prompt entry uses the same lifecycle policy.
 ---@return boolean
 function Runtime:accepts_prompts()
-  return self.state == "ready"
-    and self.sse_live
-    and not self.reconciling
-    and not self.prompt_locked
-    and not self.interaction_locked
+  return self:prompt_blocker() == nil
 end
 
 ---Moves a Runtime through the recovery lifecycle and rejects impossible state jumps.
@@ -282,8 +317,10 @@ local function handle_sse_exit(runtime, generation, code)
   end, delay)
 end
 
----Opens one root-bound SSE stream and reconciles before reopening prompts after a disconnect.
-function Runtime:connect_sse()
+---Opens one root-bound SSE stream and resolves only after its first server.connected event.
+---The startup deadline or one startup-timeout interval bounds that first event; the stream has no lifetime timeout afterward.
+---@param deadline? integer
+function Runtime:connect_sse(deadline)
   local Promise = require("opencode.promise")
   if not self.client or self.state == "stopping" or self.state == "stopped" then
     return Promise.reject({ error_class = "runtime_not_running" })
@@ -297,22 +334,67 @@ function Runtime:connect_sse()
   self.generation = self.generation + 1
   local generation = self.stream_generation
   self.sse_live = false
+  local connected = false
+  local connection_settled = false
+  local first_event_timer
+  local first_event_deadline = deadline or vim.uv.now() + require("opencode.config").opts.runtime.startup_timeout
+  local connection, resolve_connection, reject_connection = Promise.with_resolvers()
+  local function stop_first_event_timer()
+    if first_event_timer then
+      first_event_timer:stop()
+      first_event_timer = nil
+    end
+  end
+  local function reject_first_event(err)
+    if connection_settled then
+      return
+    end
+    connection_settled = true
+    stop_first_event_timer()
+    reject_connection(err)
+  end
   self.sse = self.client:subscribe(function(event)
     if generation == self.stream_generation and self.state ~= "stopping" and self.state ~= "stopped" then
-      self.reconnect_attempt = 0
+      if event.type == "server.connected" and not connected then
+        if vim.uv.now() >= first_event_deadline then
+          reject_first_event({ error_class = "startup_timeout" })
+          self:_invalidate_stream()
+          return
+        end
+        connected = true
+        connection_settled = true
+        stop_first_event_timer()
+        self.sse_live = true
+        self.reconnect_attempt = 0
+        resolve_connection(self)
+      end
       self:route_event(event)
     end
   end, function(code)
+    if not connected then
+      reject_first_event({ error_class = "sse_disconnected", status = code })
+      return
+    end
     handle_sse_exit(self, generation, code)
-  end)
+  end, { connect_timeout_ms = math.max(1, first_event_deadline - vim.uv.now()) })
   if self.sse <= 0 then
     return Promise.reject({ error_class = "sse_spawn" })
   end
-  self.sse_live = true
-  if recovering then
-    return require("opencode.runtime.reconcile").run(self, self.generation)
-  end
-  return Promise.resolve(self)
+  first_event_timer = vim.defer_fn(function()
+    if connection_settled then
+      return
+    end
+    reject_first_event({ error_class = "startup_timeout" })
+    if generation == self.stream_generation then
+      self:_invalidate_stream()
+    end
+  end, math.max(1, first_event_deadline - vim.uv.now()))
+  return connection:next(function()
+    if recovering then
+      return require("opencode.runtime.reconcile").run(self, self.generation)
+    end
+    return Promise.resolve(self)
+  end)
 end
 
 ---Starts one owned Server generation, writes its manifest, and creates a Runtime-bound client.
@@ -355,48 +437,98 @@ local function spawn_server(runtime)
   return runtime
 end
 
----Starts the single TUI client for a Runtime and restores its selected transcript after attach.
-local function start_tui(runtime)
+---Starts the single TUI client and resolves after its process survives one event-loop turn with a valid terminal buffer.
+---Early process exit rejects startup instead of leaving a ready Runtime with a dead sidebar.
+local function start_tui(runtime, deadline)
+  local Promise = require("opencode.promise")
   runtime.tui_generation = runtime.tui_generation + 1
+  runtime.tui_live = false
+  runtime.tui_status = "starting"
   local sidebar, err = require("opencode.ui.sidebar").new(runtime)
   if not sidebar then
-    return require("opencode.promise").reject({ error_class = err })
+    runtime.tui_status = "error"
+    return Promise.reject({ error_class = err })
   end
   runtime.sidebar = sidebar
   runtime.tui_identity = require("opencode.runtime.ownership").identity(vim.fn.jobpid(sidebar.job))
   if not runtime.tui_identity then
     sidebar:stop()
-    return require("opencode.promise").reject({ error_class = "tui_identity" })
+    runtime.tui_status = "error"
+    return Promise.reject({ error_class = "tui_identity" })
   end
   write_manifest(runtime)
   local selected = runtime.selected_session_id and runtime.sessions[runtime.selected_session_id]
-  local selection = selected and runtime.client:select_session(selected.id) or require("opencode.promise").resolve(nil)
-  return selection
-    :catch(function()
-      return nil
+  local selection = selected and runtime.client:select_session(selected.id) or Promise.resolve(nil)
+  return selection:next(function()
+    return Promise.new(function(resolve, reject)
+      runtime.tui_start_reject = reject
+      vim.defer_fn(function()
+        runtime.tui_start_reject = nil
+        local running = runtime.sidebar and runtime.sidebar.job and vim.fn.jobwait({ runtime.sidebar.job }, 0)[1] == -1
+        local valid = runtime.sidebar and runtime.sidebar:valid_terminal()
+        if runtime.state ~= "starting" or vim.uv.now() >= deadline then
+          reject({ error_class = "startup_timeout" })
+        elseif not running or not valid then
+          runtime.tui_status = "dead"
+          reject({ error_class = "tui_attach" })
+        else
+          runtime.tui_live = true
+          runtime.tui_status = "live"
+          resolve(runtime)
+        end
+      end, math.min(100, math.max(1, deadline - vim.uv.now())))
     end)
-    :next(function()
-      return runtime
-    end)
+  end)
 end
 
 ---Loads persisted managed Sessions and runs the same exact recovery snapshot used after reconnect.
+---Inventory failure is fatal because startup cannot safely declare reconciliation complete without it.
 local function initial_reconcile(runtime)
+  return require("opencode.session").inventory(runtime):next(function()
+    return require("opencode.runtime.reconcile").run(runtime, runtime.generation)
+  end)
+end
+
+local function startup_valid(runtime, lifecycle, deadline)
+  return runtime.lifecycle_generation == lifecycle
+    and (runtime.state == "starting" or runtime.state == "ready")
+    and vim.uv.now() < deadline
+end
+
+---Applies the one startup deadline and lifecycle generation to an asynchronous startup step.
+---Late endpoint callbacks may settle their own transport, but they cannot advance or revive this Runtime.
+local function startup_step(runtime, lifecycle, deadline, promise)
   local Promise = require("opencode.promise")
-  return require("opencode.session")
-    .inventory(runtime)
-    :catch(function()
-      return {}
-    end)
-    :next(function()
-      return require("opencode.runtime.reconcile").run(runtime, runtime.generation)
-    end)
-    :catch(function(err)
-      runtime.reconciling = false
-      runtime.prompt_locked = true
-      runtime.reconcile_error = err
-      return Promise.reject(err)
-    end)
+  local guarded = Promise.resolve(promise):next(function(value)
+    if not startup_valid(runtime, lifecycle, deadline) then
+      return Promise.reject({ error_class = "startup_timeout" })
+    end
+    return Promise.resolve(value)
+  end)
+  local timeout = Promise.new(function(_, reject)
+    vim.defer_fn(function()
+      reject({ error_class = "startup_timeout" })
+    end, math.max(1, deadline - vim.uv.now()))
+  end)
+  return Promise.race({ guarded, timeout })
+end
+
+---Validates the /agent payload and requires both plugin prompt modes to be primary agents.
+---Failing closed here prevents a seemingly ready Runtime from sending prompts to a missing or secondary agent.
+local function validate_agents(agents)
+  if type(agents) ~= "table" or not vim.islist(agents) then
+    return nil
+  end
+  local required = { build = false, plan = false }
+  for _, agent in ipairs(agents) do
+    if type(agent) ~= "table" or type(agent.name) ~= "string" then
+      return nil
+    end
+    if required[agent.name] ~= nil and agent.mode == "primary" then
+      required[agent.name] = true
+    end
+  end
+  return required.build and required.plan and agents or nil
 end
 
 ---Starts or restarts only the owned Server/TUI pair, performs compatibility preflight, and opens prompts after reconciliation.
@@ -414,6 +546,7 @@ function Runtime:start()
     return Promise.reject({ error_class = "runtime_stopping" })
   end
   self.lifecycle_generation = self.lifecycle_generation + 1
+  local lifecycle = self.lifecycle_generation
   self:transition("starting")
   self.prompt_locked = true
   self.reconciling = true
@@ -423,11 +556,11 @@ function Runtime:start()
     return Promise.reject({ error_class = guard_error })
   end
   if not stale_checked then
-    stale_checked = true
     if not require("opencode.runtime.ownership").cleanup_stale_manifests() then
       self:stop()
       return Promise.reject({ error_class = "manual_cleanup" })
     end
+    stale_checked = true
   end
   local spawned, spawn_error = spawn_server(self)
   if not spawned then
@@ -435,53 +568,57 @@ function Runtime:start()
     return Promise.reject(spawn_error)
   end
   local timeout = require("opencode.config").opts.runtime.startup_timeout
-  local start_promise = poll_health(self, vim.uv.now() + timeout)
+  local deadline = vim.uv.now() + timeout
+  self.startup_deadline = deadline
+  local start_promise = startup_step(self, lifecycle, deadline, poll_health(self, deadline))
     :next(function(health)
       self.profile = require("opencode.compat")[health.version]
       if not self.profile then
         return Promise.reject({ error_class = "unsupported_version" })
       end
       self.client.profile = self.profile
-      return self.client:doc()
+      return startup_step(self, lifecycle, deadline, self.client:doc())
     end)
     :next(function(doc)
       local ok, err = Runtime.verify_doc(doc, self.profile)
       if not ok then
         return Promise.reject({ error_class = err })
       end
-      return self.client:path()
+      return startup_step(self, lifecycle, deadline, self.client:path())
     end)
     :next(function(path)
       local directory = require("opencode.runtime.root").realpath(path.directory or path.worktree or "")
       if directory ~= self.root then
         return Promise.reject({ error_class = "root_mismatch" })
       end
-      return self.client:config()
+      return startup_step(self, lifecycle, deadline, self.client:config())
     end)
     :next(function(config)
       local ok, err = config_valid(self, config)
       if not ok then
         return Promise.reject({ error_class = err })
       end
-      return self.client:agents()
+      return startup_step(self, lifecycle, deadline, self.client:agents())
     end)
     :next(function(agents)
-      self.agents = agents
-      return self:connect_sse()
+      self.agents = validate_agents(agents)
+      if not self.agents then
+        return Promise.reject({ error_class = "agent_unavailable" })
+      end
+      return startup_step(self, lifecycle, deadline, self:connect_sse(deadline))
     end)
     :next(function()
       if self.state ~= "starting" or not self.sse_live then
         return Promise.reject({ error_class = "sse_disconnected" })
       end
-      return start_tui(self)
+      return startup_step(self, lifecycle, deadline, start_tui(self, deadline))
     end)
     :next(function()
-      self:transition("ready")
-      return initial_reconcile(self)
+      return startup_step(self, lifecycle, deadline, initial_reconcile(self))
     end)
     :next(function()
       require("opencode.log").write({ level = "info", root_hash = self.root_hash, runtime_state = self.state })
-      return self
+      return Promise.resolve(self)
     end)
     :catch(function(err)
       if self.state ~= "stopping" then
@@ -490,6 +627,12 @@ function Runtime:start()
       return Promise.reject(err)
     end)
   self.start_promise = start_promise
+  start_promise:finally(function()
+    if self.start_promise == start_promise then
+      self.start_promise = nil
+      self.startup_deadline = nil
+    end
+  end)
   return start_promise
 end
 
@@ -503,6 +646,8 @@ function Runtime:on_server_exit(generation)
   self.prompt_locked = true
   self.reconciling = true
   self.sse_live = false
+  self.tui_live = false
+  self.tui_status = "dead"
   self.stream_generation = self.stream_generation + 1
   self.tui_generation = self.tui_generation + 1
   if self.sse then
@@ -527,10 +672,32 @@ end
 ---A Server crash leaves the terminal hidden for explicit Runtime restart instead of attaching to an unverified endpoint.
 ---@param generation integer
 function Runtime:handle_tui_exit(generation)
-  if generation ~= self.tui_generation or self.state ~= "ready" or not self.sse_live then
+  if generation ~= self.tui_generation then
     return
   end
-  self:retry_tui():catch(function() end)
+  self.tui_live = false
+  self.tui_status = "dead"
+  if self.state == "starting" then
+    if self.tui_start_reject then
+      self.tui_start_reject({ error_class = "tui_attach" })
+      self.tui_start_reject = nil
+    end
+    return
+  end
+  if self.state ~= "ready" or not self.sse_live then
+    return
+  end
+  self:retry_tui():catch(function(err)
+    self.tui_recovery_error = type(err) == "table" and err.error_class or "tui_attach"
+    self.tui_status = "error"
+    require("opencode.ui.notify").error("tui_attach")
+    require("opencode.log").write({
+      level = "error",
+      root_hash = self.root_hash,
+      runtime_state = self.state,
+      error_class = self.tui_recovery_error,
+    })
+  end)
 end
 
 ---Restarts an explicitly disconnected owned Runtime and reconciles its persisted Session state before prompts reopen.
@@ -549,9 +716,23 @@ function Runtime:retry_tui()
     return require("opencode.promise").reject({ error_class = "tui_unavailable" })
   end
   self.tui_recovering = true
-  return self.sidebar:recover():finally(function()
-    self.tui_recovering = false
-  end)
+  self.tui_status = "recovering"
+  return self.sidebar
+    :recover()
+    :next(function(value)
+      self.tui_live = true
+      self.tui_status = "live"
+      return require("opencode.promise").resolve(value)
+    end)
+    :catch(function(err)
+      self.tui_live = false
+      self.tui_status = "error"
+      self.tui_recovery_error = type(err) == "table" and err.error_class or "tui_attach"
+      return require("opencode.promise").reject(err)
+    end)
+    :finally(function()
+      self.tui_recovering = false
+    end)
 end
 
 ---Routes events through the owning Runtime and exact Session/Job identities.
@@ -585,9 +766,6 @@ function Runtime:route_event(event)
   local properties = event.properties or {}
   local info = properties.info or properties.message or properties
   if event.type == "server.connected" then
-    if self.state == "disconnected" then
-      self:begin_reconciliation()
-    end
     return
   end
   if event.type == "session.error" then
@@ -679,6 +857,9 @@ function Runtime:begin_reconciliation()
   if not ok then
     self.reconciling = false
     self.reconcile_error = promise
+    self.reconciliation_failed = true
+    self.reconciliation_required = true
+    require("opencode.ui.notify").error(promise)
     return
   end
   promise:catch(function() end)
@@ -696,6 +877,8 @@ function Runtime:stop()
   self.tui_generation = self.tui_generation + 1
   self.prompt_locked = true
   self.reconciling = false
+  self.tui_live = false
+  self.tui_status = "stopped"
   self:_invalidate_stream()
   if self.reconnect_timer then
     pcall(function()
@@ -753,15 +936,16 @@ function Runtime:stop()
   end
 end
 
----Returns the Runtime for a captured buffer root, creating and activating only that root.
----Symlink aliases are canonicalized before registry lookup, so one root owns one Server/TUI/SSE set.
+---Returns a Runtime handle immediately together with its one shared readiness Promise.
+---Symlink aliases are canonicalized before registry lookup, so concurrent callers cannot create duplicate owned servers.
 ---@param capture table
+---@return table?
 ---@return Promise<table>
-function Runtime.get_or_start(capture)
+function Runtime.acquire(capture)
   local Promise = require("opencode.promise")
   local root, err = require("opencode.runtime.root").resolve(capture)
   if not root then
-    return Promise.reject({ error_class = err })
+    return nil, Promise.reject({ error_class = err })
   end
   local runtime = registry[root]
   if not runtime then
@@ -769,18 +953,25 @@ function Runtime.get_or_start(capture)
     registry[root] = runtime
   end
   if runtime.state == "disconnected" then
-    return Promise.reject({ error_class = "runtime_disconnected" })
+    return runtime, Promise.reject({ error_class = "runtime_disconnected" })
   end
   if runtime.state == "ready" then
     active_root = root
     Runtime.active_root = root
-    return Promise.resolve(runtime)
+    return runtime, Promise.resolve(runtime)
   end
-  return runtime:start():next(function(value)
-    active_root = root
-    Runtime.active_root = root
-    return value
-  end)
+  active_root = root
+  Runtime.active_root = root
+  return runtime, runtime:start()
+end
+
+---Returns the existing compatibility Promise for callers that only need a ready Runtime.
+---New callers may use acquire when they need lifecycle status while the shared startup is pending.
+---@param capture table
+---@return Promise<table>
+function Runtime.get_or_start(capture)
+  local _, readiness = Runtime.acquire(capture)
+  return readiness
 end
 
 ---Returns the Runtime selected for sidebar and command UI, never for event or HTTP routing.
@@ -854,6 +1045,7 @@ function Runtime.cancel_all()
         report.abort_failed = report.abort_failed + 1
       end
     end
+    ---@diagnostic disable-next-line: return-type-mismatch
     return report
   end)
 end

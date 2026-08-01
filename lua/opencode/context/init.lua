@@ -1,12 +1,14 @@
 local Context = {}
 Context.__index = Context
 
+---Reads the exact file bytes and maps filesystem failures to the public context error class.
+---The shared snapshot reader closes opened handles and keeps system error details out of notifications.
 local function raw_file(path)
-  local handle = assert(vim.uv.fs_open(path, "r", 438))
-  local stat = assert(vim.uv.fs_fstat(handle))
-  local bytes = assert(vim.uv.fs_read(handle, stat.size, 0))
-  vim.uv.fs_close(handle)
-  return bytes
+  local bytes = require("opencode.snapshot").read_raw(path)
+  if not bytes then
+    return nil, "disk_read"
+  end
+  return bytes, nil
 end
 
 ---@class opencode.context.Range
@@ -29,6 +31,7 @@ local function visual_range(buf)
 end
 
 ---Captures immutable editor identity before any prompt UI changes focus.
+---Unsupported targets keep their specific class. File read failures return a safe disk_read error through the public flow.
 ---@param range? opencode.context.Range
 ---@return table?
 ---@return string?
@@ -47,7 +50,10 @@ function Context.capture(range)
   if not stat or stat.type ~= "file" then
     return nil, "not_regular_file"
   end
-  local bytes = raw_file(real)
+  local bytes, read_error = raw_file(real)
+  if not bytes then
+    return nil, read_error
+  end
   if bytes:find("\0", 1, true) then
     return nil, "nul_file"
   end
@@ -111,8 +117,37 @@ function Context.format(opts)
   return result
 end
 
+---Splits prompt text into plain and highlighted context-placeholder segments.
+---The earliest match wins and longer keys win ties, so `@buffers` is never partially styled as `@buffer`.
+local function input_segments(prompt, keys)
+  local segments = {}
+  local cursor = 1
+  while cursor <= #prompt do
+    local match_start, match_end, match_key
+    for _, key in ipairs(keys) do
+      local start_at, end_at = prompt:find(key, cursor, true)
+      if start_at and (not match_start or start_at < match_start or start_at == match_start and #key > #match_key) then
+        match_start, match_end, match_key = start_at, end_at, key
+      end
+    end
+    if not match_start then
+      table.insert(segments, { prompt:sub(cursor) })
+      break
+    end
+    if match_start > cursor then
+      table.insert(segments, { prompt:sub(cursor, match_start - 1) })
+    end
+    table.insert(segments, { match_key, "OpencodeContextPlaceholder" })
+    cursor = match_end + 1
+  end
+  if #segments == 0 then
+    table.insert(segments, { prompt })
+  end
+  return segments
+end
+
 ---Expands configured placeholders and prepends the active location exactly once.
----Referenced file buffers are recorded for the shared dirty-buffer preflight.
+---Input keeps placeholder segments for multiline highlights while output records referenced buffers for dirty preflight.
 ---@param prompt string
 ---@return { input: table, output: table, plaintext: string }
 function Context:render(prompt)
@@ -136,7 +171,7 @@ function Context:render(prompt)
   end
   local Rendered = require("opencode.context.rendered")
   return {
-    input = setmetatable({ { prompt } }, Rendered),
+    input = setmetatable(input_segments(prompt, keys), Rendered),
     output = setmetatable({ { output } }, Rendered),
     plaintext = output,
   }

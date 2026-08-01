@@ -1,5 +1,14 @@
 local M = {}
 
+---Returns the Runtime's concrete prompt blocker while retaining compatibility with small test fakes.
+---Production callers use Runtime:prompt_blocker so dispatch errors name the actual lock instead of a generic not-ready state.
+local function prompt_blocker(runtime)
+  if runtime.prompt_blocker then
+    return runtime:prompt_blocker()
+  end
+  return runtime:accepts_prompts() and nil or "runtime_not_ready"
+end
+
 local function relative_path(root, path)
   return assert(vim.fs.relpath(root, path))
 end
@@ -58,7 +67,7 @@ end
 ---The Job is registered before prompt_async so immediate SSE cannot outrun local correlation state.
 ---@param text string
 ---@param context table
----@param opts? { mode?: "plan"|"build", scope?: "file", auto_apply?: boolean, new_session?: boolean }
+---@param opts? opencode.PromptOpts
 ---@return Promise<table>
 function M.prompt(text, context, opts)
   local Promise = require("opencode.promise")
@@ -70,15 +79,17 @@ function M.prompt(text, context, opts)
   return require("opencode.context.preflight").run(context):next(function()
     local rendered = context:render(text)
     local runtime = context.runtime
-    if not runtime:accepts_prompts() then
-      return Promise.reject({ error_class = "runtime_not_ready" })
-    end
-    if runtime.prompt_locked or runtime.interaction_locked then
-      return Promise.reject({ error_class = "interaction_locked" })
+    local blocker = prompt_blocker(runtime)
+    if blocker then
+      return Promise.reject({ error_class = blocker })
     end
     local base, scope, marks
     if mode == "build" then
-      base = assert(require("opencode.snapshot").capture(context.buf))
+      local base_error
+      base, base_error = require("opencode.snapshot").capture(context.buf)
+      if not base then
+        return Promise.reject({ error_class = base_error or "disk_read" })
+      end
       local scope_error
       scope, scope_error = require("opencode.scope").resolve(context, base, opts.scope)
       if not scope then
@@ -103,12 +114,13 @@ function M.prompt(text, context, opts)
       end
       marks = require("opencode.scope").create_marks(context.buf, scope)
     end
-    if runtime.prompt_locked or runtime.interaction_locked then
+    blocker = prompt_blocker(runtime)
+    if blocker then
       if marks then
         require("opencode.scope").delete_marks({ buffer = context.buf, marks = marks })
         marks = nil
       end
-      return Promise.reject({ error_class = "interaction_locked" })
+      return Promise.reject({ error_class = blocker })
     end
     return prepare_session(runtime, mode, context.path, opts)
       :next(function(remote)
@@ -131,28 +143,29 @@ function M.prompt(text, context, opts)
         runtime.jobs[job.key] = job
         session.active_job_key = job.key
         session.activity = vim.uv.now()
-        if not runtime:accepts_prompts() then
+        local dispatch_blocker = prompt_blocker(runtime)
+        if dispatch_blocker then
           require("opencode.job").transition(job, "error", { session = session })
-          return Promise.reject({ error_class = "interaction_locked" })
+          return Promise.reject({ error_class = dispatch_blocker })
         end
         runtime.selected_session_id = session.id
-        return runtime.client:select_session(session.id):next(function()
-          runtime.sidebar:show()
-          local payload = {
-            messageID = job.user_message_id,
-            agent = mode,
-            parts = { { type = "text", text = rendered.plaintext } },
-          }
-          if mode == "build" then
-            payload.format = { type = "json_schema", schema = vim.deepcopy(require("opencode.proposal").schema) }
-            payload.parts[1].text = build_instruction(context, rendered, base, scope)
-          end
-          return runtime.client
-            :prompt_async(session.id, payload)
-            :next(function()
+        return runtime.client
+          :select_session(session.id)
+          :next(function()
+            runtime.sidebar:show(context.win)
+            local payload = {
+              messageID = job.user_message_id,
+              agent = mode,
+              parts = { { type = "text", text = rendered.plaintext } },
+            }
+            if mode == "build" then
+              payload.format = { type = "json_schema", schema = vim.deepcopy(require("opencode.proposal").schema) }
+              payload.parts[1].text = build_instruction(context, rendered, base, scope)
+            end
+            return runtime.client:prompt_async(session.id, payload):next(function()
               return job
             end)
-        end)
+          end)
           :catch(function(err)
             job.error_class = type(err) == "table" and err.error_class or "prompt_http"
             require("opencode.job").transition(job, "error", { session = session })

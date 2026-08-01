@@ -2,7 +2,7 @@
 ---@field runtime? { binary?: string, startup_timeout?: integer, reconnect?: { max_attempts?: integer, backoff_ms?: integer, max_backoff_ms?: integer }, shutdown_timeout?: integer }
 ---@field sidebar? { width?: number }
 ---@field contexts? table<string, function>
----@field ask? { completion?: string, snacks?: table }
+---@field ask? { snacks?: { win?: snacks.win.Config } }
 ---@field notify? { enabled?: boolean, opts?: table }
 
 ---@type opencode.Opts?
@@ -27,15 +27,12 @@ local defaults = {
     ["@visible"] = require("opencode.context.builtins").visible_text,
   },
   ask = {
-    completion = "customlist,v:lua.opencode_completion",
     snacks = {
-      icon = "Plan ",
-      history = false,
       win = {
-        relative = "cursor",
-        row = -3,
-        col = 0,
-        b = { completion = true },
+        backdrop = false,
+        border = "rounded",
+        width = 72,
+        height = 3,
         bo = { filetype = "opencode_ask" },
       },
     },
@@ -59,8 +56,8 @@ local function check_number(value, scope, minimum, maximum, integer)
 end
 
 ---Validates only the documented v2 options and reports a source scope without exposing option values.
----Nested runtime numbers are range-checked, context values must be functions, and provider-specific Snacks options
----remain a single documented table passed to Snacks unchanged.
+---Nested runtime numbers are range-checked, context values must be functions, and ask customizations stay in one
+---Snacks.win table whose geometry and editor-owned callbacks are constrained when the prompt opens.
 ---@param value table
 ---@return boolean
 ---@return table?
@@ -157,15 +154,22 @@ local function validate(value)
       return failure("ask", "type")
     end
     for key in pairs(value.ask) do
-      if key ~= "completion" and key ~= "snacks" then
+      if key ~= "snacks" then
         return failure("ask." .. key, "unsupported_key")
       end
     end
-    if value.ask.completion and type(value.ask.completion) ~= "string" then
-      return failure("ask.completion", "type")
-    end
     if value.ask.snacks and type(value.ask.snacks) ~= "table" then
       return failure("ask.snacks", "type")
+    end
+    if value.ask.snacks then
+      for key in pairs(value.ask.snacks) do
+        if key ~= "win" then
+          return failure("ask.snacks." .. key, "unsupported_key")
+        end
+      end
+      if value.ask.snacks.win and type(value.ask.snacks.win) ~= "table" then
+        return failure("ask.snacks.win", "type")
+      end
     end
   end
   if value.notify then

@@ -76,6 +76,8 @@ function M.snapshot(runtime)
   local snapshot = {
     root = vim.fs.basename(runtime.root or ""),
     runtime_state = runtime.state or "unknown",
+    prompt_blocker = runtime.prompt_blocker and runtime:prompt_blocker() or nil,
+    tui_status = runtime.tui_status or "unknown",
     compatibility = runtime.profile and runtime.profile.version or "unknown",
     foreground = require("opencode.runtime").current() == runtime,
     sessions = {},
@@ -149,8 +151,8 @@ function M.jobs(runtime)
   return rows
 end
 
----Renders a colorless one-line status summary that keeps root, profile, counts, and selected identity visible.
----Only titles and roots are width-limited; short IDs, states, and modes remain complete for screen-reader-safe use.
+---Renders a colorless status summary with separate Runtime, prompt blocker, and TUI truth.
+---Only titles and roots are width-limited; short IDs, states, modes, and lifecycle diagnostics remain complete.
 ---@param snapshot table
 ---@param width? integer
 ---@return string
@@ -158,9 +160,11 @@ function M.text(snapshot, width)
   width = width or 120
   local counts = snapshot.counts
   local result = string.format(
-    "%s | Runtime %s | OpenCode %s | Sessions active=%d reusable=%d | Jobs active=%d terminal=%d",
+    "%s | Runtime %s | TUI %s | Blocker %s | OpenCode %s | Sessions active=%d reusable=%d | Jobs active=%d terminal=%d",
     truncate(snapshot.root, math.max(12, math.floor(width * 0.18))),
     snapshot.runtime_state,
+    snapshot.tui_status,
+    snapshot.prompt_blocker or "none",
     snapshot.compatibility,
     counts.active_sessions,
     counts.reusable_sessions,

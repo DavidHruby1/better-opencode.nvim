@@ -85,10 +85,8 @@ end
 ---@type vim.lsp.Config
 return {
   name = "opencode_ask_cmp",
-  -- Note the filetype has no effect because snacks.input buftype is `prompt`.
-  -- https://github.com/neovim/neovim/issues/36775
-  -- Instead, we manually start the LSP in a callback.
-  -- To that end, we also locate this file under `lua/` - not the usual `lsp/` - so Neovim's module resolution can find it.
+  -- The editor starts this config directly so completion stays bound to its captured Context.
+  -- It lives under `lua/` so normal module resolution can find it without global LSP configuration.
   filetypes = { "opencode_ask" },
   cmd = function(dispatchers, config)
     return {

@@ -11,15 +11,16 @@ local levels = {
 }
 local safe_classes = {
   agent_conflict = true,
+  agent_unavailable = true,
   apply_error = true,
   assistant_message_count = true,
   command_unsupported = true,
   config_parse = true,
-  custom_plugin = true,
   custom_tool = true,
   decode = true,
+  disconnected = true,
+  disk_read = true,
   external_change = true,
-  enabled_mcp = true,
   file_edited = true,
   hard_denied_permission = true,
   http = true,
@@ -33,9 +34,13 @@ local safe_classes = {
   missing_result = true,
   missing_pending_request = true,
   missing_session = true,
+  mode_unavailable = true,
   no_active_job = true,
   permission = true,
   process_identity = true,
+  reconciling = true,
+  reconciliation_blocked = true,
+  reconciliation_failed = true,
   root_mismatch = true,
   runtime_busy = true,
   runtime_disconnected = true,
@@ -57,11 +62,13 @@ local safe_classes = {
   sse_spawn = true,
   stale_generation = true,
   stale_source = true,
+  starting = true,
   startup_timeout = true,
   timeout = true,
   transport_closed = true,
   tui_attach = true,
   tui_identity = true,
+  tui_unavailable = true,
   unknown_session = true,
   unknown_session_status = true,
   unsupported_version = true,
@@ -69,11 +76,14 @@ local safe_classes = {
 }
 
 local actionable_messages = {
+  agent_unavailable = "agent_unavailable: OpenCode must provide both primary build and plan agents",
   config_parse = "config_parse: OpenCode config could not be parsed; fix it or use a clean config (see docs/RECOVERY.md)",
-  custom_plugin = "custom_plugin: custom OpenCode plugins are blocked; use a clean config (see docs/RECOVERY.md)",
   custom_tool = "custom_tool: custom OpenCode tools are blocked; use a clean config (see docs/RECOVERY.md)",
   decode = "decode: OpenCode returned an invalid response; restart the owned runtime (see docs/RECOVERY.md)",
-  enabled_mcp = "enabled_mcp: enabled OpenCode MCPs are blocked; disable them or use a clean config (see docs/RECOVERY.md)",
+  disk_read = "disk_read: the source file could not be read; check its permissions and try again",
+  disconnected = "disconnected: the owned OpenCode runtime is disconnected; restart it and retry",
+  reconciliation_failed = "reconciliation_failed: OpenCode state could not be verified; retry reconciliation or restart the runtime",
+  tui_unavailable = "tui_unavailable: the OpenCode sidebar attach failed; retry the attach or restart the runtime",
   http = "http: OpenCode request failed; retry or run :checkhealth opencode (see docs/RECOVERY.md)",
   server_spawn = "server_spawn: owned OpenCode startup failed; check runtime.binary and run :checkhealth opencode (see docs/RECOVERY.md)",
   startup_timeout = "startup_timeout: owned OpenCode startup timed out; run :checkhealth opencode (see docs/RECOVERY.md)",
@@ -123,7 +133,13 @@ local function safe_message(error)
   if endpoint then
     table.insert(details, "endpoint=" .. endpoint)
   end
-  if class == "http" and type(error.status) == "number" and error.status % 1 == 0 and error.status >= 100 and error.status <= 599 then
+  if
+    class == "http"
+    and type(error.status) == "number"
+    and error.status % 1 == 0
+    and error.status >= 100
+    and error.status <= 599
+  then
     table.insert(details, "status=" .. error.status)
   end
   return "OpenCode: " .. message .. (#details > 0 and " (" .. table.concat(details, ", ") .. ")" or "")

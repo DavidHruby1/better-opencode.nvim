@@ -196,6 +196,7 @@ end
 
 ---Routes question and permission events using only the stream Runtime and Session's active Job.
 ---Requests without a provable Job fail closed, while matching reply events alone release waiting state and UI locks.
+---A failed automatic hard-deny reply keeps the prompt locked, starts reconciliation, and reports only a safe error class.
 ---@return boolean handled
 function M.route(runtime, event)
   local properties = event.properties or {}
@@ -213,7 +214,7 @@ function M.route(runtime, event)
     return false
   end
   local session, job = active(runtime, session_id)
-  if not session then
+  if not session or not job then
     return true
   end
   local completed = event.type == "question.replied"
@@ -241,10 +242,15 @@ function M.route(runtime, event)
     local name = payload.permission or payload.name or payload.type
     local policy = M.permission_policy(name)
     if policy == "hard_reject" then
-      runtime.client:permission_reply(request_id, "reject")
+      local reply = runtime.client:permission_reply(request_id, "reject")
       job.error_class = "hard_denied_permission"
       require("opencode.job").transition(job, "error", { session = session })
       runtime.prompt_locked, runtime.reconciliation_required = true, true
+      reply:catch(function()
+        runtime.prompt_locked, runtime.reconciliation_required = true, true
+        request_reconcile(runtime)
+        require("opencode.ui.notify").error({ error_class = "interaction_failed" })
+      end)
       return true
     end
     payload.actions = policy == "ask_once" and { "once", "reject" } or { "once", "always", "reject" }

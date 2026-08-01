@@ -211,18 +211,24 @@ function Client:permission_reply(id, response)
   return self:request("POST", "/permission/" .. id .. "/reply", { reply = response })
 end
 
----Subscribes to SSE and emits decoded data frames.
----Frames are separated by blank lines and may contain multiple data lines.
+---Subscribes to SSE and emits decoded data frames until the stream ends.
+---Curl must connect within the supplied bound and fail on HTTP errors, but no total transfer timeout is used because a healthy SSE stream is long-lived.
 ---@param callback fun(event: table)
 ---@param on_exit fun(code: integer)
+---@param opts? { connect_timeout_ms?: integer }
 ---@return integer
-function Client:subscribe(callback, on_exit)
+function Client:subscribe(callback, on_exit, opts)
   on_exit = on_exit or function() end
+  opts = opts or {}
+  local connect_timeout = math.max(1, opts.connect_timeout_ms or 10000) / 1000
   local cmd = {
     "curl",
     "--silent",
     "--show-error",
+    "--fail",
     "--no-buffer",
+    "--connect-timeout",
+    string.format("%.3f", connect_timeout),
     "--config",
     "-",
     "-H",
@@ -268,8 +274,16 @@ function Client:subscribe(callback, on_exit)
     end,
   })
   if job > 0 then
-    vim.fn.chansend(job, curl_config(self.username, self.password))
-    vim.fn.chanclose(job, "stdin")
+    local sent = vim.fn.chansend(job, curl_config(self.username, self.password))
+    if sent <= 0 then
+      vim.fn.jobstop(job)
+      return 0
+    end
+    local closed = pcall(vim.fn.chanclose, job, "stdin")
+    if not closed then
+      vim.fn.jobstop(job)
+      return 0
+    end
   end
   return job
 end

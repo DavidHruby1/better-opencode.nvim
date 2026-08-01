@@ -56,6 +56,8 @@ end
 
 -- Unfortunately LuaLS cannot infer `T` from how `resolve` is called.
 
+---Creates a pending promise and runs its executor immediately with resolve and reject callbacks.
+---A synchronous executor error becomes a rejection so callers can use the same error path as asynchronous work.
 ---@generic T
 ---@param executor fun(resolve: fun(value: T), reject: fun(reason: any))
 ---@return Promise<T>
@@ -78,7 +80,10 @@ function Promise.new(executor)
   local reject = function(reason)
     self:_reject(reason)
   end
-  executor(resolve, reject)
+  local ok, reason = pcall(executor, resolve, reject)
+  if not ok then
+    reject(reason)
+  end
 
   return self
 end

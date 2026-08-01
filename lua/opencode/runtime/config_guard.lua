@@ -84,7 +84,7 @@ end
 ---@return boolean
 ---@return string?
 function M.validate(config)
-  if next(config.tool or config.tools or {}) then
+  if next(config.tool or {}) or next(config.tools or {}) then
     return false, "custom_tool"
   end
   return true
