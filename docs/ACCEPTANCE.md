@@ -142,16 +142,16 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **And** spustí nový `attach --dir` proti témuž Serveru  
 **And** obnoví dříve zobrazenou Session přes `/tui/select-session`.
 
-### AC-RUN-09: Custom plugin/tool nebo enabled MCP blokuje Runtime pasivně
+### AC-RUN-09: Pluginy a MCP se ignorují, custom tools blokují Runtime
 
 **Priorita:** P0  
 **Požadavky:** RUN-04, RUN-10
 
 **Given** documented global/project/custom config obsahuje custom plugin, custom tool nebo MCP bez `enabled: false`  
 **When** proběhne passive pre-spawn guard  
-**Then** OpenCode Server se vůbec nespustí a žádný custom modul ani MCP command se neprovede  
-**Given** až remote/managed effective `/config` odhalí takové rozšíření  
-**When** proběhne post-start config preflight bez volání `/mcp`  
+**Then** OpenCode Server se nespustí pouze pro custom tool; plugin a MCP se ignorují a žádný plugin/MCP se z tohoto guardu nespustí
+**Given** až remote/managed effective `/config` odhalí custom tool
+**When** proběhne post-start config preflight bez volání `/mcp`
 **Then** Runtime nepřejde do `ready` a žádný prompt se neodešle  
 **And** diagnostika pojmenuje nepodporované rozšíření bez načtení jeho citlivé konfigurace do logu.
 
@@ -164,7 +164,9 @@ Kde scénář používá Base/Ours/Theirs, platí:
 
 **Given** kurzor je uvnitř rozpoznané funkce  
 **When** uživatel otevře výchozí prompt  
-**Then** `snacks.input` zobrazí Build, canonical root a function scope  
+**Then** víceřádkový `Snacks.win` zobrazí Build, canonical root a function scope<br>
+**And** zobrazí se ještě během startu OpenCode a zachová text při startup nebo dispatch chybě<br>
+**And** `<CR>` odešle nebo přijme viditelnou completion, zatímco `<S-CR>` a `<C-j>` vloží skutečný newline<br>
 **And** po odeslání se focus vrátí do původního source window  
 **And** předchozí prompt se nenabídne jako input historie.
 
@@ -212,7 +214,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **And** file-backed položky jsou path/range references  
 **And** aktivní editor location je přítomná i bez explicitního context tokenu  
 **And** `@this` nemění independently resolved hard scope  
-**And** completion i highlight fungují v `snacks.input`.
+**And** completion i line-aware highlight fungují ve víceřádkovém editoru.
 
 ### AC-CTX-02: Nativní commands, skills a AGENTS
 

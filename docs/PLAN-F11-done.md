@@ -89,7 +89,7 @@ Gate: `AC-SEC-01` pro oba compatibility profily a alespoň jeden multi-root run.
 ### 6. Uživatelská dokumentace
 
 1. `README.md`: uveď fork původ/licenci, Neovim/Snacks/OpenCode/Git/curl dependencies, přesně dvě podporované OpenCode verze, konfiguraci binary, minimal keymaps pro default Build, explicit Plan, select Session, cancel one/all, sidebar toggle/focus a health.
-2. Vysvětli proposal-only workflow pravdivě: oba exact profily filtrují hard-denied a unknown tools z final model surface přes ordered Session rules a současně používají execution-time hard deny na fresh isolated Serveru. Custom plugins/tools a enabled MCP Runtime navíc blokují preflight guards.
+2. Vysvětli proposal-only workflow pravdivě: oba exact profily filtrují hard-denied a unknown tools z final model surface přes ordered Session rules a současně používají execution-time hard deny na fresh isolated Serveru. Custom tools blokují preflight guards; pluginy a enabled MCP Runtime zůstávají OpenCode-owned a preflight je ignoruje.
 3. Popiš hard scope, dirty preflight, clean merge, one undo, modified/no autosave, conflicts, external reconciliation, Plan-to-Build, parallel non-overlap a multi-root.
 4. Jasně označ deferred: multi-file/create/delete/rename, blockwise, worktrees, external attach, prompt history, managed custom commands a další OpenCode verze.
 5. `CONFIGURATION.md` dokumentuje pouze skutečné options z `config.lua`, default, type, scope a restart requirement. Automatický test porovná documented option keys s defaults.

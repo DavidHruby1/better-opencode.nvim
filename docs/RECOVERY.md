@@ -11,15 +11,17 @@ Run `:checkhealth opencode` first. Health passively scans OpenCode config, reads
 - Fix write permission for Neovim `stdpath("state")`; private Runtime manifests and temporary merge inputs live below `opencode.nvim/`.
 - For an unsupported option, use the source scope and type reported by health, then consult `docs/CONFIGURATION.md`.
 
-## Clean OpenCode config
+## OpenCode config
 
-This plugin requires every OpenCode config visible to the current project to contain no custom plugins or custom tools and no enabled MCPs. `:checkhealth opencode` reads those local config sources and extension directories without loading or running them, and startup repeats the same guard before starting OpenCode.
+Custom plugins and MCPs are ignored by this plugin, so they do not block health or startup. Custom tools and malformed config remain blocking errors. `:checkhealth opencode` reads local config sources and extension directories without loading or running them, and startup repeats the tool/config guard before starting OpenCode.
 
-Normal OpenCode use may keep custom plugins, tools, and MCPs in a separate config environment. Start Neovim for this plugin with clean `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, and `OPENCODE_CONFIG_CONTENT` values, or disable every MCP with `enabled: false`. Health and startup report only the blocking category; they never print config contents or paths.
+Health and startup report only the blocking category; they never print config contents or paths. OpenCode remains responsible for loading its own plugins and MCPs.
 
 ## Runtime disconnected
 
 Use the select menu's `Restart runtime` only after checking the diagnostic error class. Restart is explicit and reconciles the owned Runtime before prompts reopen. The plugin never attaches to a foreign process.
+
+If diagnostics show `TUI dead` or `TUI error` while the Runtime remains ready, use `Retry TUI attach`. A failed transcript selection remains visible as `session_select`; it is not treated as a successful attach.
 
 ## Conflicts
 

@@ -21,7 +21,7 @@ Tento dokument uzavírá implementační rozhodnutí pro verzi 2.0. Neobsahuje v
 | ADR-01 | Každý canonical project root má vlastní plugin-owned headless Server a právě jeden plugin-owned TUI klient. |
 | ADR-02 | Scoped Build je proposal transaction; OpenCode nesmí přímo editovat source workspace. |
 | ADR-03 | Build proposal používá OpenCode JSON-schema structured output, ne parsování volného Markdown diffu. |
-| ADR-04 | Build a Plan Session používají default-deny tool allowlist; custom plugins a enabled MCP nejsou v Runtime povolené. |
+| ADR-04 | Build a Plan Session používají default-deny tool allowlist; custom tools nejsou v Runtime povolené, zatímco pluginy a MCP zůstávají OpenCode-owned. |
 | ADR-05 | Build hard scope je vždy visual range, Tree-sitter function nebo celý aktuální soubor. |
 | ADR-06 | Job identita je `sessionID + userMessageID`; plugin registruje každou assistant message přes její `parentID`. |
 | ADR-07 | Session nepoužívají Job queue. Aktivní Session odmítne follow-up a nabídne novou Session. |
@@ -153,7 +153,10 @@ Runtime = {
   server_process = handle,
   tui_process = handle,
   tui_buffer = bufnr,
+  tui_status = "stopped" | "starting" | "live" | "dead" | "recovering" | "error",
   sse = handle,
+  sse_live = boolean,
+  prompt_blocker = function -> nil | "starting" | "reconciling" | "interaction_locked" | "disconnected" | "reconciliation_failed" | "reconciliation_blocked" | "tui_unavailable",
   sessions = {},
   jobs = {},
 }
@@ -161,7 +164,7 @@ Runtime = {
 
 ### Bezpečný startup
 
-1. Passive config guard bez spuštění OpenCode načte dokumentované JSON/JSONC config soubory a pouze názvy souborů v global, project a `OPENCODE_CONFIG_DIR` adresářích. Odmítne custom `plugin/plugins`, `tool/tools` JavaScript/TypeScript definice a každý MCP entry, který není explicitně `enabled: false`.
+1. Passive config guard bez spuštění OpenCode načte dokumentované JSON/JSONC config soubory a pouze názvy souborů v global, project a `OPENCODE_CONFIG_DIR` adresářích. Ignoruje custom `plugin/plugins` a MCP entries, ale odmítne `tool/tools` JavaScript/TypeScript definice.
 2. Vybere se volný loopback port přidělený operačním systémem.
 3. Vygeneruje se kryptograficky náhodné heslo a owner nonce.
 4. Server se spustí s process working directory přesně nastaveným na canonical root, ekvivalentem:
@@ -172,15 +175,17 @@ opencode serve --hostname 127.0.0.1 --port <port>
 ```
 
 5. Ihned po spawn se atomicky zapíše private ownership manifest mode `0600` obsahující root hash, port, username, password, owner nonce, PID a process start identity; manifest path je pod `stdpath("state")/opencode.nvim/runtimes/`.
-6. Plugin polluje pouze vlastní `/global/health` do konfigurovatelného timeoutu, výchozí hodnota je 10 sekund.
-7. Proběhne version, `/doc` a effective `/config` preflight. Effective config musí potvrdit nulové custom plugins/tools a žádný enabled MCP entry. Endpoint `/mcp` se při preflightu nesmí volat, protože by MCP inicializoval.
-8. TUI klient se spustí ze stejného canonical rootu ekvivalentem `opencode attach http://127.0.0.1:<port> --dir <canonical-root>` se stejnými auth env hodnotami a jeho identita se doplní do manifestu.
-9. TUI terminal buffer se okamžitě přepne do permanentního input locku.
-10. Až potom Runtime přejde do `ready` a přijímá prompty.
+6. Jeden konfigurovatelný deadline, výchozí 10 sekund, ohraničuje celý startup od health pollu po reconciliation.
+7. Proběhne version, `/doc` a effective `/config` preflight. Effective config odmítne pouze enabled tools mimo exact compatibility profil; pluginy a MCP entries nechá OpenCode-owned. Endpoint `/mcp` se při preflightu nesmí volat, protože by MCP inicializoval.
+8. `/agent` musí vrátit oba primary agenty `build` a `plan`; chybějící agent ukončí startup fail-closed.
+9. SSE je live až po prvním garantovaném `server.connected`; samotný spawn `curl` nestačí.
+10. TUI klient se spustí ze stejného canonical rootu ekvivalentem `opencode attach http://127.0.0.1:<port> --dir <canonical-root>` se stejnými auth env hodnotami a jeho identita se doplní do manifestu.
+11. TUI terminal buffer se okamžitě přepne do permanentního input locku a startup ověří přežití procesu i platný terminal buffer.
+12. Proběhne inventory a initial reconciliation. Teprve po jejich úspěchu Runtime přejde do `ready` a přijímá prompty.
 
 Password, owner nonce ani authorization header se nesmí logovat. Ownership manifest se po normálním shutdownu odstraní. Plugin nesmí použít `pgrep`, `lsof`, mDNS ani server discovery.
 
-Passive guard musí parsovat config data bez importu custom modulů a odmítnout executable soubory v dokumentovaných `plugin/plugins` a `tool/tools` adresářích dříve, než se Server spustí. Následný effective `/config` check zachytí remote/managed config, který passive scan neviděl. Skills, commands, agents, providers a `AGENTS.md` zůstávají povolené, ale žádný plugin hook, custom tool ani MCP nesmí rozšířit proposal-only boundary verze 2.0.
+Passive guard musí parsovat config data bez importu custom modulů a odmítnout executable soubory pouze v dokumentovaných `tool/tools` adresářích dříve, než se Server spustí. Pluginy a MCP se nekontrolují jako proposal tools; OpenCode je načítá podle vlastní konfigurace. Skills, commands, agents, providers a `AGENTS.md` zůstávají povolené a custom tool stále nesmí rozšířit proposal-only boundary verze 2.0.
 
 ### Sidebar a více rootů
 
@@ -231,7 +236,7 @@ Každá plugin Session se vytvoří nebo okamžitě patchne s pravidly aplikovan
 
 Session-level pravidla v pinované verzi převažují nad permissive Build defaults. Initial wildcard deny blokuje neznámé tools; následující pravidla otevírají pouze známé read-only schopnosti, user interaction a interní `StructuredOutput` tool. Závěrečné hard deny zakážou `edit`, `write`, `apply_patch`, shell side effects, subagenty a přístup mimo root. Build zůstává primary agentem, ale modifikuje kód pouze proposalem, který aplikuje Neovim plugin.
 
-Oba podporované profily před odesláním requestu do LLM filtrují finální modelovou tool mapu přes `Permission.disabled` nad sloučenými agent a Session rules. Initial wildcard deny proto odstraní neznámé/custom/MCP tools a explicitní hard deny odstraní `edit`, `write`, `apply_patch`, `bash` a `task`; pozdější allow pravidla zachovají jen výslovně povolené capabilities a `StructuredOutput`. Server-wide `always` approvals do tohoto surface filtru nevstupují a nemohou zakázaný tool znovu zpřístupnit. Execution-time hard deny uvnitř izolovaného plugin-owned Serveru zůstává druhou obrannou vrstvou: Server začíná s prázdným approval state, passive a effective config guard vyloučí custom tools a MCP a permanentně input-locked TUI nemůže založit unmanaged approval. Managed dialog smí nabídnout `always` pouze pro schvalovatelnou permission explicitně allowlisted toolu; `read` a `external_directory` se omezí na `once` nebo `reject`. Nečekaný permission request pro hard-denied nebo neznámou capability se bez dialogu odmítne a vyvolá fail-closed diagnostiku.
+Oba podporované profily před odesláním requestu do LLM filtrují finální modelovou tool mapu přes `Permission.disabled` nad sloučenými agent a Session rules. Initial wildcard deny proto odstraní neznámé/custom/MCP tools a explicitní hard deny odstraní `edit`, `write`, `apply_patch`, `bash` a `task`; pozdější allow pravidla zachovají jen výslovně povolené capabilities a `StructuredOutput`. Server-wide `always` approvals do tohoto surface filtru nevstupují a nemohou zakázaný tool znovu zpřístupnit. Execution-time hard deny uvnitř izolovaného plugin-owned Serveru zůstává druhou obrannou vrstvou: Server začíná s prázdným approval state, passive a effective config guard vyloučí custom tools, ale pluginy a MCP pouze nechají OpenCode-owned a neinicializují `/mcp`; permanentně input-locked TUI nemůže založit unmanaged approval. Managed dialog smí nabídnout `always` pouze pro schvalovatelnou permission explicitně allowlisted toolu; `read` a `external_directory` se omezí na `once` nebo `reject`. Nečekaný permission request pro hard-denied nebo neznámou capability se bez dialogu odmítne a vyvolá fail-closed diagnostiku.
 
 Hard deny se nikdy nezobrazí jako schvalovatelný dialog. Ostatní OpenCode permission requesty používají kanonický `/permission` endpoint. Plugin podporuje odpovědi obou compatibility profilů `once`, `always`, `reject` s výše uvedeným omezením; žádná podporovaná UI cesta nesmí vytvořit approval pro hard-denied capability ani obejít path-level deny managed Session.
 

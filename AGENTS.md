@@ -13,7 +13,7 @@ A Neovim Lua plugin that bridges Neovim and the `opencode` CLI (external binary)
 ## Config quirks
 
 - Config is passed via `vim.g.opencode_opts`; supported keys are documented in `docs/CONFIGURATION.md` and validated at startup.
-- `ask.snacks` is passed to `snacks.input` unchanged.
+- `ask.snacks.win` customizes the multiline `Snacks.win` prompt; lifecycle callbacks, required buffer options, and clamped geometry remain plugin-owned.
 
 ## Dependencies
 

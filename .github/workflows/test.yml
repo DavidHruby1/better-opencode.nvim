@@ -41,6 +41,10 @@ jobs:
         with:
           version: v0.11.0
           neovim: true
+      - uses: actions/checkout@v4
+        with:
+          repository: folke/snacks.nvim
+          path: .deps/snacks.nvim
       - run: npm install --global opencode-ai@${{ matrix.opencode }}
       - run: test "$(opencode --version)" = "${{ matrix.opencode }}"
       - run: mkdir -p "$HOME/.local/share/opencode" && install -m 600 /dev/stdin "$HOME/.local/share/opencode/auth.json" <<<"$OPENCODE_E2E_AUTH_JSON"
@@ -50,3 +54,4 @@ jobs:
       - run: tests/e2e/run.sh
         env:
           OPENCODE_VERSION: ${{ matrix.opencode }}
+          SNACKS_PATH: ${{ github.workspace }}/.deps/snacks.nvim

@@ -16,7 +16,7 @@ Tento dokument je autoritou pro produktové chování a rozsah. `docs/ARCHITECTU
 
 ## Shrnutí produktu
 
-Fork mění `opencode.nvim` z tenkého bridge na Neovim-native nástroj pro inline vývoj. Uživatel zadává prompt přes `snacks.input` u kurzoru, vidí zvolený režim a hard scope a sleduje transcript v pravém OpenCode TUI sidebaru. Build je výchozí režim pro změny kódu, Plan je technicky needitující režim pro analýzu.
+Fork mění `opencode.nvim` z tenkého bridge na Neovim-native nástroj pro inline vývoj. Uživatel zadává víceřádkový prompt přes `Snacks.win` u kurzoru, vidí zvolený režim a hard scope a sleduje transcript v pravém OpenCode TUI sidebaru. Build je výchozí režim pro změny kódu, Plan je technicky needitující režim pro analýzu.
 
 Build agent nikdy nezapisuje přímo do source souborů. Vrací strukturovaný návrh změny autorizovaného rozsahu. Plugin z něj vytvoří Theirs, ověří hard scope a provede třícestný merge Base/Ours/Theirs do živého Neovim bufferu. Výsledek se nezapisuje na disk a zůstává jedním undo krokem.
 
@@ -56,7 +56,7 @@ Upstream integrace poskytuje hodnotný input, kontext, completion, event základ
 10. Vlastní `#command` nebo `#skill` namespace.
 11. Specializovaný Review artefakt, Plan-to-scaffold a vlastní Search-to-quickfix workflow.
 12. Blockwise visual Build; verze 2.0 podporuje pouze souvislý characterwise nebo linewise range.
-13. Přímý TUI prompt jako managed inline edit workflow; podporovaná cesta pro Joby je `snacks.input`.
+13. Přímý TUI prompt jako managed inline edit workflow; podporovaná cesta pro Joby je pluginem vlastněný víceřádkový `Snacks.win` editor.
 14. Spouštění OpenCode custom commands; command templates nejsou součástí bezpečného proposal-only workflow verze 2.0.
 
 ## Cílový uživatel a hlavní workflow
@@ -117,9 +117,9 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 
 | ID | Požadavek |
 |---|---|
-| UI-01 | Prompt MUSÍ používat `snacks.input` poblíž kurzoru a po odeslání vrátit focus do source window. |
+| UI-01 | Prompt MUSÍ používat ohraničený víceřádkový `Snacks.win` poblíž kurzoru a po úspěšném odeslání vrátit focus do stále stejného source bufferu. |
 | UI-02 | Input MUSÍ ukázat Build/Plan, project root a effective scope před odesláním. |
-| UI-03 | Prompt input history MUSÍ být vypnutá; Session transcript tím není dotčen. |
+| UI-03 | Prompt input history MUSÍ být vypnutá; `<CR>` odesílá nebo přijímá viditelnou completion, `<S-CR>` a `<C-j>` vkládají newline a Session transcript tím není dotčen. |
 | UI-04 | Sidebar MUSÍ automaticky zobrazit aktivní TUI při odeslání, nesmí ukrást focus a musí být toggleovatelný i focusovatelný v input-locked Terminal-Normal režimu. |
 | UI-05 | Výchozí sidebar MÁ zabírat přibližně 30 % šířky a MUSÍ být konfigurovatelný. |
 | UI-06 | Status UI MUSÍ ukázat Session title, short ID, Job stav a režim; barva nesmí být jediný identifikátor. |
@@ -229,7 +229,7 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 | RUN-07 | Reconnect MUSÍ proběhnout až po reconciliation; nedokončený Job bez prokazatelného výsledku skončí `error` bez aplikace. |
 | RUN-08 | Runtime MUSÍ mít private durable ownership manifest; `VimLeavePre` i příští startup smí po kryptografickém ověření ownership ukončit pouze vlastní procesy a odstranit vlastní temp soubory. |
 | RUN-09 | Logy MUSÍ obsahovat pouze metadata jako root ID, short Session/Job ID, state transition a error class. Prompt, replacement a source jsou defaultně zakázané. |
-| RUN-10 | Passive pre-spawn config guard a následný effective-config preflight NESMÍ připustit custom plugins, custom tools ani enabled MCP servery; kontrola nesmí plugin/tool kód importovat ani MCP inicializovat. |
+| RUN-10 | Passive pre-spawn config guard a následný effective-config preflight MUSÍ ignorovat custom plugins a enabled MCP servery, odmítnout custom tools a nesmí při kontrole plugin/tool kód importovat ani MCP inicializovat. |
 | RUN-11 | TUI MUSÍ použít `attach --dir <canonical-root>` a každý HTTP/SSE request MUSÍ nést `x-opencode-directory` se stejným rootem. |
 
 ## Job state model
@@ -290,7 +290,7 @@ nonterminal -> error
 
 Zachovat, pokud splňuje kontrakty:
 
-- `snacks.input`, context rendering a completion,
+- víceřádkový `Snacks.win`, context rendering a completion,
 - keymapy a operator/visual vstupy,
 - statusline/event základ,
 - health checks,

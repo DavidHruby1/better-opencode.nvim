@@ -23,13 +23,18 @@ vim.g.opencode_opts = {
   sidebar = { width = 0.30 },
 }
 
--- Default Build
+-- Primary Build
+vim.keymap.set({ "n", "x" }, "<leader>op", function()
+  require("opencode").ask()
+end)
+
+-- Optional Build alias
 vim.keymap.set({ "n", "x" }, "<C-a>", function()
   require("opencode").ask()
 end)
 
 -- Explicit read-only Plan
-vim.keymap.set({ "n", "x" }, "<leader>op", function()
+vim.keymap.set({ "n", "x" }, "<leader>oP", function()
   require("opencode").ask(nil, { mode = "plan" })
 end)
 
@@ -53,12 +58,14 @@ vim.keymap.set("n", "<leader>of", function()
 end)
 ```
 
-The select menu provides Session selection, cancel current Job, cancel all Jobs, sidebar toggle/focus, runtime restart, and metadata-only diagnostics. Run `:checkhealth opencode` for dependencies and the selected compatibility profile.
+The multiline prompt opens while OpenCode starts. `<CR>` submits or accepts visible completion, `<S-CR>` inserts a newline, `<C-j>` is the terminal-safe newline fallback, and `<Esc>` cancels. Failed startup or dispatch keeps the text available for retry.
+
+The select menu provides Session selection, cancel current Job, cancel all Jobs, TUI attach retry, sidebar toggle/focus, runtime restart, and metadata-only diagnostics. Run `:checkhealth opencode` for dependencies and the selected compatibility profile.
 
 ## Safety model
 
 - Build and Plan use ordered Session rules with a default deny and explicit read-only allowlist. Both exact profiles filter hard-denied and unknown tools from the final model surface and apply execution-time hard deny on a fresh isolated Server.
-- Passive config guards reject custom plugins/tools and enabled MCP before startup; effective config is checked without calling `/mcp`.
+- Passive config guards ignore custom plugins and enabled MCPs, while rejecting custom tools before startup; effective config is checked without calling `/mcp`.
 - Dirty buffers require explicit `save and continue` or `cancel`. Clean merge changes only the buffer, preserves `modified`, and is one undo step.
 - External disk changes, conflicts, stale changedticks, scope violations, unknown events, and unowned processes fail closed.
 - Default logs and notifications contain metadata only. They omit prompts, source, diffs, replacements, credentials, response bodies, and absolute paths.

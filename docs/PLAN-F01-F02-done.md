@@ -116,7 +116,7 @@ Ověření kroku: prázdný sample test projde headless, fake server prokáže r
 
 1. Implementuj root precedence přes aktivní file buffer: jednoznačný LSP workspace obsahující file, nejbližší Git worktree, potom cwd obsahující file. Každý kandidát projde absolute realpath a component-safe containment; ambiguity skončí před Runtime.
 2. Implementuj neprováděný JSON/JSONC parser: lexer odstraní comments a trailing commas pouze mimo strings, potom použije `vim.json.decode`. Parse error je hard failure, ne ignorovaný config.
-3. Prohledej dokumentované global, project ancestor, `~/.opencode`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` a inline config zdroje bez importu kódu. Odmítni `plugin`, executable `plugin/plugins` a `tool/tools` definitions a každý MCP entry bez explicitního `enabled=false`.
+3. Prohledej dokumentované global, project ancestor, `~/.opencode`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` a inline config zdroje bez importu kódu. Ignoruj `plugin`, executable `plugin/plugins` a MCP entries; odmítni `tool/tools` definitions.
 4. Loguj pouze config scope a error class, nikdy celý config nebo absolutní home path.
 
 Ověření kroku: unit tabulka symlink/root precedence, JSONC string/comment edge cases a fixture každého zakázaného config zdroje; integration důkaz, že marker custom toolu se při guardu neprovede.
@@ -127,7 +127,7 @@ Ověření kroku: unit tabulka symlink/root precedence, JSONC string/comment edg
 2. Ihned po spawn atomicky zapiš mode-0600 manifest pod `stdpath("state")/opencode.nvim/runtimes/<root-hash>.json`. Obsahuje schema version, root hash, port, username/password, nonce, Server PID/start identity a později TUI identity.
 3. `ownership.lua` implementuje process identity adapter pro podporovaný OS; cleanup signalizuje proces pouze při shodě PID start identity, executable, authenticated health a `/path.directory` realpath. Nejistota ponechá manifest a vrátí manual-cleanup diagnostiku.
 4. Polluj jen vlastní health do defaultních 10 s. Po health vyber exact compatibility profil, ověř fixture operation IDs/schema a `/path` root.
-5. Načti `/config`; vyžaduj prázdný `plugin`, odmítni enabled `tools` klíč neznámý exact compatibility profilu a odmítni MCP bez `enabled=false`. Explicitní konfigurace známého built-in toolu sama o sobě není custom tool a její execution policy nadále určuje Session hard deny. `/mcp` nevolej.
+5. Načti `/config`; odmítni enabled `tools` klíč neznámý exact compatibility profilu, ale pluginy a MCP entries nech OpenCode-owned. Explicitní konfigurace známého built-in toolu sama o sobě není custom tool a její execution policy nadále určuje Session hard deny. `/mcp` nevolej.
 6. Každá chyba provede idempotentní rollback jen vlastních handles a temp dat. Žádný fallback URL.
 
 Ověření kroku: owned fake process dosáhne `ready`; wrong version/doc/config, timeout a partial spawn skončí `stopped`; foreign PID reuse fixture není signalizována. Tím uzavři F01 server část `AC-RUN-02/03/04/07/09`.
