@@ -2,7 +2,7 @@
 
 Neovim-native managed workflow based on `nickjvandyke/opencode.nvim` commit `7749a034db61258ece828df70a89ff31bb27ff47`. The upstream project and its license remain the origin of this fork; see `LICENSE` and `CHANGELOG.md`.
 
-This fork owns one loopback OpenCode Server and one input-locked TUI client per canonical project root. Build returns a scoped structured proposal and applies it only to the live buffer through a Base/Ours/Theirs merge. Plan is read-only. The source file is not autosaved.
+This fork owns one loopback OpenCode Server and one input-locked TUI client per canonical project root. Build returns a scoped structured proposal and applies it only to the live buffer through a Base/Ours/Theirs merge. Dirty files are saved before Build dispatch; applying the proposal still leaves the live buffer modified. Plan is read-only.
 
 ## Requirements
 
@@ -25,17 +25,12 @@ vim.g.opencode_opts = {
 }
 
 -- Primary Build
-vim.keymap.set({ "n", "x" }, "<leader>op", function()
-  require("opencode").ask()
-end)
-
--- Optional Build alias
 vim.keymap.set({ "n", "x" }, "<C-a>", function()
   require("opencode").ask()
 end)
 
 -- Explicit read-only Plan
-vim.keymap.set({ "n", "x" }, "<leader>oP", function()
+vim.keymap.set({ "n", "x" }, "<leader>op", function()
   require("opencode").ask(nil, { mode = "plan" })
 end)
 
@@ -87,7 +82,7 @@ The select menu provides Session selection, cancel current Job, cancel all Jobs,
 
 - Build and Plan use ordered Session rules with a default deny and explicit read-only allowlist. Both exact profiles filter hard-denied and unknown tools from the final model surface and apply execution-time hard deny on a fresh isolated Server.
 - Passive config guards ignore custom plugins and enabled MCPs, while rejecting custom tools before startup; effective config is checked without calling `/mcp`.
-- Dirty buffers require explicit `save and continue` or `cancel`. Clean merge changes only the buffer, preserves `modified`, and is one undo step.
+- Dirty buffers are saved automatically before Build; Plan requires explicit `save and continue` or `cancel`. Clean merge changes only the buffer, preserves `modified`, and is one undo step.
 - External disk changes, conflicts, stale changedticks, scope violations, unknown events, and unowned processes fail closed.
 - Default logs and notifications contain metadata only. They omit prompts, source, diffs, replacements, credentials, response bodies, and absolute paths.
 

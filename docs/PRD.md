@@ -149,7 +149,7 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 | CTX-05 | Plugin NESMÍ vytvářet `#command` ani `#skill`; managed inline input MUSÍ `/command` dispatch odmítnout jako unsupported. Skills se ponechají nativnímu OpenCode skill discovery/tool mechanismu. |
 | CTX-06 | Globální a project/directory `AGENTS.md` MUSÍ načítat OpenCode; plugin je NESMÍ duplicitně injektovat. |
 | CTX-07 | Cílový buffer Build i Plan promptu MUSÍ mít cestu a být běžný UTF-8 textový file buffer bez NUL; jinak se dispatch zastaví. |
-| CTX-08 | Před každým prompt dispatchem MUSÍ dirty target nebo explicitně referencované dirty buffery zobrazit preflight `save and continue` nebo `cancel`; plugin je nesmí uložit potichu. |
+| CTX-08 | Build MUSÍ dirty target nebo explicitně referencované dirty buffery automaticky uložit před otevřením promptu; Plan MUSÍ zobrazit preflight `save and continue` nebo `cancel`. |
 | CTX-09 | Base se MUSÍ zachytit až po úspěšném zápisu a dokončení write hooks; buffer a disk se musí shodovat. |
 | CTX-10 | Selhání save nebo změna provedená write hookem MUSÍ dispatch zastavit nebo použít až finální uložený obsah jako Base. |
 
@@ -257,7 +257,7 @@ nonterminal -> error
 
 1. Uživatel vyvolá Build z visual/operator nebo normal mode.
 2. Otevře se input-only `Snacks.win` float, který ukáže Build, root a hard scope.
-3. Dirty-context preflight nabídne `save and continue` nebo `cancel`.
+3. Dirty target a explicitně referencované dirty buffery se automaticky uloží před otevřením Build promptu.
 4. Plugin zachytí Base, extmarky, vytvoří `messageID` a odešle async structured prompt.
 5. Po úspěšném dispatchi se float zavře; žádný sidebar ani tmux pane se automaticky neotevře.
 6. V cílovém bufferu se u scope startu vykreslí spinner `⠙ Implementing` a volitelný reasoning preview.

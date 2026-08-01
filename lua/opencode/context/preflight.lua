@@ -12,11 +12,12 @@ local function disk_logical(buf)
   })
 end
 
----Prompts once for the snapshotted dirty file set, then writes it in deterministic order.
----Every write is checked after hooks; failure stops dispatch before Session or Job creation.
+---Saves dirty files before dispatch, asking for confirmation only for Plan.
+---Build writes immediately; Plan offers save and cancel. Every write is checked after hooks, and failure stops dispatch before Session or Job creation.
 ---@param context table
+---@param mode? "plan"|"build"
 ---@return Promise<boolean>
-function M.run(context)
+function M.run(context, mode)
   local Promise = require("opencode.promise")
   local dirty = {}
   context.referenced_buffers[context.buf] = true
@@ -31,6 +32,20 @@ function M.run(context)
   if #dirty == 0 then
     return Promise.resolve(true)
   end
+  local function save()
+    for _, buf in ipairs(dirty) do
+      local ok = pcall(vim.api.nvim_buf_call, buf, function()
+        vim.cmd.write()
+      end)
+      if not ok or vim.bo[buf].modified or logical(buf) ~= disk_logical(buf) then
+        return Promise.reject({ error_class = "write_failed" })
+      end
+    end
+    return Promise.resolve(true)
+  end
+  if mode == "build" then
+    return save()
+  end
   return require("opencode.promise.ui")
     .select({ "save and continue", "cancel" }, {
       prompt = "Dirty files: " .. #dirty,
@@ -39,15 +54,7 @@ function M.run(context)
       if choice ~= "save and continue" then
         return Promise.reject({ error_class = "cancelled" })
       end
-      for _, buf in ipairs(dirty) do
-        local ok = pcall(vim.api.nvim_buf_call, buf, function()
-          vim.cmd.write()
-        end)
-        if not ok or vim.bo[buf].modified or logical(buf) ~= disk_logical(buf) then
-          return Promise.reject({ error_class = "write_failed" })
-        end
-      end
-      return Promise.resolve(true)
+      return save()
     end)
 end
 

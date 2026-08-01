@@ -77,7 +77,7 @@ function M.prompt(text, context, opts)
   if text:match("^%s*/[%w_.-]+") then
     return Promise.reject({ error_class = "command_unsupported" })
   end
-  return require("opencode.context.preflight").run(context):next(function()
+  return require("opencode.context.preflight").run(context, mode):next(function()
     local rendered = context:render(text)
     local runtime = context.runtime
     local blocker = prompt_blocker(runtime)

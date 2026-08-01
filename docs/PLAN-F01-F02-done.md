@@ -158,7 +158,7 @@ Ověření kroku: fake-server integration zachytí registraci před immediate SS
 2. Zachovej `@this`, `@buffer`, `@buffers`, `@visible`, `@diagnostics`, `@quickfix`, `@marks`. Aktivní location přidej vždy právě jednou. File-backed context serializuj jako root-relative path/range; non-file metadata smí zůstat textem jen uvnitř diagnostics/quickfix.
 3. `@this` používá explicitně zachycený invocation range nebo cursor a nikdy neurčuje budoucí hard scope. Completion context ukládej podle input bufnr v `ui/ask`, ne do `Context.current`.
 4. Prompt začínající rozpoznaným `/name` odmítni před Session/Job. Skills a `AGENTS.md` neinjektuj.
-5. Shromáždi target a explicitní file-backed references, deduplikuj podle canonical path a snapshotni dirty set. Jeden dialog nabízí přesně save-and-continue/cancel.
+5. Shromáždi target a explicitní file-backed references, deduplikuj podle canonical path a snapshotni dirty set. Build je automaticky uloží; Plan nabídne přesně save-and-continue/cancel.
 6. Save prováděj běžným `:write` po jednom v deterministickém pořadí. Jakékoli selhání zastaví dispatch; již zapsaný buffer nelze vrátit, proto UI předem ukáže celý set. Po každém write vyžaduj `modified=false` a logical buffer=disk. Kontext/Base čti až po všech hooks.
 
 Ověření kroku: tests pro všechny placeholders, stale marks, unsupported buffers, cancel, druhý write failure a `BufWritePre` mutaci. Žádný cancel/failure nevytvoří prompt ani Job.

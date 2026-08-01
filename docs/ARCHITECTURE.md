@@ -368,14 +368,17 @@ Stejná kontrola proběhne znovu po zachycení Ours před každou automatickou a
 
 ## Dirty-buffer preflight a Base
 
-Preflight zahrnuje target a všechny explicitně expandované file-backed context references. Dirty buffery se zobrazí v jednom nativním dialogu:
+Preflight zahrnuje target a všechny explicitně expandované file-backed context references. Dirty buffery se zpracují podle režimu:
+
+- Build je automaticky uloží běžným write se standardními write autocmds.
+- Plan je zobrazí v jednom nativním dialogu:
 
 ```text
 save and continue
 cancel
 ```
 
-`save and continue` provede běžný write se standardními write autocmds. Po každém write:
+Build i volba `save and continue` provedou běžný write se standardními write autocmds. Po každém write:
 
 1. write musí skončit úspěšně,
 2. buffer nesmí zůstat `modified`,

@@ -79,7 +79,7 @@ function M.ask(default, opts)
     readiness:catch(notify_error)
     return readiness
   end
-  local flow = require("opencode.context.preflight").run(context):next(function()
+  local flow = require("opencode.context.preflight").run(context, mode):next(function()
     return require("opencode.ui.ask").ask(default, context, mode, opts, readiness, function(input)
       return submit_when_ready(input, context, opts)
     end)

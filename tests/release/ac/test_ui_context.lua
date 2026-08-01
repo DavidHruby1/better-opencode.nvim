@@ -782,7 +782,7 @@ T["AC-CTX-02 managed commands reject slash dispatch without duplicating command 
   vim.fn.delete(path)
 end
 
-T["AC-CTX-03 dirty save runs write hooks before Build captures Base and creates a Job"] = function()
+T["AC-CTX-03 dirty Build saves through write hooks before capturing Base and creating a Job"] = function()
   local path, buf = source_buffer({ "before" }, "text")
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "dirty" })
   local hook_runs = 0
@@ -798,13 +798,15 @@ T["AC-CTX-03 dirty save runs write hooks before Build captures Base and creates 
   local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_ctx_03")
   local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
   local original_select = vim.ui.select
-  vim.ui.select = function(items, _, callback)
-    eq(items, { "save and continue", "cancel" })
+  local select_calls = 0
+  vim.ui.select = function(_, _, callback)
+    select_calls = select_calls + 1
     callback("save and continue")
   end
   local job, err = await(require("opencode.api.prompt").prompt("build it", context, { mode = "build" }))
   vim.ui.select = original_select
   eq(err, nil)
+  eq(select_calls, 0)
   eq(hook_runs, 1)
   eq(vim.bo[buf].modified, false)
   eq(table.concat(vim.fn.readfile(path), "\n"), "final after hook")
@@ -815,7 +817,7 @@ T["AC-CTX-03 dirty save runs write hooks before Build captures Base and creates 
   vim.fn.delete(path)
 end
 
-T["AC-CTX-04 dirty cancel creates no prompt and leaves every dirty buffer unsaved"] = function()
+T["AC-CTX-04 Plan dirty cancel creates no prompt and leaves every dirty buffer unsaved"] = function()
   local path, buf = source_buffer({ "target" }, "text")
   local other_path = vim.fn.tempname() .. ".txt"
   vim.fn.writefile({ "other" }, other_path)
@@ -832,7 +834,7 @@ T["AC-CTX-04 dirty cancel creates no prompt and leaves every dirty buffer unsave
     eq(items, { "save and continue", "cancel" })
     callback("cancel")
   end
-  local _, err = await(require("opencode.api.prompt").prompt("do not send", context, { mode = "build" }))
+  local _, err = await(require("opencode.api.prompt").prompt("do not send", context, { mode = "plan" }))
   vim.ui.select = original_select
   eq(err.error_class, "cancelled")
   eq(call_log.creates, 0)

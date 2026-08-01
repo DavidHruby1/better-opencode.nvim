@@ -248,11 +248,12 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Priorita:** P0  
 **Požadavky:** CTX-08, CTX-09, CTX-10
 
-**Given** target je dirty a `BufWritePre` změní jeho text  
-**When** uživatel zvolí `save and continue`  
-**Then** proběhne běžný write včetně autocmds  
-**And** Base obsahuje až finální text po hooku  
-**And** Base se shoduje s diskem a buffer není modified  
+**Given** Build target je dirty a `BufWritePre` změní jeho text<br>
+**When** uživatel otevře Build přes výchozí workflow<br>
+**Then** proběhne běžný write včetně autocmds<br>
+**And** Base obsahuje až finální text po hooku<br>
+**And** Base se shoduje s diskem a buffer není modified<br>
+**And** neotevře se dirty-buffer dialog<br>
 **And** teprve potom se vytvoří Job.
 
 ### AC-CTX-04: Dirty preflight cancel nebo save failure
@@ -260,8 +261,8 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Priorita:** P0  
 **Požadavky:** CTX-08, CTX-10
 
-**Given** target nebo explicitní context buffer je dirty  
-**When** uživatel zvolí `cancel` nebo write selže  
+**Given** Plan target nebo explicitní context buffer je dirty<br>
+**When** uživatel zvolí `cancel` nebo write selže<br>
 **Then** nevznikne Session prompt ani Job  
 **And** žádný z ostatních dirty bufferů se potichu neuloží.
 
@@ -283,7 +284,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 
 **Given** Plan target nebo explicitní file context je dirty  
 **When** uživatel odešle Plan prompt  
-**Then** plugin nabídne `save and continue` nebo `cancel` stejně jako pro Build  
+**Then** plugin nabídne `save and continue` nebo `cancel` pro Plan<br>
 **And** při cancelu se prompt neodešle  
 **And** při pokračování Plan čte až finální obsah po úspěšných write hooks.
 
