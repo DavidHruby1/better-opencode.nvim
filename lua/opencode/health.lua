@@ -19,7 +19,7 @@ end
 
 local function writable_directory(path)
   if vim.fn.isdirectory(path) == 0 then
-    vim.fn.mkdir(path, "p", 448)
+    vim.fn.mkdir(path, "p", "0700")
   end
   return vim.fn.isdirectory(path) == 1 and vim.fn.filewritable(path) == 2
 end
@@ -47,27 +47,22 @@ local function command_output(argv)
   return vim.trim(result.stdout or "")
 end
 
----Collects the tmux settings that carry modified Enter keys from the terminal to Neovim.
----It reads only global options and the current client's public terminal fields, and never changes tmux configuration.
-local function tmux_capabilities()
+---Collects the tmux process and pane availability needed by the shared Plan TUI.
+---It reads environment presence and the local executable version without changing tmux configuration.
+local function tmux_availability()
   local in_tmux = type(vim.env.TMUX) == "string" and vim.env.TMUX ~= ""
+  local pane_ok = type(vim.env.TMUX_PANE) == "string" and vim.env.TMUX_PANE ~= ""
   local tmux_ok = executable("tmux")
   local report = {
     in_tmux = in_tmux,
+    pane_ok = pane_ok,
     executable_ok = tmux_ok,
     version = tmux_ok and command_output({ "tmux", "-V" }) or nil,
   }
-  if not in_tmux or not tmux_ok then
-    return report
-  end
-
-  report.extended_keys = command_output({ "tmux", "show-options", "-gv", "extended-keys" })
-  report.client_termfeatures = command_output({ "tmux", "display-message", "-p", "#{client_termfeatures}" })
-  report.client_termname = command_output({ "tmux", "display-message", "-p", "#{client_termname}" })
   return report
 end
 
----Collects local capability, tmux transport, and OpenCode config facts without starting a Server or Runtime state.
+---Collects local capability, tmux availability, and OpenCode config facts without starting a Server or Runtime state.
 ---Command probes are read-only; the passive config guard matches startup's root and environment.
 ---@return table
 function M.capabilities()
@@ -85,7 +80,12 @@ function M.capabilities()
   local version = opencode_version(config.opts.runtime.binary)
   local profile = version and require("opencode.compat")[version] or nil
   local root = require("opencode.runtime.root").realpath(vim.uv.cwd() or vim.fn.getcwd())
-  local guard_ok, guard_error = require("opencode.runtime.config_guard").scan(root)
+  local guard_ok = false
+  ---@type string?
+  local guard_error = "root_not_found"
+  if type(root) == "string" then
+    guard_ok, guard_error = require("opencode.runtime.config_guard").scan(root)
+  end
   return {
     nvim_ok = vim.version.ge(vim.version(), { 0, 11, 0 }),
     opencode_ok = version ~= nil,
@@ -100,7 +100,7 @@ function M.capabilities()
     parser_name = parser_name,
     lua_adapter_ok = pcall(require, "opencode.scope.adapters.lua"),
     terminal_ok = vim.fn.exists("*jobstart") == 1,
-    tmux = tmux_capabilities(),
+    tmux = tmux_availability(),
     loopback_ok = M.loopback_available(),
     state_dir_ok = writable_directory(vim.fn.stdpath("state") .. "/opencode.nvim"),
     temp_dir_ok = writable_directory(vim.fn.stdpath("state") .. "/opencode.nvim/runtimes"),
@@ -110,8 +110,8 @@ function M.capabilities()
   }
 end
 
----Reports whether tmux can carry extended keyboard input from the current terminal client.
----Each read-only probe is reported separately so users can fix the exact missing layer without exposing environment contents.
+---Reports whether the tmux executable and current pane are available for the shared Plan TUI.
+---The checks are read-only and stop before pane details when Neovim is not running inside tmux.
 local function report_tmux(report)
   local tmux = report.tmux
   if not tmux.in_tmux then
@@ -132,32 +132,10 @@ local function report_tmux(report)
   if not tmux.in_tmux then
     return
   end
-  if tmux.extended_keys == "on" or tmux.extended_keys == "always" then
-    vim.health.ok("tmux global extended-keys is " .. tmux.extended_keys)
+  if tmux.pane_ok then
+    vim.health.ok("tmux pane target is available")
   else
-    vim.health.error("tmux extended keys are disabled or unreadable; run `tmux set -g extended-keys on`")
-  end
-
-  if tmux.client_termname and tmux.client_termname ~= "" then
-    vim.health.ok("tmux current client termname: " .. tmux.client_termname)
-  else
-    vim.health.error("tmux current client termname is unavailable; run `tmux display-message -p '#{client_termname}'`")
-  end
-
-  local features = tmux.client_termfeatures
-  local has_extkeys = features and ("," .. features .. ","):find(",extkeys,", 1, true) ~= nil
-  if has_extkeys then
-    vim.health.ok("tmux current client terminal features include extkeys")
-  elseif tmux.client_termname and tmux.client_termname ~= "" then
-    vim.health.error(
-      "tmux current client lacks extkeys; run `tmux set -as terminal-features ',"
-        .. tmux.client_termname
-        .. ":extkeys'`"
-    )
-  else
-    vim.health.error(
-      "tmux current client terminal features are unavailable; add extkeys for its actual client termname"
-    )
+    vim.health.error("TMUX_PANE is not set; restart Neovim inside tmux")
   end
 end
 
@@ -199,7 +177,7 @@ local function report_config(report)
 end
 
 ---Reports hard dependencies and actionable warnings without starting a Server, MCP, plugin, or tool.
----External probes read local tool versions and tmux settings, and exercise Git with empty /dev/null operands.
+---External probes read local tool versions and tmux availability, and exercise Git with empty /dev/null operands.
 function M.check()
   vim.health.start("opencode.nvim")
   local report = M.capabilities()
