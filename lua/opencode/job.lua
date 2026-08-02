@@ -56,9 +56,37 @@ function M.new(session_id, target)
 end
 
 local terminal_states = { completed = true, cancelled = true, error = true, scope_violation = true }
+local terminal_limit = 100
 
 function M.terminal(state)
   return terminal_states[state] == true
+end
+
+---Keeps a bounded diagnostic tail of terminal Jobs without removing a Job whose HTTP dispatch can still settle.
+---Assistant mappings owned by removed Jobs are dropped with them so later events fail closed as unknown identities.
+---@param runtime table?
+function M.retain(runtime)
+  if not runtime then
+    return
+  end
+  local terminal = {}
+  for _, job in pairs(runtime.jobs or {}) do
+    if M.terminal(job.state) and not job.dispatch_pending then
+      table.insert(terminal, job)
+    end
+  end
+  table.sort(terminal, function(a, b)
+    return (a.finished_sequence or 0) > (b.finished_sequence or 0)
+  end)
+  for index = terminal_limit + 1, #terminal do
+    local removed = terminal[index]
+    runtime.jobs[removed.key] = nil
+    for identity, key in pairs(runtime.assistant_jobs or {}) do
+      if key == removed.key then
+        runtime.assistant_jobs[identity] = nil
+      end
+    end
+  end
 end
 
 local transitions = {
@@ -80,7 +108,7 @@ local transitions = {
 ---Conflict and terminal states remove transient Build UI immediately; the Session is supplied because only terminal states release it.
 ---@param job table
 ---@param state string
----@param attrs? { session?: table, waiting_kind?: "question"|"permission", conflict_kind?: "agent"|"external_change", conflict_payload?: table }
+---@param attrs? { runtime?: table, session?: table, waiting_kind?: "question"|"permission", conflict_kind?: "agent"|"external_change", conflict_payload?: table }
 ---@return boolean
 function M.transition(job, state, attrs)
   attrs = attrs or {}
@@ -128,7 +156,7 @@ function M.transition(job, state, attrs)
       session.active_job_key = nil
       session.last_job_state = state
     end
-    local runtime = require("opencode.runtime").for_root(job.root)
+    local runtime = attrs.runtime or job.runtime or require("opencode.runtime").for_root(job.root)
     local claim = runtime and runtime.session_claims and runtime.session_claims[job.session_id]
     if
       runtime
@@ -147,6 +175,12 @@ function M.transition(job, state, attrs)
         notify.emit(state, notify.snapshot(runtime, job), runtime)
       end
     end
+    if runtime then
+      runtime.terminal_sequence = (runtime.terminal_sequence or 0) + 1
+      job.finished_sequence = runtime.terminal_sequence
+      M.retain(runtime)
+    end
+    job.runtime = nil
   end
   return true
 end

@@ -153,6 +153,7 @@ function Runtime.new(root)
     sessions = {},
     jobs = {},
     session_claims = {},
+    scope_claims = {},
     assistant_jobs = {},
     correlation = { exact = 0, late = 0, unknown = 0 },
     generation = 0,
@@ -236,13 +237,24 @@ end
 ---Rejects effective remote configuration that enables tools outside the compatible profile.
 ---Plugins and MCPs remain OpenCode-owned because they do not extend the proposal tool boundary.
 local function config_valid(runtime, config)
-  for name, enabled in pairs(config.tools or {}) do
-    if enabled ~= false and not runtime.profile.tools[name] then
+  if type(config) ~= "table" then
+    return false, "custom_tool"
+  end
+  for _, key in ipairs({ "tool", "tools" }) do
+    local configured = config[key]
+    if configured ~= nil and type(configured) ~= "table" then
       return false, "custom_tool"
+    end
+    for name, enabled in pairs(configured or {}) do
+      if enabled ~= false and not runtime.profile.tools[name] then
+        return false, "custom_tool"
+      end
     end
   end
   return true
 end
+
+Runtime.config_valid = config_valid
 
 ---Builds the private ownership record from the current Server identity.
 ---Legacy TUI records are handled only while stale manifests are cleaned; new Runtime manifests never track them.
@@ -362,7 +374,6 @@ function Runtime:connect_sse(deadline)
         connection_settled = true
         stop_first_event_timer()
         self.sse_live = true
-        self.reconnect_attempt = 0
         resolve_connection(self)
       end
       self:route_event(event)
@@ -702,10 +713,12 @@ function Runtime:route_event(event)
     end
     return
   end
+  session.remote_status = "idle"
+  session.availability = "reusable"
+  session.availability_reason = nil
   job.remote_idle = true
-  local attempts = 0
+  job.remote_observed = true
   local function load_messages()
-    attempts = attempts + 1
     self.client
       :messages(session_id)
       :next(function(messages)
@@ -714,8 +727,8 @@ function Runtime:route_event(event)
         end
         local reconcile = require("opencode.runtime.reconcile")
         if not reconcile.has_parent_response(job, messages) then
-          job.remote_idle = false
-          self.correlation.late = self.correlation.late + 1
+          job.error_class = "missing_result"
+          require("opencode.job").finish(job, session, "error")
           return
         end
         reconcile.complete_job(self, session, job, messages)
@@ -731,8 +744,8 @@ function Runtime:route_event(event)
             reconcile.complete_job(self, session, job, captured)
             return
           end
-          job.remote_idle = false
-          self.correlation.late = self.correlation.late + 1
+          job.error_class = "missing_result"
+          require("opencode.job").finish(job, session, "error")
           return
         end
         job.error_class = type(err) == "table" and err.error_class or "message_reconciliation"

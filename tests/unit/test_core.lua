@@ -22,6 +22,15 @@ T["config ignores plugins and MCPs but rejects custom tools"] = function()
   eq(select(2, guard.validate({ tool = { "x" } })), "custom_tool")
 end
 
+T["effective config checks singular and plural enabled tools"] = function()
+  local Runtime = require("opencode.runtime")
+  local runtime = { profile = { tools = { read = true } } }
+  eq(Runtime.config_valid(runtime, { tool = { read = true }, tools = { disabled_custom = false } }), true)
+  eq({ Runtime.config_valid(runtime, { tool = { custom = true } }) }, { false, "custom_tool" })
+  eq({ Runtime.config_valid(runtime, { tools = { custom = {} } }) }, { false, "custom_tool" })
+  eq({ Runtime.config_valid(runtime, { tool = "invalid" }) }, { false, "custom_tool" })
+end
+
 T["config guard ignores plugin directories and scans tool directories"] = function()
   local root = vim.fn.tempname()
   local home = root .. "/home"
@@ -199,6 +208,17 @@ T["overlap excludes touching half-open ranges"] = function()
   local overlaps = require("opencode.scope").overlaps
   eq(overlaps({ start_byte = 0, end_byte = 3 }, { start_byte = 2, end_byte = 4 }), true)
   eq(overlaps({ start_byte = 0, end_byte = 3 }, { start_byte = 3, end_byte = 4 }), false)
+end
+
+T["prompt scope claims atomically reject overlap and release by identity"] = function()
+  local prompt = require("opencode.api.prompt")
+  local runtime = require("opencode.runtime").new("/root")
+  local first = assert(prompt.claim_scope(runtime, 1, { start_byte = 0, end_byte = 3 }))
+  eq(select(2, prompt.claim_scope(runtime, 1, { start_byte = 2, end_byte = 4 })), "scope_overlap")
+  local adjacent = assert(prompt.claim_scope(runtime, 1, { start_byte = 3, end_byte = 4 }))
+  prompt.release_scope(runtime, first)
+  eq(prompt.claim_scope(runtime, 1, { start_byte = 2, end_byte = 3 }) ~= nil, true)
+  prompt.release_scope(runtime, adjacent)
 end
 
 T["proposal schema and identity construct exact Theirs"] = function()
@@ -465,6 +485,91 @@ T["blocked Session idle event retriggers reconciliation"] = function()
   runtime:route_event({ type = "session.idle", properties = { sessionID = "ses_blocked" } })
   eq(reconciliations, 1)
   eq({ runtime.sessions.ses_blocked.remote_status, runtime.sessions.ses_blocked.availability }, { "idle", "reusable" })
+end
+
+T["idle without an exact parent terminalizes and cleans the local Job"] = function()
+  package.loaded["opencode.interaction"] = nil
+  local Promise = require("opencode.promise")
+  local runtime = require("opencode.runtime").new("/root")
+  local buf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one" })
+  local job = require("opencode.job").new("ses_idle", {
+    root = runtime.root,
+    buf = buf,
+    path = runtime.root .. "/one.lua",
+    scope = { start_byte = 0, end_byte = 3 },
+    marks = require("opencode.scope").create_marks(buf, { start_byte = 0, end_byte = 3 }),
+  })
+  job.runtime = runtime
+  local session = { id = job.session_id, active_job_key = job.key, remote_status = "busy" }
+  runtime.jobs[job.key], runtime.sessions[session.id] = job, session
+  runtime.session_claims[session.id] = { pending = false, job_key = job.key }
+  require("opencode.interaction").enqueue({ root = runtime.root, session_id = session.id, job_key = job.key })
+  runtime.client = {
+    messages = function()
+      return Promise.resolve({})
+    end,
+  }
+
+  runtime:route_event({ type = "session.idle", properties = { sessionID = session.id } })
+  eq(
+    vim.wait(200, function()
+      return job.state == "error"
+    end),
+    true
+  )
+  eq({ job.error_class, job.request_status, job.marks, session.active_job_key }, { "missing_result", nil, nil, nil })
+  eq({ session.remote_status, session.availability, runtime.session_claims[session.id] }, { "idle", "reusable", nil })
+  eq(require("opencode.interaction").queue, {})
+  vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["idle HTTP 400 without captured parent terminalizes"] = function()
+  local Promise = require("opencode.promise")
+  local runtime = require("opencode.runtime").new("/root")
+  local job = {
+    key = "ses_400:msg_400",
+    root = runtime.root,
+    runtime = runtime,
+    session_id = "ses_400",
+    user_message_id = "msg_400",
+    state = "running",
+    assistant_messages = {},
+  }
+  local session = { id = job.session_id, active_job_key = job.key }
+  runtime.jobs[job.key], runtime.sessions[session.id] = job, session
+  runtime.client = {
+    messages = function()
+      return Promise.reject({ error_class = "http", status = 400 })
+    end,
+  }
+
+  runtime:route_event({ type = "session.idle", properties = { sessionID = session.id } })
+  eq(
+    vim.wait(200, function()
+      return job.state == "error"
+    end),
+    true
+  )
+  eq({ job.error_class, session.active_job_key, session.remote_status }, { "missing_result", nil, "idle" })
+end
+
+T["terminal retention protects pending dispatches and bounds settled history"] = function()
+  local jobs = require("opencode.job")
+  local runtime = require("opencode.runtime").new("/root")
+  local pending = { key = "pending", state = "completed", dispatch_pending = true, finished_sequence = 0 }
+  runtime.jobs[pending.key] = pending
+  for index = 1, 101 do
+    local job = { key = "terminal_" .. index, state = "completed", finished_sequence = index }
+    runtime.jobs[job.key] = job
+    runtime.assistant_jobs["assistant_" .. index] = job.key
+  end
+  jobs.retain(runtime)
+  eq({ vim.tbl_count(runtime.jobs), runtime.jobs.pending ~= nil, runtime.jobs.terminal_1 }, { 101, true, nil })
+  eq(runtime.assistant_jobs.assistant_1, nil)
+  pending.dispatch_pending = nil
+  jobs.retain(runtime)
+  eq({ vim.tbl_count(runtime.jobs), runtime.jobs.pending }, { 100, nil })
 end
 
 return T

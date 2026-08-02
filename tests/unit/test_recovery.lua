@@ -217,6 +217,7 @@ T["failed reconciliation stays blocked and notifies until a later snapshot succe
   local Promise = require("opencode.promise")
   local runtime = require("opencode.runtime").new("/root")
   runtime.state, runtime.sse_live = "ready", true
+  runtime.reconnect_attempt = 3
   local calls, notifications = 0, {}
   local old_notify = vim.notify
   vim.notify = function(message)
@@ -242,6 +243,7 @@ T["failed reconciliation stays blocked and notifies until a later snapshot succe
     true
   )
   eq({ runtime.prompt_blocker and runtime:prompt_blocker() or nil, #notifications }, { "reconciliation_failed", 1 })
+  eq(runtime.reconnect_attempt, 3)
 
   runtime:begin_reconciliation()
   eq(
@@ -251,7 +253,82 @@ T["failed reconciliation stays blocked and notifies until a later snapshot succe
     true
   )
   eq({ runtime.prompt_blocker and runtime:prompt_blocker() or nil, runtime.reconciliation_required }, { nil, false })
+  eq(runtime.reconnect_attempt, 0)
   vim.notify = old_notify
+end
+
+T["reconciliation timeout terminalizes remote-dependent Jobs and cleans claims"] = function()
+  local Promise = require("opencode.promise")
+  local config = require("opencode.config").opts.runtime
+  local saved_timeout = config.startup_timeout
+  config.startup_timeout = 20
+  local runtime = require("opencode.runtime").new("/root")
+  runtime.state, runtime.sse_live, runtime.generation = "ready", true, 1
+  local job =
+    { key = "job_timeout", root = runtime.root, runtime = runtime, session_id = "ses_timeout", state = "running" }
+  local session = { id = job.session_id, active_job_key = job.key }
+  runtime.jobs[job.key], runtime.sessions[session.id] = job, session
+  runtime.session_claims[session.id] = { pending = false, job_key = job.key }
+  runtime.client = {
+    session_status = function()
+      return Promise.new(function() end)
+    end,
+  }
+  local error
+  require("opencode.runtime.reconcile").run(runtime, 1):catch(function(err)
+    error = err
+  end)
+  eq(
+    vim.wait(500, function()
+      return error ~= nil
+    end),
+    true
+  )
+  config.startup_timeout = saved_timeout
+  eq({ error.error_class, job.state, job.error_class }, { "reconciliation_timeout", "error", "reconciliation_timeout" })
+  eq({ session.active_job_key, session.availability, runtime.session_claims[session.id] }, { nil, "blocked", nil })
+  eq(runtime:prompt_blocker(), "reconciliation_failed")
+end
+
+T["stale reconciliation callbacks cannot mutate the current generation"] = function()
+  local Promise = require("opencode.promise")
+  local resolve_old
+  local runtime = require("opencode.runtime").new("/root")
+  runtime.state, runtime.sse_live, runtime.generation = "ready", true, 1
+  local job = { key = "job_generation", root = runtime.root, session_id = "ses_generation", state = "running" }
+  local session = { id = job.session_id, active_job_key = job.key }
+  runtime.jobs[job.key], runtime.sessions[session.id] = job, session
+  runtime.client = {
+    session_status = function()
+      return Promise.new(function(resolve)
+        resolve_old = resolve
+      end)
+    end,
+    messages = function()
+      return Promise.resolve({})
+    end,
+    questions = function()
+      return Promise.resolve({})
+    end,
+    permissions = function()
+      return Promise.resolve({})
+    end,
+  }
+  local stale_error
+  require("opencode.runtime.reconcile").run(runtime, 1):catch(function(err)
+    stale_error = err
+  end)
+  runtime.generation = 2
+  local current = require("opencode.runtime.reconcile").run(runtime, 2, { ses_generation = "busy" })
+  eq(current ~= nil, true)
+  assert(resolve_old)({ ses_generation = "idle" })
+  eq(
+    vim.wait(500, function()
+      return stale_error ~= nil and runtime.reconciling == false
+    end),
+    true
+  )
+  eq({ stale_error.error_class, job.state, session.remote_status }, { "stale_generation", "running", "busy" })
 end
 
 T["interaction identity keeps identical request IDs isolated by root"] = function()

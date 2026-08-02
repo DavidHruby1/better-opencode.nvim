@@ -71,6 +71,7 @@ end
 local function exact(runtime, job)
   runtime.correlation = runtime.correlation or { exact = 0, late = 0, unknown = 0 }
   runtime.correlation.exact = runtime.correlation.exact + 1
+  job.remote_observed = true
   if require("opencode.job").terminal(job.state) or job.cancelling then
     late(runtime, job)
     return false
