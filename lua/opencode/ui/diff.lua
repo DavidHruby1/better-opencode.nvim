@@ -104,18 +104,19 @@ function M.agent(request, runtime, job)
     end)
 end
 
----Opens a read-only comparison of current buffer Ours and fresh disk text.
----Closing either scratch buffer returns to the still-open external conflict dialog without reloading source.
+---Opens a read-only comparison of loaded buffer Ours and fresh disk text.
+---Closing either scratch buffer returns once to the still-open external conflict dialog without loading or reloading source.
 function M.external(request, runtime, job)
+  if not vim.api.nvim_buf_is_valid(job.buffer) or not vim.api.nvim_buf_is_loaded(job.buffer) then
+    require("opencode.ui.notify").warn("invalid_buffer")
+    require("opencode.ui.dialog").reshow(request)
+    return
+  end
   local raw = require("opencode.snapshot").read_raw(job.path)
   local disk = raw and require("opencode.snapshot").decode_disk(raw, job.base)
   if not disk then
     require("opencode.ui.notify").warn("disk_read")
-    vim.schedule(function()
-      if request.state ~= "closed" then
-        require("opencode.ui.dialog").show(request)
-      end
-    end)
+    require("opencode.ui.dialog").reshow(request)
     return
   end
   local ours = table.concat(vim.api.nvim_buf_get_lines(job.buffer, 0, -1, false), "\n")
@@ -135,11 +136,7 @@ function M.external(request, runtime, job)
       return
     end
     close_all(owner)
-    vim.schedule(function()
-      if request.state ~= "closed" then
-        require("opencode.ui.dialog").show(request)
-      end
-    end)
+    require("opencode.ui.dialog").reshow(request)
   end
   local group = vim.api.nvim_create_augroup("OpencodeExternalDiff" .. request.id, { clear = true })
   vim.api.nvim_create_autocmd("TabClosed", {

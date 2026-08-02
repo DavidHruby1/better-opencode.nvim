@@ -1,5 +1,7 @@
 local M = {}
 
+local max_stale_retries = 3
+
 local function logical(buf)
   return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
 end
@@ -79,13 +81,15 @@ local function restore_views(buf, views)
 end
 
 ---Captures the source facts required by every automatic or user-confirmed apply path.
----It rejects Insert mode, invalid ownership marks, overlapping scopes, and unsafe disk content before merge work begins.
+---It rejects Insert mode, unloaded or invalid buffers, bad ownership marks, overlapping scopes, and unsafe disk content
+---before merge work begins so no check can implicitly load or mutate the source.
 local function source_state(job, runtime)
   if vim.api.nvim_get_mode().mode:sub(1, 1) == "i" then
     return nil, "insert_mode"
   end
   if
     not vim.api.nvim_buf_is_valid(job.buffer)
+    or not vim.api.nvim_buf_is_loaded(job.buffer)
     or not vim.bo[job.buffer].modifiable
     or require("opencode.runtime.root").realpath(vim.api.nvim_buf_get_name(job.buffer)) ~= job.path
   then
@@ -135,7 +139,23 @@ local function terminate(job, runtime, state, conflict_kind, conflict_payload)
   end
 end
 
----Applies a merge result only when both Job and Runtime generations still own the scheduled callback.
+---Restarts an automatic apply from fresh source facts, but stops repeated editor races.
+---Only the currently pending generation can use this path; exhausting the bound leaves a typed terminal error.
+local function restart_stale(job, runtime, error_class)
+  if job.state ~= "pending_apply" then
+    return
+  end
+  job.apply_stale_retries = (job.apply_stale_retries or 0) + 1
+  if job.apply_stale_retries <= max_stale_retries then
+    M.start(job, runtime)
+    return
+  end
+  job.error_class = error_class
+  terminate(job, runtime, "error")
+end
+
+---Applies one minimal result span only when fresh Job, Runtime, buffer, disk, and scope facts still match.
+---Automatic stale facts restart within a bound; conflict actions stay recoverable and report their typed rejection.
 local function apply_result(
   job,
   runtime,
@@ -146,16 +166,21 @@ local function apply_result(
   disk_sha,
   result,
   expected_state,
-  callback
+  callback,
+  hard_scope
 )
   vim.schedule(function()
     expected_state = expected_state or "pending_apply"
-    if
-      job.state ~= expected_state
-      or job.apply_generation ~= generation
-      or runtime.generation ~= runtime_generation
-    then
+    if job.state ~= expected_state or job.apply_generation ~= generation then
       if callback then
+        callback(false, "stale_generation")
+      end
+      return
+    end
+    if runtime.generation ~= runtime_generation then
+      if expected_state == "pending_apply" then
+        restart_stale(job, runtime, "stale_generation")
+      elseif callback then
         callback(false, "stale_generation")
       end
       return
@@ -177,7 +202,7 @@ local function apply_result(
     end
     if current.tick ~= tick or current.disk_sha ~= disk_sha or current.ours ~= ours then
       if expected_state == "pending_apply" then
-        M.start(job, runtime)
+        restart_stale(job, runtime, "stale_source")
       elseif callback then
         callback(false, "stale_source")
       end
@@ -195,11 +220,20 @@ local function apply_result(
     end
     local span = M.changed_span(ours, result)
     local final_ranges = require("opencode.scope").active_ranges(runtime, job.buffer)
-    if not final_ranges or require("opencode.scope").mutation_overlaps(runtime, job, span) then
+    local own_range = hard_scope and require("opencode.scope").current_range(job) or nil
+    if
+      not final_ranges
+      or require("opencode.scope").mutation_overlaps(runtime, job, span)
+      or (
+        hard_scope
+        and result ~= ours
+        and (not own_range or span.start_byte < own_range.start_byte or span.ours_end > own_range.end_byte)
+      )
+    then
       if expected_state == "pending_apply" then
         terminate(job, runtime, "scope_violation")
       elseif callback then
-        callback(false, "scope_overlap")
+        callback(false, hard_scope and "scope_violation" or "scope_overlap")
       end
       return
     end
@@ -227,6 +261,7 @@ local function apply_result(
       return
     end
     restore_views(job.buffer, views)
+    job.apply_stale_retries = nil
     terminate(job, runtime, "completed")
     if callback then
       callback(true)
@@ -235,7 +270,7 @@ local function apply_result(
 end
 
 ---Captures fresh Ours and disk state, validates active scopes, and starts one merge generation.
----A stale completion recursively starts only one replacement generation from current editor state.
+---Stale source or Runtime facts restart from current state up to a fixed bound, then fail with their typed reason.
 ---@param job table
 ---@param runtime table
 function M.start(job, runtime)
@@ -287,16 +322,26 @@ function M.start(job, runtime)
       temp_dir = runtime.temp_root,
     })
     :next(function(merge)
+      if job.state ~= "pending_apply" or job.apply_generation ~= generation then
+        return
+      end
+      if runtime.generation ~= runtime_generation then
+        restart_stale(job, runtime, "stale_generation")
+        return
+      end
       if merge.kind == "conflict" then
-        if job.state == "pending_apply" and job.apply_generation == generation then
-          terminate(job, runtime, nil, "agent", { base = job.base, ours = ours, theirs = job.theirs })
-        end
+        terminate(job, runtime, nil, "agent", { base = job.base, ours = ours, theirs = job.theirs })
         return
       end
       apply_result(job, runtime, generation, runtime_generation, ours, tick, disk_sha, merge.text)
     end)
-    :catch(function()
+    :catch(function(err)
       if job.state == "pending_apply" and job.apply_generation == generation then
+        if runtime.generation ~= runtime_generation then
+          restart_stale(job, runtime, "stale_generation")
+          return
+        end
+        job.error_class = type(err) == "table" and err.error_class or nil
         terminate(job, runtime, "error")
       end
     end)
@@ -326,7 +371,16 @@ function M.prefer(job, runtime, preference, callback)
       temp_dir = runtime.temp_root,
     })
     :next(function(result)
-      if result.kind ~= "clean" or job.state ~= "conflict" then
+      if job.state ~= "conflict" or job.apply_generation ~= generation then
+        return
+      end
+      if runtime.generation ~= runtime_generation then
+        if callback then
+          callback(false, "stale_generation")
+        end
+        return
+      end
+      if result.kind ~= "clean" then
         require("opencode.job").transition(job, "error", { session = runtime.sessions[job.session_id] })
         return
       end
@@ -349,8 +403,8 @@ function M.prefer(job, runtime, preference, callback)
   return true
 end
 
----Applies an explicitly confirmed manual result only after fresh source and disk checks.
----The same minimal-span mutation path is used so confirmation remains one undoable buffer edit.
+---Applies an explicitly confirmed manual result only after fresh source, disk, and hard scope checks.
+---The result may change only the Job's current range and uses the same one-span mutation so it remains one undoable edit.
 function M.manual(job, runtime, result, callback)
   if
     job.state ~= "conflict"
@@ -381,7 +435,8 @@ function M.manual(job, runtime, result, callback)
     current.disk_sha,
     result,
     "conflict",
-    callback
+    callback,
+    true
   )
   return true
 end
@@ -416,6 +471,12 @@ function M.retry(job, runtime, callback)
     })
     :next(function(result)
       if job.state ~= "conflict" or job.apply_generation ~= generation then
+        return
+      end
+      if runtime.generation ~= runtime_generation then
+        if callback then
+          callback(false, "stale_generation")
+        end
         return
       end
       if result.kind == "conflict" then

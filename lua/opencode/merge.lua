@@ -15,15 +15,25 @@ local function forget(owner_key, paths)
   end
 end
 
+---Writes every byte to one private merge operand and closes it before git can read it.
+---Short filesystem writes are retried from the returned offset so a successful write can never leave a partial operand.
 local function write_private(path, text)
   local handle, err = vim.uv.fs_open(path, "w", 384)
   if not handle then
     return nil, err
   end
-  local written, write_error = vim.uv.fs_write(handle, text, 0)
-  vim.uv.fs_close(handle)
-  if not written then
-    return nil, write_error
+  local offset = 0
+  while offset < #text do
+    local written, write_error = vim.uv.fs_write(handle, text:sub(offset + 1), offset)
+    if not written or written <= 0 then
+      vim.uv.fs_close(handle)
+      return nil, write_error
+    end
+    offset = offset + written
+  end
+  local closed, close_error = vim.uv.fs_close(handle)
+  if not closed then
+    return nil, close_error
   end
   return true
 end
