@@ -42,7 +42,7 @@ function M.run(base, ours, theirs, opts)
     return Promise.resolve({ kind = "clean", text = ours })
   end
   local directory = opts.temp_dir or (vim.fn.stdpath("state") .. "/opencode.nvim/merge")
-  vim.fn.mkdir(directory, "p", 448)
+  vim.fn.mkdir(directory, "p", "0700")
   local prefix = directory .. "/" .. vim.fn.sha256(tostring(vim.uv.hrtime()) .. tostring(math.random())):sub(1, 20)
   local paths = { base = prefix .. ".base", ours = prefix .. ".ours", theirs = prefix .. ".theirs" }
   if opts.owner_key then
