@@ -312,11 +312,14 @@ local function finish(runtime, generation, ok, err)
 end
 
 ---Runs the one bounded recovery snapshot for a Runtime and only then reopens prompts.
----Requests are issued in status, exact messages, questions, permissions order; idle Jobs finish only from exact parent identities, while busy and local apply/dialog states are preserved.
+---Requests are issued in status, exact messages, questions, permissions order; idle Jobs finish only from exact parent
+---identities, while busy and local apply/dialog states are preserved. Startup may supply the already fetched status
+---response to avoid a duplicate request.
 ---@param runtime table
 ---@param generation? integer
+---@param statuses? table
 ---@return Promise<table>
-function M.run(runtime, generation)
+function M.run(runtime, generation, statuses)
   local Promise = require("opencode.promise")
   generation = generation or runtime.generation
   runtime.reconciling = true
@@ -324,10 +327,16 @@ function M.run(runtime, generation)
   runtime.reconcile_generation = generation
   local jobs = active_jobs(runtime)
   local snapshots = {}
-  return runtime.client
-    :session_status()
+  return Promise.resolve(statuses or runtime.client:session_status())
     :next(function(statuses)
       runtime.reconcile_statuses = statuses
+      for _, session in pairs(runtime.sessions) do
+        if session.availability == "blocked" and not session.active_job_key then
+          session.remote_status = status_for(statuses, session.id) or "idle"
+          session.availability, session.availability_reason =
+            require("opencode.session").availability(runtime, session, session.remote_status)
+        end
+      end
       for _, job in ipairs(jobs) do
         local session = runtime.sessions[job.session_id]
         local status = status_for(statuses, job.session_id)

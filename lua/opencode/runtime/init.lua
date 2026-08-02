@@ -78,6 +78,7 @@ local function operation_contract(operation, doc)
 end
 
 ---Polls only the owned Server health endpoint until startup succeeds or the bounded deadline expires.
+---The first request runs immediately; later retries wait 100 ms so a not-yet-listening Server is not hammered.
 local function poll_health(runtime, deadline)
   local Promise = require("opencode.promise")
   return Promise.new(function(resolve, reject)
@@ -94,7 +95,7 @@ local function poll_health(runtime, deadline)
         end
       end)
     end
-    vim.defer_fn(attempt, 250)
+    attempt()
   end)
 end
 
@@ -434,10 +435,14 @@ local function spawn_server(runtime)
 end
 
 ---Loads persisted managed Sessions and runs the same exact recovery snapshot used after reconnect.
+---Startup fetches /session/status once and passes that response through inventory into reconciliation.
 ---Inventory failure is fatal because startup cannot safely declare reconciliation complete without it.
 local function initial_reconcile(runtime)
-  return require("opencode.session").inventory(runtime):next(function()
-    return require("opencode.runtime.reconcile").run(runtime, runtime.generation)
+  local session = require("opencode.session")
+  return runtime.client:session_status():next(function(statuses)
+    return session.inventory(runtime, statuses):next(function()
+      return require("opencode.runtime.reconcile").run(runtime, runtime.generation, statuses)
+    end)
   end)
 end
 
@@ -717,6 +722,12 @@ function Runtime:route_event(event)
   local session = self.sessions[session_id]
   local job = session and self.jobs[session.active_job_key]
   if not job or job.state ~= "running" then
+    if session and session.availability == "blocked" then
+      session.remote_status = "idle"
+      session.availability = "reusable"
+      session.availability_reason = nil
+      self:begin_reconciliation()
+    end
     return
   end
   job.remote_idle = true

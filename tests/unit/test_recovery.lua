@@ -1,3 +1,5 @@
+---@diagnostic disable: duplicate-set-field
+
 local T = MiniTest.new_set()
 local eq = MiniTest.expect.equality
 
@@ -161,7 +163,7 @@ T["SSE startup timeout stops an unconnected stream and allows retry"] = function
   eq({ retry_result, retry_error, runtime.sse_live, subscriptions }, { runtime, nil, true, 2 })
 end
 
-T["reconciliation completes an exact Plan once"] = function()
+T["direct reconciliation fetches status when no snapshot is supplied"] = function()
   local Promise = require("opencode.promise")
   local runtime = require("opencode.runtime").new("/root")
   runtime.state = "disconnected"
@@ -174,9 +176,10 @@ T["reconciliation completes an exact Plan once"] = function()
   })
   runtime.jobs[job.key] = job
   runtime.sessions.ses_1 = { id = "ses_1", active_job_key = job.key }
-  local calls = {}
+  local calls, status_requests = {}, 0
   runtime.client = {
     session_status = function()
+      status_requests = status_requests + 1
       table.insert(calls, "status")
       return Promise.resolve({ ses_1 = "idle" })
     end,
@@ -207,6 +210,7 @@ T["reconciliation completes an exact Plan once"] = function()
   eq(job.completion_count, 1)
   eq(runtime.state, "ready")
   eq(runtime.prompt_locked, false)
+  eq(status_requests, 1)
   eq(calls, { "status", "messages", "questions", "permissions" })
 end
 

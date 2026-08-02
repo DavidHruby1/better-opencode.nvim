@@ -12,8 +12,11 @@ local T = MiniTest.new_set({
 })
 local eq = MiniTest.expect.equality
 local Runtime = require("opencode.runtime")
+---@diagnostic disable: duplicate-set-field, need-check-nil
+
 local Promise = require("opencode.promise")
 local Client = require("opencode.client")
+local Session = require("opencode.session")
 
 local function await(promise, timeout)
   local done, value, error = false, nil, nil
@@ -222,7 +225,9 @@ local function runtime_harness(spec)
     end,
   })
   replace("opencode.session", {
-    inventory = function()
+    availability = Session.availability,
+    inventory = function(_, statuses)
+      calls.inventory_statuses = vim.deepcopy(statuses)
       return result(spec.inventory or {})
     end,
   })
@@ -314,6 +319,7 @@ local function runtime_harness(spec)
     calls = calls,
     live = live,
     ownership = ownership,
+    client = client,
   }
   function harness.emit_sse_event(event)
     local subscription = subscriptions[#subscriptions]
@@ -696,6 +702,13 @@ T["AC-EVT-05 disconnects on Server crash and restarts with fail-closed reconcili
     runtime_harness({ real_reconcile = true, inventory = {}, session_status = { crashed = "idle" }, messages = {} })
   local runtime, error = await(harness.runtime:start())
   eq(error, nil)
+  local status_requests = 0
+  for _, call in ipairs(harness.calls.client) do
+    if call == "session_status" then
+      status_requests = status_requests + 1
+    end
+  end
+  eq(status_requests, 1)
   local old_client = runtime.client
   local session = { id = "crashed", active_job_key = "crashed:msg_old" }
   local job = {
@@ -727,10 +740,64 @@ T["AC-EVT-05 disconnects on Server crash and restarts with fail-closed reconcili
   eq(runtime.server_job ~= old_server, true)
   eq(harness.calls.tui_starts, nil)
   eq(harness.calls.reconciled, nil)
-  eq(contains(harness.calls.client, "session_status"), true)
+  status_requests = 0
+  for _, call in ipairs(harness.calls.client) do
+    if call == "session_status" then
+      status_requests = status_requests + 1
+    end
+  end
+  eq(status_requests, 2)
   eq(contains(harness.calls.client, "messages:crashed"), true)
   eq(contains(harness.calls.client, "questions"), true)
   eq(contains(harness.calls.client, "permissions"), true)
+  harness.restore()
+end
+
+T["startup issues its first health request immediately"] = function()
+  local harness = runtime_harness()
+  local readiness = harness.runtime:start()
+  eq(harness.calls.client[1], "health")
+  local runtime, error = await(readiness)
+  eq(error, nil)
+  eq(runtime.state, "ready")
+  harness.restore()
+end
+
+T["startup retries a failed health request after the immediate attempt"] = function()
+  local attempts = 0
+  local harness = runtime_harness({
+    health = function()
+      attempts = attempts + 1
+      if attempts == 1 then
+        return Promise.reject({ error_class = "http" })
+      end
+      return { version = "1.17.3" }
+    end,
+  })
+  local runtime, error = await(harness.runtime:start())
+  eq(error, nil)
+  eq(runtime.state, "ready")
+  eq(attempts, 2)
+  eq({ harness.calls.client[1], harness.calls.client[2] }, { "health", "health" })
+  harness.restore()
+end
+
+T["startup reuses one session status snapshot for inventory and reconciliation"] = function()
+  local startup_status = { startup_session = "idle" }
+  local status_requests = 0
+  local harness = runtime_harness({
+    real_reconcile = true,
+    inventory = {},
+    session_status = function()
+      status_requests = status_requests + 1
+      return vim.deepcopy(startup_status)
+    end,
+  })
+  local runtime, error = await(harness.runtime:start())
+  eq(error, nil)
+  eq(status_requests, 1)
+  eq(harness.calls.inventory_statuses, startup_status)
+  eq(runtime.reconcile_statuses, startup_status)
   harness.restore()
 end
 
@@ -795,6 +862,29 @@ T["startup requires both primary Build and Plan agents"] = function()
     eq(harness.runtime.tui_starts, nil)
     harness.restore()
   end
+end
+
+T["reconciliation releases a blocked Session omitted from idle status"] = function()
+  local harness = runtime_harness({ real_reconcile = true })
+  local runtime = harness.runtime
+  runtime.state, runtime.sse_live, runtime.client = "ready", true, harness.client
+  runtime.prompt_locked, runtime.reconciliation_required, runtime.reconciliation_blocked = true, true, true
+  runtime.sessions.ses_blocked = {
+    id = "ses_blocked",
+    remote_status = "busy",
+    availability = "blocked",
+    availability_reason = "remote_busy_without_job",
+  }
+
+  local reconciled, err = await(require("opencode.runtime.reconcile").run(runtime, runtime.generation, {}))
+  eq(err, nil)
+  eq(reconciled, runtime)
+  eq({ runtime.sessions.ses_blocked.remote_status, runtime.sessions.ses_blocked.availability }, { "idle", "reusable" })
+  eq(
+    { runtime.prompt_locked, runtime.reconciliation_required, runtime.reconciliation_blocked },
+    { false, false, false }
+  )
+  harness.restore()
 end
 
 return T
