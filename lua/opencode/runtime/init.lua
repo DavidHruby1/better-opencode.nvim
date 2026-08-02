@@ -237,21 +237,7 @@ end
 ---Rejects effective remote configuration that enables tools outside the compatible profile.
 ---Plugins and MCPs remain OpenCode-owned because they do not extend the proposal tool boundary.
 local function config_valid(runtime, config)
-  if type(config) ~= "table" then
-    return false, "custom_tool"
-  end
-  for _, key in ipairs({ "tool", "tools" }) do
-    local configured = config[key]
-    if configured ~= nil and type(configured) ~= "table" then
-      return false, "custom_tool"
-    end
-    for name, enabled in pairs(configured or {}) do
-      if enabled ~= false and not runtime.profile.tools[name] then
-        return false, "custom_tool"
-      end
-    end
-  end
-  return true
+  return require("opencode.runtime.config_guard").validate(config, runtime.profile.tools)
 end
 
 Runtime.config_valid = config_valid
