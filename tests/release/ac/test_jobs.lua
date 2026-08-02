@@ -176,6 +176,66 @@ T["AC-JOB-01 active Session rejects follow-up instead of queueing a Job"] = func
   clear_fixture(runtime)
 end
 
+T["exact SSE completion wins over a later prompt HTTP rejection"] = function()
+  local sessions = require("opencode.session")
+  local root = vim.fn.tempname()
+  vim.fn.mkdir(root, "p")
+  local path = root .. "/file.lua"
+  vim.fn.writefile({ "return 1" }, path)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "return 1" })
+  vim.api.nvim_buf_set_name(buf, path)
+  local runtime
+  local client = fake_client({
+    update_session = {},
+    get_session = function(_, id)
+      return Promise.resolve({
+        id = id,
+        directory = root,
+        title = "Fast",
+        metadata = sessions.metadata(vim.fn.sha256(root)),
+        permission = vim.deepcopy(sessions.permissions),
+      })
+    end,
+    prompt_async = function(_, id, payload)
+      runtime:route_event({
+        type = "message.updated",
+        properties = {
+          info = {
+            id = "assistant_fast",
+            role = "assistant",
+            sessionID = id,
+            parentID = payload.messageID,
+          },
+        },
+      })
+      require("opencode.job").finish(runtime.jobs[id .. ":" .. payload.messageID], runtime.sessions[id], "completed")
+      return Promise.reject({ error_class = "http", status = 500 })
+    end,
+  })
+  runtime = runtime_fixture(root, client)
+  runtime.sessions.ses_fast = { id = "ses_fast", remote_status = "idle" }
+  runtime.selected_session_id = "ses_fast"
+  local context = {
+    runtime = runtime,
+    buf = buf,
+    path = path,
+    referenced_buffers = {},
+    render = function()
+      return { plaintext = "change" }
+    end,
+  }
+
+  local job, error = settle(require("opencode.api.prompt").prompt("change", context, { auto_apply = false }))
+  eq(error, nil)
+  eq({ job.state, job.remote_observed, runtime.selected_session_id }, { "completed", true, "ses_fast" })
+  eq({ runtime.session_claims.ses_fast, next(runtime.scope_claims) }, { nil, nil })
+
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(root, "rf")
+  clear_fixture(runtime)
+end
+
 T["AC-JOB-02 selected Session identity remains separate from event ownership"] = function()
   local events = require("opencode.events")
   local root = "/acceptance/job-02"
@@ -774,6 +834,45 @@ T["AC-EVT-04 idle reconnect without an exact result ends the Job without applyin
   eq(runtime.prompt_locked, false)
   eq(calls, { "status", "messages", "questions", "permissions" })
   clear_fixture(runtime)
+end
+
+T["live idle terminalizes missing-parent and HTTP 400 message snapshots"] = function()
+  for _, response in ipairs({
+    function()
+      return Promise.resolve({ { info = { role = "assistant", parentID = "other", id = "other" } } })
+    end,
+    function()
+      return Promise.reject({ error_class = "http", status = 400 })
+    end,
+  }) do
+    local runtime = runtime_fixture("/acceptance/idle-terminal-" .. tostring(_), fake_client({ messages = response }))
+    local job = {
+      key = "ses_idle:msg_idle",
+      root = runtime.root,
+      runtime = runtime,
+      session_id = "ses_idle",
+      user_message_id = "msg_idle",
+      state = "running",
+      assistant_messages = {},
+    }
+    local session = { id = job.session_id, active_job_key = job.key, remote_status = "busy" }
+    runtime.jobs[job.key], runtime.sessions[session.id] = job, session
+
+    runtime:route_event({ type = "session.idle", properties = { sessionID = session.id } })
+    eq(
+      vim.wait(500, function()
+        return job.state == "error"
+      end),
+      true
+    )
+    eq({ job.error_class, session.active_job_key, session.remote_status, session.availability }, {
+      "missing_result",
+      nil,
+      "idle",
+      "reusable",
+    })
+    clear_fixture(runtime)
+  end
 end
 
 T["AC-INT-01 question reply targets one request and resumes only its Job"] = function()

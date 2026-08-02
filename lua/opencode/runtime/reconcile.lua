@@ -131,12 +131,14 @@ function M.complete_job(runtime, session, job, messages)
     return false
   end
   local matches = matching_assistants(job, messages)
+  session.remote_status = "idle"
+  session.availability = "reusable"
+  session.availability_reason = nil
   if #matches == 0 then
     job.error_class = "missing_result"
     require("opencode.job").finish(job, session, "error")
     return false
   end
-  session.remote_status = "idle"
   local structured = {}
   for _, info in ipairs(matches) do
     if type(info.structured) == "table" then
@@ -263,8 +265,13 @@ end
 
 ---Closes one reconciliation generation, records its prompt blocker, and replays only same-stream events after success.
 ---A failed or genuinely blocked snapshot stays fail-closed; only a complete successful snapshot may clear obsolete locks.
-local function finish(runtime, generation, ok, err)
-  if runtime.reconcile_generation ~= generation or runtime.state == "stopping" or runtime.state == "stopped" then
+local function finish(runtime, generation, sequence, ok, err)
+  if
+    runtime.generation ~= generation
+    or runtime.reconcile_generation ~= sequence
+    or runtime.state == "stopping"
+    or runtime.state == "stopped"
+  then
     return
   end
   runtime.reconciling = false
@@ -284,6 +291,8 @@ local function finish(runtime, generation, ok, err)
     runtime.reconcile_error = nil
     runtime.reconciliation_failed = nil
     runtime.reconciliation_required = runtime.reconciliation_blocked == true
+    runtime.reconnect_attempt = 0
+    runtime.reconnect_error = nil
   end
   if ok and runtime.state == "ready" and not runtime.interaction_locked and not runtime.reconciliation_blocked then
     runtime.prompt_locked = false
@@ -316,13 +325,51 @@ end
 function M.run(runtime, generation, statuses)
   local Promise = require("opencode.promise")
   generation = generation or runtime.generation
+  runtime.reconcile_sequence = (runtime.reconcile_sequence or 0) + 1
+  local sequence = runtime.reconcile_sequence
   runtime.reconciling = true
   runtime.prompt_locked = true
-  runtime.reconcile_generation = generation
+  runtime.reconcile_generation = sequence
   local jobs = active_jobs(runtime)
   local snapshots = {}
-  return Promise.resolve(statuses or runtime.client:session_status())
+  ---Rejects callbacks from an older transport or reconciliation run before they can change local state.
+  local function current()
+    return runtime.generation == generation
+      and runtime.reconcile_generation == sequence
+      and runtime.state ~= "stopping"
+      and runtime.state ~= "stopped"
+  end
+  local function require_current()
+    if not current() then
+      return Promise.reject({ error_class = "stale_generation" })
+    end
+    return nil
+  end
+  ---Ends remote-dependent Jobs when this snapshot cannot prove their state and leaves local apply/conflict work intact.
+  local function fail_remote_jobs(err)
+    if not current() then
+      return
+    end
+    for _, job in ipairs(jobs) do
+      if job.state == "running" or job.state == "waiting_user" then
+        local session = runtime.sessions[job.session_id]
+        job.error_class = type(err) == "table" and err.error_class or "reconciliation"
+        job.error_endpoint = type(err) == "table" and err.endpoint or nil
+        job.error_status = type(err) == "table" and err.status or nil
+        if session then
+          session.availability = "blocked"
+          session.availability_reason = "reconciliation_failed"
+        end
+        require("opencode.job").finish(job, session, "error")
+      end
+    end
+  end
+  local snapshot = Promise.resolve(statuses or runtime.client:session_status())
     :next(function(statuses)
+      local stale = require_current()
+      if stale then
+        return stale
+      end
       runtime.reconcile_statuses = statuses
       for _, session in pairs(runtime.sessions) do
         if session.availability == "blocked" and not session.active_job_key then
@@ -346,13 +393,22 @@ function M.run(runtime, generation, statuses)
             runtime.client
               :messages(job.session_id)
               :next(function(messages)
+                local stale = require_current()
+                if stale then
+                  return stale
+                end
                 register_messages(runtime, job, messages)
                 return { job = job, session = session, status = status, messages = messages }
               end)
               :catch(function(err)
-                job.error_class = type(err) == "table" and err.error_class or "message_reconciliation"
-                job.error_endpoint = type(err) == "table" and err.endpoint or nil
-                job.error_status = type(err) == "table" and err.status or nil
+                if current() then
+                  job.error_class = type(err) == "table" and err.error_class or "message_reconciliation"
+                  job.error_endpoint = type(err) == "table" and err.endpoint or nil
+                  job.error_status = type(err) == "table" and err.status or nil
+                end
+                if current() and (job.state == "running" or job.state == "waiting_user") then
+                  require("opencode.job").finish(job, session, "error")
+                end
                 return Promise.reject(err)
               end)
           )
@@ -361,7 +417,15 @@ function M.run(runtime, generation, statuses)
       return Promise.all(snapshots)
     end)
     :next(function(results)
+      local stale = require_current()
+      if stale then
+        return stale
+      end
       return collect_pending(runtime):next(function(pending)
+        local pending_stale = require_current()
+        if pending_stale then
+          return pending_stale
+        end
         mark_unowned_remote_work(runtime, runtime.reconcile_statuses, pending)
         for _, job in ipairs(jobs) do
           if not require("opencode.job").terminal(job.state) then
@@ -389,14 +453,20 @@ function M.run(runtime, generation, statuses)
             end
           end
         end
-        finish(runtime, generation, true)
+        finish(runtime, generation, sequence, true)
         return runtime
       end)
     end)
-    :catch(function(err)
-      finish(runtime, generation, false, err)
-      return Promise.reject(err)
-    end)
+  local timeout = Promise.new(function(_, reject)
+    vim.defer_fn(function()
+      reject({ error_class = current() and "reconciliation_timeout" or "stale_generation" })
+    end, require("opencode.config").opts.runtime.startup_timeout)
+  end)
+  return Promise.race({ snapshot, timeout }):catch(function(err)
+    fail_remote_jobs(err)
+    finish(runtime, generation, sequence, false, err)
+    return Promise.reject(err)
+  end)
 end
 
 return M

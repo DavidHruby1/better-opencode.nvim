@@ -13,6 +13,33 @@ local function relative_path(root, path)
   return assert(vim.fs.relpath(root, path))
 end
 
+---Claims a buffer range while asynchronous Session preparation is in progress.
+---The check and insertion do not yield, so overlapping prompts cannot both pass before either Job is registered.
+---@param runtime table
+---@param buffer integer
+---@param scope table
+---@return table?, string?
+function M.claim_scope(runtime, buffer, scope)
+  runtime.scope_claims = runtime.scope_claims or {}
+  for claim in pairs(runtime.scope_claims) do
+    if claim.buffer == buffer and require("opencode.scope").overlaps(claim.scope, scope) then
+      return nil, "scope_overlap"
+    end
+  end
+  local claim = { buffer = buffer, scope = { start_byte = scope.start_byte, end_byte = scope.end_byte } }
+  runtime.scope_claims[claim] = true
+  return claim
+end
+
+---Releases only the exact pending range claim owned by one prompt preparation.
+---@param runtime table
+---@param claim table?
+function M.release_scope(runtime, claim)
+  if claim and runtime.scope_claims then
+    runtime.scope_claims[claim] = nil
+  end
+end
+
 ---Restores the pointer captured before one dispatch only if that dispatch still owns the selected value.
 ---A later successful dispatch is left untouched, so an older failed request cannot roll back a newer selection.
 ---@param runtime table
@@ -94,7 +121,7 @@ end
 
 ---Dispatches one scoped Build through Session HTTP after target and dirty preflight.
 ---The Job is registered before prompt_async so immediate SSE cannot outrun local correlation state; a Session claim covers
----revalidation and registration, and the selected pointer changes only after prompt_async succeeds.
+---revalidation and registration, and the selected pointer changes only after HTTP or exact SSE proves dispatch.
 ---Failed requests cancel the Job and remove its marks before returning the original error.
 ---@param text string
 ---@param context table
@@ -145,20 +172,35 @@ function M.prompt(text, context, opts)
     if overlap then
       return Promise.reject({ error_class = "scope_overlap", job_short_id = overlap.user_message_id:sub(-8) })
     end
+    local scope_claim, claim_error = M.claim_scope(runtime, context.buf, candidate)
+    if not scope_claim then
+      return Promise.reject({ error_class = claim_error })
+    end
+    local function release_scope()
+      M.release_scope(runtime, scope_claim)
+      scope_claim = nil
+    end
     local marks ---@type table?
-    marks = require("opencode.scope").create_marks(context.buf, scope)
+    local marks_ok
+    marks_ok, marks = pcall(require("opencode.scope").create_marks, context.buf, scope)
+    if not marks_ok then
+      release_scope()
+      return Promise.reject(marks)
+    end
     blocker = prompt_blocker(runtime)
     if blocker then
       if marks then
         require("opencode.scope").delete_marks({ buffer = context.buf, marks = marks })
         marks = nil
       end
+      release_scope()
       return Promise.reject({ error_class = blocker })
     end
     local previous_selected_id = runtime.selected_session_id
     local claimed_session_id
     local claim
     local job
+    local session
     local sessions = require("opencode.session")
     ---Releases this dispatch's claim without disturbing another prompt that may have taken the Session later.
     local function release_claim()
@@ -168,14 +210,17 @@ function M.prompt(text, context, opts)
     end
     ---Cancels a registered Job on dispatch failure and restores the prior pointer after cleanup is requested.
     local function fail_dispatch(err)
+      release_scope()
       release_claim()
       restore_selection(runtime, claimed_session_id, previous_selected_id)
       if not job then
         return Promise.reject(err)
       end
+      job.dispatch_pending = nil
       job.error_class = type(err) == "table" and err.error_class or "prompt_http"
       local ok, cancellation = pcall(require("opencode.job").cancel, runtime, job.key)
       if not ok then
+        pcall(require("opencode.job").finish, job, session, "error")
         return Promise.reject(err)
       end
       return cancellation
@@ -198,7 +243,7 @@ function M.prompt(text, context, opts)
         if dispatch_blocker then
           return fail_dispatch({ error_class = dispatch_blocker })
         end
-        local session = runtime.sessions[remote.id]
+        session = runtime.sessions[remote.id]
           or { id = remote.id, root = runtime.root, short_id = remote.id:sub(-8), active_job_key = nil }
         session.title = remote.title
         session.last_mode = "build"
@@ -217,9 +262,15 @@ function M.prompt(text, context, opts)
           return fail_dispatch(created_job)
         end
         job = created_job
+        job.runtime = runtime
+        job.dispatch_pending = true
         runtime.jobs[job.key] = job
         session.active_job_key = job.key
         session.activity = vim.uv.now()
+        if not sessions.bind_claim(runtime, session.id, claim, job.key) then
+          return fail_dispatch({ error_class = "session_busy" })
+        end
+        release_scope()
         local payload_ok, payload = pcall(function()
           return {
             messageID = job.user_message_id,
@@ -247,17 +298,24 @@ function M.prompt(text, context, opts)
             if job.cancelling or job.state == "cancelled" then
               return Promise.reject({ error_class = "cancelled" })
             end
-            if not sessions.bind_claim(runtime, session.id, claim, job.key) then
-              return Promise.reject({ error_class = "session_busy" })
-            end
+            job.dispatch_pending = nil
             runtime.selected_session_id = session.id
+            require("opencode.job").retain(runtime)
             return job
           end)
           :catch(function(err)
+            if job.remote_observed and not job.cancelling and job.state ~= "cancelled" then
+              job.dispatch_pending = nil
+              runtime.selected_session_id = session.id
+              require("opencode.job").retain(runtime)
+              return job
+            end
+            job.dispatch_pending = nil
             return fail_dispatch(err)
           end)
       end)
       :catch(function(err)
+        release_scope()
         release_claim()
         if claimed_session_id then
           restore_selection(runtime, claimed_session_id, previous_selected_id)
