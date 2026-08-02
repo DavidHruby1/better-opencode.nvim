@@ -1,854 +1,352 @@
-# Acceptance contract pro inline workflow
+# v2.0 Acceptance Contract
 
-## Stav a účel
+## Rules
 
-| Položka | Hodnota |
-|---|---|
-| Stav | Implementačně závazný ověřovací kontrakt |
-| Verze | 1.0 |
-| Aktualizováno | 30. 7. 2026 |
-| Produktový kontrakt | `docs/PRD.md` |
-| Technický kontrakt | `docs/ARCHITECTURE.md` |
+P0 safety and data-integrity scenarios and P1 functional scenarios cannot be skipped. P2 scenarios require automation or
+a completed reproducible protocol. Every scenario is required for official OpenCode `1.17.3` and `1.18.9` profiles.
+Fake or patched binaries are diagnostic only and cannot produce release evidence.
 
-Scénáře definují pozorovatelné chování, nikoli konkrétní test framework. `P0` jsou safety a data-integrity gates, `P1` jsou povinné funkční gates a `P2` jsou povinné UX/diagnostické gates pro Definition of Done. Žádný P0 ani P1 scénář nesmí být skipped. P2 smí být automatizovaný nebo doložený reprodukovatelným manuálním testem.
+The authenticated E2E uses a real plugin-owned Server and Build agent. It must include a whole-file UTF-8 replacement
+with a final newline and prove live-buffer mutation, unchanged source bytes on disk, terminal completion, and
+metadata-only failure diagnostics.
 
-## Testovací vrstvy
+## Runtime
 
-| Vrstva | Účel |
-|---|---|
-| Unit | Scope převody, overlap, schema, hash, state transitions, event correlation |
-| Neovim integration | Buffery, changedtick, extmarky, undo, InsertLeave, views, dialogs |
-| Contract | HTTP/SSE payloady proti uloženým OpenCode `v1.17.3` a `v1.18.9` `/doc` fixtures |
-| End-to-end | Skutečný plugin-owned Server + Neovim workflow without TUI/tmux |
-| Failure injection | Crash, disconnect, late event, save failure, invalid proposal, merge error |
+### AC-RUN-01: Owned secure Runtime
+**Priorita:** P0
 
-Contract suite MUSÍ obsahovat dva neměnné `/doc` fixtures: OpenCode `v1.17.3` z commitu `8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74` a OpenCode `v1.18.9` z commitu `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`. Všechny povinné contract scénáře a end-to-end suite MUSÍ běžet proti oběma přesně odpovídajícím binárkám; rozdíl smí obsloužit pouze explicitní version profile, ne best-effort fallback. Profil `v1.18.9` navíc může nést delta/diagnostické eventy, ale completion pořád rozhoduje jen exact `parentID` a jedna structured assistant message.
+An initial Build starts one authenticated loopback Server for the canonical root, routes every request to that root, and
+does not start a TUI or require tmux.
 
-Aktuální implementace je Build-only. Historické scénáře níže, které ještě zmiňují Plan, shared TUI pane nebo `/tui/select-session`, jsou superseded `docs/FIX-PLAN.md` a nesmí být použity jako očekávání pro nový runtime; funkční acceptance coverage je v `tests/unit`, `tests/integration`, `tests/contract` a `tests/release`.
+### AC-RUN-02: No foreign attach or discovery
+**Priorita:** P0
 
-## Společné testovací fixture
+Runtime startup never discovers, attaches to, or sends requests to a foreign OpenCode process.
 
-Textový target obsahuje dvě nepřekrývající se funkce:
+### AC-RUN-03: Unsupported version or API
+**Priorita:** P0
 
-```lua
-local function alpha()
-  return 1
-end
-
-local function beta()
-  return 2
-end
-```
-
-Kde scénář používá Base/Ours/Theirs, platí:
-
-- Base je uložený kanonický buffer text při dispatchi.
-- Ours je aktuální in-memory buffer při merge.
-- Theirs vzniká pouze ze structured replacementu.
-- Kontrola disku a bufferu proběhne před aplikací.
-
-## Runtime a kompatibilita
-
-### AC-RUN-01: Vlastněný zabezpečený Runtime
-
-**Priorita:** P0  
-**Požadavky:** RUN-01, RUN-03, RUN-04, RUN-11
-
-**Given** pro project root neexistuje Runtime  
-**When** uživatel otevře první Build nebo Plan prompt
-**Then** plugin spustí nový Server na `127.0.0.1` s náhodným portem a HTTP heslem  
-**And** Server i TUI mají process working directory rovný canonical project rootu  
-**And** TUI klient vznikne jako sdílený pravý pane a otevře se až při Plan nebo ruční show/focus
-**And** TUI je spuštěn s `attach --dir` rovným tomuto rootu  
-**And** každý HTTP/SSE request nese stejný `x-opencode-directory`  
-**And** spustí právě jeden sdílený TUI klient připojený k tomuto Serveru
-**And** `/global/health` vrátí přesně verzi zvoleného testovacího profilu `1.17.3` nebo `1.18.9`<br>
-**And** `/doc` obsahuje všechny endpointy z architektury  
-**And** port ani heslo nejsou v logu.
-
-### AC-RUN-02: Žádný attach ani discovery cizího procesu
-
-**Priorita:** P0  
-**Požadavky:** RUN-01, RUN-05
-
-**Given** na stroji běží jiný dostupný OpenCode Server  
-**When** plugin inicializuje Runtime  
-**Then** nepoužije `pgrep`, `lsof`, mDNS ani foreign URL  
-**And** všechny requesty míří pouze na proces spuštěný aktuálním Runtime.
-
-### AC-RUN-03: Nepodporovaná verze nebo API
-
-**Priorita:** P0  
-**Požadavky:** RUN-04, RUN-05
-
-**Given** executable hlásí jinou než podporovanou verzi nebo `/doc` neodpovídá profilu required operations a schemas<br>
-**When** skončí preflight  
-**Then** Runtime nepřejde do `ready`  
-**And** žádný prompt se neodešle  
-**And** health UI uvede očekávanou a nalezenou verzi nebo chybějící operation ID.
+An unknown version or mismatched exact `/doc` contract fails preflight before prompt dispatch.
 
 ### AC-RUN-04: Startup timeout
-
 **Priorita:** P1
-**Požadavky:** RUN-05, RUN-08
 
-**Given** vlastněný Server se nestane healthy do timeoutu  
-**When** timeout vyprší  
-**Then** startup skončí diagnostickou chybou  
-**And** částečně spuštěné vlastněné procesy se ukončí  
-**And** plugin se nepokusí připojit jinam.
+Startup timeout stops owned partial state and reports a safe error without falling back to another Server.
 
-### AC-RUN-05: Více project roots
-
-**Priorita:** P1  
-**Požadavky:** RUN-01, RUN-02
-
-**Given** Neovim má buffery ze dvou canonical roots  
-**And** v prvním rootu běží background Job  
-**When** uživatel odešle prompt ve druhém rootu  
-**Then** vznikne druhý samostatný Runtime  
-**And** pane zobrazí TUI druhého rootu
-**And** Job prvního rootu pokračuje a jeho eventy se nepřimíchají.
-
-### AC-RUN-06: Bezpečný shutdown
-
-**Priorita:** P1  
-**Požadavky:** RUN-08
-
-**Given** plugin vlastní dva Runtime a aktivní Joby  
-**When** nastane `VimLeavePre`  
-**Then** plugin abortuje aktivní vlastněné Session  
-**And** ukončí pouze své TUI a Server procesy  
-**And** odstraní své temp soubory  
-**And** odstraní private ownership manifest  
-**And** cizí OpenCode proces zůstane běžet.
-
-### AC-RUN-07: Hard-crash orphan cleanup ověřuje ownership
-
-**Priorita:** P0  
-**Požadavky:** RUN-03, RUN-08
-
-**Given** předchozí Neovim skončil tvrdě a zanechal mode-0600 manifest i vlastněný Server/TUI  
-**When** nový plugin startup ověří PID start identity, executable, credentials, port a root  
-**Then** ukončí ověřené stale procesy a odstraní jejich temp data i manifest  
-**Given** některý ownership důkaz nesouhlasí nebo PID byl znovu použit  
-**Then** proces nesignalizuje a zobrazí manuální cleanup diagnostiku.
-
-### AC-RUN-08: TUI-only crash zachová Server a Joby
-
-**Priorita:** P1  
-**Požadavky:** RUN-06
-
-**Given** Server je healthy a Job běží  
-**When** skončí pouze TUI child proces  
-**Then** Runtime nepřeruší Server ani Job  
-**And** spustí nový `attach --dir` proti témuž Serveru  
-**And** obnoví dříve zobrazenou Session přes `/tui/select-session` jen když pane existuje.
-
-### AC-RUN-09: Pluginy a MCP se ignorují, custom tools blokují Runtime
-
-**Priorita:** P0  
-**Požadavky:** RUN-04, RUN-10
-
-**Given** documented global/project/custom config obsahuje custom plugin, custom tool nebo MCP bez `enabled: false`  
-**When** proběhne passive pre-spawn guard  
-**Then** OpenCode Server se nespustí pouze pro custom tool; plugin a MCP se ignorují a žádný plugin/MCP se z tohoto guardu nespustí
-**Given** až remote/managed effective `/config` odhalí custom tool
-**When** proběhne post-start config preflight bez volání `/mcp`
-**Then** Runtime nepřejde do `ready` a žádný prompt se neodešle  
-**And** diagnostika pojmenuje nepodporované rozšíření bez načtení jeho citlivé konfigurace do logu.
-
-## Prompt, pane a kontext
-
-### AC-UI-01: Inline prompt zobrazuje závazné údaje
-
-**Priorita:** P1  
-**Požadavky:** UI-01, UI-02, UI-03, MODE-01
-
-**Given** kurzor je uvnitř rozpoznané funkce  
-**When** uživatel otevře výchozí prompt  
-**Then** víceřádkový `Snacks.win` zobrazí Build, jméno project rootu a function scope v kompaktním metadata řádku<br>
-**And** zobrazí se ještě během startu OpenCode a zachová text při startup nebo dispatch chybě<br>
-**And** prompt používá víceřádkový `Snacks.win` s upstream-like ikonou a stylem bez dlouhého title<br>
-**And** `<CR>` odešle nebo přijme viditelnou completion, `<C-j>` vloží skutečný newline a `<Esc>` prompt zruší<br>
-**And** startup, submit a retry/error zobrazují jen krátké dočasné stavové texty<br>
-**And** po odeslání se focus vrátí do původního source window  
-**And** po úspěšném odeslání se Build float zavře a neotevře žádný sidebar ani tmux pane
-**And** předchozí prompt se nenabídne jako input historie.
-
-### AC-UI-02: Sdílený tmux pane bez focus steal
-
-**Priorita:** P1  
-**Požadavky:** UI-04, UI-05
-
-**Given** sdílený pane je zavřený
-**When** uživatel otevře Plan nebo ruční show/focus
-**Then** pravý tmux pane zobrazí TUI aktivního rootu jako 70:30 split
-**And** Plan vytvoří managed Session nebo znovu použije ověřenou reusable Session a po ověření živého pane nastaví její transcript přes interní `/tui/select-session`
-**And** TUI pane zůstane input-locked a Plan ani jeho dispatch neukradou focus source window
-**And** source window zůstane current  
-**And** Build dispatch pane neotevře
-**And** pane lze samostatně focusovat, skrýt a znovu zobrazit; pouze explicitní Focus akce jej zaostří
-**And** změna rootu neukončí background Joby.
-
-### AC-UI-03: Čitelná identita bez barvy
-
-**Priorita:** P2  
-**Požadavky:** UI-06, UI-07, JOB-06
-
-**Given** dvě Session používají stejnou barvu nebo barvy nejsou viditelné  
-**When** uživatel otevře status nebo recovery actions
-**Then** rozliší Session podle title, short ID, rootu a textového Job stavu  
-**And** background notifikace obsahuje stejnou identitu.
-
-### AC-UI-04: Všechny background notifikace jsou neinvazivní
-
-**Priorita:** P2  
-**Požadavky:** UI-07
-
-**Given** source window je current a čtyři background Joby postupně dokončí, konfliktují, položí otázku a selžou  
-**When** plugin zobrazí jejich notifikace  
-**Then** každá notifikace obsahuje správný root, Session short ID a Job stav  
-**And** completion, conflict, question i error mají odlišitelný text  
-**And** žádná notifikace sama nezmění current window, cursor ani pane Session.
-
-### AC-UI-05: Inline Build status a reasoning preview
-
+### AC-RUN-05: Multiple project roots
 **Priorita:** P1
-**Požadavky:** UI-08, RUN-09
 
-**Given** běží Build Job nad rozpoznaným scope
-**When** přijde průběh nebo delta update
-**Then** u scope startu je vidět spinner `⠙ Implementing`
-**And** případný reasoning preview je na jednom řádku, whitespace-collapsed a oříznutý podle source window
-**And** po terminálním stavu nebo konfliktu oba inline prvky zmizí
-**And** reasoning preview se neuloží do logu ani notifikace.
+Each canonical root has an isolated Server, stream, Sessions, and Jobs; events cannot cross roots.
 
-### AC-CTX-01: Zachované context placeholders
+### AC-RUN-06: Safe shutdown
+**Priorita:** P1
 
-**Priorita:** P1  
-**Požadavky:** CTX-01, CTX-02, CTX-03, CTX-04
+Shutdown aborts active owned Sessions, stops only proven owned Servers, cleans private state, and leaves foreign processes.
 
-**Given** existují cursor/range, buffers, visible windows, diagnostics, quickfix a uppercase marks  
-**When** se expandují `@this`, `@buffer`, `@buffers`, `@visible`, `@diagnostics`, `@quickfix`, `@marks`  
-**Then** každý token vytvoří upstream-compatible context  
-**And** file-backed položky jsou path/range references  
-**And** aktivní editor location je přítomná i bez explicitního context tokenu  
-**And** `@this` nemění independently resolved hard scope  
-**And** completion i line-aware highlight fungují ve víceřádkovém editoru.
+### AC-RUN-07: Verified stale ownership cleanup
+**Priorita:** P0
 
-### AC-CTX-02: Nativní commands, skills a AGENTS
+Stale process cleanup requires matching process identity, executable, credentials, port, and root; uncertainty is manual.
 
-**Priorita:** P1  
-**Požadavky:** CTX-05, CTX-06
+### AC-RUN-08: Server recovery remains fail-closed
+**Priorita:** P1
 
-**Given** projekt obsahuje OpenCode command, skill a directory `AGENTS.md`  
-**When** se otevře prompt a odešle Job  
-**Then** plugin nevytváří `#command` ani `#skill` syntaxi  
-**And** managed `/name` dispatch odmítne jako unsupported před vytvořením Jobu  
-**And** OpenCode objeví skill a relevantní `AGENTS.md` právě jednou  
-**And** plugin jejich obsah nepřidá podruhé do promptu.
+A disconnected owned Server blocks prompts until restart and reconciliation; unproven pending work cannot apply.
 
-### AC-CTX-03: Dirty preflight a write hooks
+### AC-RUN-09: Config extension boundary
+**Priorita:** P0
 
-**Priorita:** P0  
-**Požadavky:** CTX-08, CTX-09, CTX-10
+Config guards reject custom tools without importing them, leave plugins/MCP OpenCode-owned, and do not initialize `/mcp`.
 
-**Given** Build target je dirty a `BufWritePre` změní jeho text<br>
-**When** uživatel otevře Build přes výchozí workflow<br>
-**Then** proběhne běžný write včetně autocmds<br>
-**And** Base obsahuje až finální text po hooku<br>
-**And** Base se shoduje s diskem a buffer není modified<br>
-**And** neotevře se dirty-buffer dialog<br>
-**And** teprve potom se vytvoří Job.
+## UI and Context
 
-### AC-CTX-04: Dirty preflight cancel nebo save failure
+### AC-UI-01: Inline Build prompt
+**Priorita:** P1
 
-**Priorita:** P0  
-**Požadavky:** CTX-08, CTX-10
+The prompt shows Build, root, and effective scope, preserves source focus, supports multiline input, and opens no sidebar.
 
-**Given** Plan target nebo explicitní context buffer je dirty<br>
-**When** uživatel zvolí `cancel` nebo write selže<br>
-**Then** nevznikne Session prompt ani Job  
-**And** žádný z ostatních dirty bufferů se potichu neuloží.
+### AC-UI-02: Runtime works without tmux or TUI
+**Priorita:** P1
 
-### AC-CTX-05: Nepodporovaný target
+Build startup, dispatch, completion, Session selection, and recovery work with no tmux variables, executable, pane, or TUI.
 
-**Priorita:** P1  
-**Požadavky:** CTX-07, SCOPE-09
+### AC-UI-03: Readable identity without color
+**Priorita:** P2
 
-**Given** target je unnamed, binary/NUL, non-UTF-8, scratch nebo Build používá blockwise selection  
-**When** uživatel vyvolá Build nebo Plan  
-**Then** dispatch skončí před vytvořením Jobu  
-**And** UI uvede konkrétní nepodporovaný typ  
-**And** neodešle celý buffer jako skrytý fallback.
+Status text identifies root, Session, Job, mode, and state without relying only on color.
 
-### AC-CTX-06: Plan používá stejný dirty preflight
+### AC-UI-04: Background notifications are non-invasive
+**Priorita:** P2
 
-**Priorita:** P1  
-**Požadavky:** CTX-07, CTX-08, CTX-10
+Completion, conflict, question, and error notifications do not change window, cursor, source buffer, or selected Session.
 
-**Given** Plan target nebo explicitní file context je dirty  
-**When** uživatel odešle Plan prompt  
-**Then** plugin nabídne `save and continue` nebo `cancel` pro Plan<br>
-**And** při cancelu se prompt neodešle  
-**And** při pokračování Plan čte až finální obsah po úspěšných write hooks.
+### AC-UI-05: Inline Build status and reasoning preview
+**Priorita:** P1
 
-## Režimy a permissions
+Active Build state is bounded, content is not persisted, and terminal/conflict state removes transient marks.
 
-### AC-MODE-01: Plan je technicky read-only
+### AC-CTX-01: Context placeholders
+**Priorita:** P1
 
-**Priorita:** P0  
-**Požadavky:** MODE-03, MODE-04, INT-01, INT-02
+Supported context placeholders capture the invocation context and render canonical file-backed references.
 
-**Given** Plan agent se pokusí použít `edit`, `bash`, `task`, external path nebo neznámý MCP/custom tool  
-**When** OpenCode vyhodnotí Session permissions  
-**Then** operace skončí hard deny bez schvalovací možnosti  
-**And** source, plan files ani externí filesystem se nezmění  
-**And** Plan může nadále používat povolené read-only nástroje.
+### AC-CTX-02: Native commands, skills, and AGENTS
+**Priorita:** P1
 
-### AC-MODE-02: Build používá proposal, nikoli source write
+The plugin does not duplicate OpenCode discovery and rejects managed custom-command dispatch.
 
-**Priorita:** P0  
-**Požadavky:** MODE-01, MODE-02, INT-01
+### AC-CTX-03: Dirty preflight and write hooks
+**Priorita:** P0
 
-**Given** běží Build primary agent  
-**When** navrhne změnu  
-**Then** finální autoritou je JSON-schema structured output  
-**And** resolved tool surface obsahuje interní `StructuredOutput` tool  
-**And** source disk se před buffer application nezmění  
-**And** pokus o edit/bash/task je hard denied.
+Dirty target/context buffers are saved atomically and Base is captured only after successful write hooks.
 
-### AC-MODE-03: Plan-to-Build follow-up
+### AC-CTX-04: Save failure stops dispatch
+**Priorita:** P0
 
-**Priorita:** P1  
-**Požadavky:** MODE-05, JOB-01, JOB-02
+Save cancellation, failure, or invalid post-hook state prevents dispatch.
 
-**Given** Plan Job skončil a Session je reusable  
-**When** uživatel v téže Session odešle Build  
-**Then** transcript context zůstane zachován  
-**And** vznikne nový Job s novým userMessageID, Base a scope  
-**And** původní Plan Job se nezmění.
+### AC-CTX-05: Unsupported target
+**Priorita:** P1
 
-## Scope a proposal validation
+Unnamed, non-file, binary/NUL, invalid UTF-8, and blockwise targets fail before serialization.
 
-### AC-SCOPE-01: Skutečný visual range má prioritu
+### AC-CTX-06: Build-only dirty preflight
+**Priorita:** P1
 
-**Priorita:** P0  
-**Požadavky:** SCOPE-01, SCOPE-02
+All public Build entrypoints use the same save-before-dispatch preflight; no Plan-specific branch remains.
 
-**Given** existují stale visual marks a uživatel právě označí jiný characterwise nebo linewise range  
-**When** vyvolá Build z visual mappingu  
-**Then** hard scope odpovídá právě aktivnímu invocation range  
-**And** stale marks se nepoužijí.
+## Mode and Scope
 
-### AC-SCOPE-02: Function, file fallback a explicitní rozšíření
+### AC-MODE-01: Build is the only supported mode
+**Priorita:** P0
 
-**Priorita:** P1  
-**Požadavky:** SCOPE-01, SCOPE-03, SCOPE-04
+Omitted mode and `build` use the primary Build agent; `plan` fails with `mode_unavailable` before dispatch.
 
-**Given** kurzor je uvnitř podporované Tree-sitter funkce  
-**When** se otevře Build  
-**Then** default je function scope  
-**And** uživatel jej může před odesláním rozšířit na file  
-**When** parser nebo funkce není dostupná  
-**Then** default je file scope, nikdy unscoped.
+### AC-MODE-02: Build proposes instead of writing source
+**Priorita:** P0
 
-### AC-SCOPE-03: Scope violation odmítne celý proposal
+Build returns structured output and cannot use source-write, shell, task, unknown, or custom tools.
 
-**Priorita:** P0  
-**Požadavky:** SCOPE-05, SCOPE-06, SCOPE-07, MERGE-07
+### AC-MODE-03: Reusable Session continues with Build
+**Priorita:** P1
 
-**Given** JSON-valid proposal má nesprávný path/range nebo testovaný validator dostane Theirs s prefixem či suffixem odlišným od Base  
-**When** proběhne Base-to-Theirs validace  
-**Then** Job skončí `scope_violation`  
-**And** neaplikuje se ani in-scope část  
-**And** buffer i disk zůstanou beze změny  
-**And** UI neoznačí událost jako merge conflict.
+A verified reusable managed Session can receive a new Build with a new message and transaction identity.
 
-### AC-SCOPE-04: Overlap je odmítnut, sousední scope povolen
+### AC-SCOPE-01: Invocation range wins
+**Priorita:** P0
 
-**Priorita:** P0  
-**Požadavky:** SCOPE-08
+The captured visual/operator range takes priority over stale marks and later cursor movement.
 
-**Given** Job A má aktivní function scope `alpha`  
-**When** nový Build cílí do stejného current extmark range  
-**Then** nevznikne Job ani prompt a UI odkáže na Job A  
-**When** nový Build cílí do nepřekrývajícího scope `beta`  
-**Then** dispatch je povolen v nové Session.
+### AC-SCOPE-02: Function and whole-file fallback
+**Priorita:** P1
 
-### AC-SCOPE-05: Extmark sleduje posun, neautorizuje změnu
+A supported function is selected when available; otherwise Build safely targets the whole file.
 
-**Priorita:** P1  
-**Požadavky:** SCOPE-05
+### AC-SCOPE-03: Scope violation rejects the proposal
+**Priorita:** P0
 
-**Given** aktivní Job cílí funkci `beta`  
-**When** uživatel vloží řádky před funkcí  
-**Then** highlight a current scope se posunou s extmarky  
-**And** Base scope offsets se nezmění  
-**And** validace proposal proběhne proti původnímu Base.
+Any Base-to-Theirs change outside the authorized range rejects the complete proposal without mutation.
 
-### AC-SCOPE-06: Uživatelem vytvořený překryv odmítne proposal
+### AC-SCOPE-04: Overlap is rejected
+**Priorita:** P0
 
-**Priorita:** P0  
-**Požadavky:** SCOPE-08, SCOPE-10
+Active overlapping scopes in one buffer are rejected while merely adjacent scopes remain allowed.
 
-**Given** dva aktivní Joby původně mají nepřekrývající se extmark ranges  
-**When** uživatel editací způsobí jejich překryv nebo kolaps před dokončením prvního Jobu  
-**Then** pre-apply overlap revalidation automatickou aplikaci zastaví  
-**And** Job skončí `scope_violation` bez částečné aplikace  
-**And** buffer ani druhý Job se automaticky nezmění.
+### AC-SCOPE-05: Extmarks track but do not authorize
+**Priorita:** P1
 
-### AC-PROP-01: Validní proposal vytvoří přesný Theirs
+Extmarks track current positions; authorization remains tied to immutable Base scope.
 
-**Priorita:** P0  
-**Požadavky:** MERGE-01, SCOPE-06
+### AC-SCOPE-06: New overlap before apply is rejected
+**Priorita:** P0
 
-**Given** proposal má správný path, Base SHA-256, scope offsets a replacement  
-**When** validátor sestaví Theirs  
-**Then** Theirs je přesně `Base prefix + replacement + Base suffix`  
-**And** žádný jiný byte ani soubor se nezmění.
+User edits that make active scopes overlap stop application fail-closed.
 
-### AC-PROP-02: Nevalidní structured output
+## Proposal and Merge
 
-**Priorita:** P0  
-**Požadavky:** MODE-02, MERGE-01
+### AC-PROP-01: Valid proposal creates exact Theirs
+**Priorita:** P0
 
-**Given** assistant skončí bez structured outputu nebo s nevalidním schematem  
-**When** plugin načte exact message  
-**Then** Job skončí `error`  
-**And** plugin se nepokusí parsovat Markdown, stdout ani `file.edited`  
-**And** nic se neaplikuje.
+A valid structured replacement deterministically creates Theirs for the exact target and Base.
 
-### AC-PROP-03: Neshoda transaction identity
+### AC-PROP-02: Invalid structured output
+**Priorita:** P0
 
-**Priorita:** P0  
-**Požadavky:** JOB-01, SCOPE-06
+Missing, malformed, duplicate, or invalid structured output terminates without applying.
 
-**Given** proposal obsahuje jiný path, hash nebo scope offsets  
-**When** proběhne validace  
-**Then** Job skončí fail-closed `scope_violation`  
-**And** proposal jiného Jobu nelze použít.
+### AC-PROP-03: Transaction identity mismatch
+**Priorita:** P0
 
-## Merge, InsertLeave a undo
+Wrong path, Base hash, Session, parent message, or generation cannot complete another Job.
 
-### AC-MERGE-01: Čistá agentova změna
+### AC-MERGE-01: Clean agent change
+**Priorita:** P0
 
-**Priorita:** P0  
-**Požadavky:** MERGE-02, MERGE-04, MERGE-06, MERGE-12, MERGE-13
+A clean proposal changes only the live buffer and leaves disk unchanged.
 
-**Given** Ours se rovná Base a validní Theirs mění pouze scope  
-**When** agent dokončí mimo Insert mode  
-**Then** merge se aplikuje bez dialogu  
-**And** buffer obsahuje Theirs  
-**And** disk stále obsahuje Base  
-**And** buffer je `modified`.
+### AC-MERGE-02: Non-conflicting user change
+**Priorita:** P0
 
-### AC-MERGE-02: Nekolizní uživatelská změna
+Three-way merge preserves non-conflicting Ours and Theirs changes.
 
-**Priorita:** P0  
-**Požadavky:** MERGE-05, MERGE-06
+### AC-MERGE-03: Identical change
+**Priorita:** P1
 
-**Given** uživatel změnil `alpha` a agent proti stejnému Base změnil `beta`  
-**When** proběhne merge  
-**Then** výsledek obsahuje obě změny právě jednou  
-**And** dialog se neotevře.
+Identical Ours and Theirs completes without duplicate or conflict.
 
-### AC-MERGE-03: Identická změna
+### AC-MERGE-04: InsertLeave defers apply
+**Priorita:** P0
 
-**Priorita:** P1  
-**Požadavky:** MERGE-06
-
-**Given** Ours a Theirs provedly identickou změnu proti Base  
-**When** proběhne merge  
-**Then** změna je ve výsledku právě jednou  
-**And** nevznikne konflikt.
-
-### AC-MERGE-04: InsertLeave odkládá aplikaci
-
-**Priorita:** P0  
-**Požadavky:** MERGE-03, MERGE-04
-
-**Given** validní proposal dokončí během Insert mode  
-**When** přichází completion event  
-**Then** Job přejde do `pending_apply` a buffer se nezmění  
-**When** nastane `InsertLeave`  
-**Then** zachytí se aktuální Ours a spustí merge právě jednou.
+Completion in Insert mode waits and revalidates before applying after `InsertLeave`.
 
 ### AC-MERGE-05: Changedtick race
+**Priorita:** P0
 
-**Priorita:** P0  
-**Požadavky:** MERGE-05, MERGE-16
+A changed buffer invalidates stale merge output and requires a fresh merge.
 
-**Given** merge se počítá nad Ours s changedtick N  
-**When** uživatel před aplikací změní buffer na changedtick N+1  
-**Then** stale výsledek se zahodí  
-**And** nic se neaplikuje  
-**And** nový merge použije Ours z N+1.
+### AC-MERGE-06: Agent conflict choices
+**Priorita:** P0
 
-### AC-MERGE-06: Agentní konflikt má tři volby
-
-**Priorita:** P0  
-**Požadavky:** MERGE-08, MERGE-09, MERGE-10, MERGE-12, MERGE-13, MERGE-16
-
-**Given** Ours a Theirs nekompatibilně změnily stejné řádky a současně existují nekolizní změny  
-**When** plugin detekuje konflikt  
-**Then** dialog obsahuje přesně `keep my changes`, `accept agent changes`, `open manual diff`  
-**And** neobsahuje `merge both`  
-**When** uživatel vybere Ours nebo Theirs  
-**Then** volba se použije na všechny conflict hunks  
-**And** nekolizní změny obou stran zůstanou zachované  
-**And** výsledek se aplikuje jedním minimálním undo krokem, buffer zůstane modified a disk se nezmění.
+A true conflict offers keep mine, accept agent, or manual diff while preserving non-conflicting hunks.
 
 ### AC-MERGE-07: Manual diff lifecycle
+**Priorita:** P1
 
-**Priorita:** P1  
-**Požadavky:** MERGE-11, MERGE-12, MERGE-13, MERGE-16
+Manual conflict buffers are isolated and explicit confirm/cancel controls completion.
 
-**Given** Job je v agentním konfliktu  
-**When** uživatel otevře manual diff  
-**Then** vidí read-only Base, Ours, Theirs a editovatelný result  
-**And** Session zůstává active  
-**When** výsledek explicitně potvrdí  
-**Then** po nové changedtick/disk kontrole se aplikuje jedním undo krokem, disk se nezmění a Job skončí `completed`  
-**When** řešení zruší  
-**Then** source Ours zůstane nedotčen a Job skončí `cancelled`.
+### AC-MERGE-08: One undo and no reload
+**Priorita:** P0
 
-### AC-MERGE-08: Jeden undo krok, žádný reload
+Apply is one minimal buffer mutation and one undo step with no write, reload, `:edit`, or `checktime`.
 
-**Priorita:** P0  
-**Požadavky:** MERGE-12, MERGE-13, MERGE-14
+### AC-MERGE-09: External disk change
+**Priorita:** P0
 
-**Given** čistý merge změnil více řádků  
-**When** plugin aplikuje výsledek  
-**Then** nevolá write, `:e`, `checktime` ani reload  
-**And** provede právě jeden `nvim_buf_set_text()` nad minimálním changed span, nikoli whole-buffer replacement  
-**And** window view a platný cursor zůstanou zachované  
-**And** jeden standardní undo vrátí přesný předchozí Ours  
-**And** disk nebyl změněn.
+Unexpected disk bytes stop apply for explicit reconciliation and are never overwritten.
 
-### AC-MERGE-09: Externí disková změna
+### AC-MERGE-10: User saves Ours during Job
+**Priorita:** P1
 
-**Priorita:** P0  
-**Požadavky:** JOB-03, MERGE-15, MERGE-16
+When disk equals current Ours, merge can continue without losing user changes.
 
-**Given** disk se po dispatchi změnil na obsah odlišný od Base i current Ours  
-**When** se má aplikovat agentův proposal  
-**Then** Job přejde do `conflict` kind `external_change`  
-**And** buffer ani disk se nezmění  
-**And** UI nabídne `open external diff`, `retry apply`, `cancel`  
-**And** retry není úspěšný, dokud uživatel disk a buffer explicitně nereconciluje a disk se přesně nerovná Ours.
+### AC-MERGE-11: Disk changes between merge and apply
+**Priorita:** P0
 
-### AC-MERGE-10: Uživatel během Jobu uloží Ours
+The final disk fingerprint check rejects a stale merge immediately before mutation.
 
-**Priorita:** P1  
-**Požadavky:** MERGE-15
+### AC-MERGE-12: UTF-8, EOL, and empty-file fidelity
+**Priorita:** P0
 
-**Given** uživatel během Jobu uloží svůj current buffer a disk se rovná Ours, ale ne Base  
-**When** proposal dokončí  
-**Then** nejde o external-change konflikt  
-**And** běžný Base/Ours/Theirs merge zachová uloženou uživatelskou změnu.
+Logical-buffer conversion preserves UTF-8, file format, final newline, trailing empty lines, and empty files.
 
-### AC-MERGE-11: Disk se změní mezi merge a aplikací
+## Sessions, Jobs, and Events
 
-**Priorita:** P0  
-**Požadavky:** MERGE-15, MERGE-16
+### AC-JOB-01: One nonterminal Job per Session
+**Priorita:** P0
 
-**Given** plugin zachytil disk fingerprint D1 a dokončil čistý merge  
-**When** failure injection změní disk na D2 před buffer API mutací a changedtick zůstane stejný  
-**Then** plugin D2 znovu načte, stale merge neaplikuje a přejde do `conflict` kind `external_change`  
-**And** stejná kontrola proběhne před Ours/Theirs conflict preference i manual-diff confirmation.
+A Session rejects a follow-up while its current Job is nonterminal.
 
-### AC-MERGE-12: Kanonizace EOL a empty files
+### AC-JOB-02: Managed Session picker
+**Priorita:** P1
 
-**Priorita:** P0  
-**Požadavky:** MERGE-17
+The picker shows only verified managed Sessions for the current root and can resume or safely delete one.
 
-**Given** parametrizované fixtures LF, CRLF, `noendofline`, empty file a skutečný trailing empty line  
-**When** se zachytí Base, sestaví Theirs, sloučí a aplikuje replacement  
-**Then** logical text odpovídá `table.concat(buffer_lines, "\n")`  
-**And** `fileformat`, `endofline` a `fixendofline` zůstanou beze změny  
-**And** empty file a trailing empty line se vzájemně nezamění  
-**And** replacement obsahující `\r` se odmítne bez aplikace.
+### AC-JOB-03: Parallel non-overlapping Jobs
+**Priorita:** P0
 
-## Session, paralelismus a cancel
+Separate Sessions may apply non-overlapping scopes in either completion order without cross-mutation.
 
-### AC-JOB-01: Jedna Session, jeden neterminální Job
+### AC-JOB-04: Cancel one Job
+**Priorita:** P0
 
-**Priorita:** P0  
-**Požadavky:** JOB-02, JOB-05
-
-**Given** Session má Job `pending_apply` nebo `conflict`  
-**When** uživatel odešle follow-up do této Session  
-**Then** prompt se do ní nezařadí  
-**And** UI nabídne vytvoření nové Session  
-**And** neexistuje `queued` Job.
-
-### AC-JOB-02: Přepnutí transcriptu
-
-**Priorita:** P1  
-**Požadavky:** JOB-06, JOB-07
-
-**Given** Runtime má dvě ověřené Session s odlišnými transcripts
-**When** Plan reuse nebo TUI recovery potřebuje druhou Session
-**Then** plugin zavolá interní `/tui/select-session` pro správný Runtime
-**And** pane zobrazí transcript druhé Session
-**And** TUI zůstane input-locked a běžný prompt ani recovery nemusí nabídnout veřejné procházení Session
-**And** background event první Session se do něj nevloží.
-
-### AC-JOB-03: Dva nepřekrývající se Joby ve stejném bufferu
-
-**Priorita:** P0  
-**Požadavky:** SCOPE-05, SCOPE-08, JOB-09, MERGE-06, MERGE-12
-
-**Given** Job A mění `alpha` a Job B v jiné Session mění `beta` proti stejnému Base  
-**When** Job B dokončí před A a výsledky se aplikují v libovolném pořadí  
-**Then** finální buffer obsahuje obě změny právě jednou  
-**And** po aplikaci prvního Jobu extmarky druhého stále přesně ohraničují funkci `beta`  
-**And** disk se automaticky nezmění  
-**And** nevznikne worktree ani workspace copy.
-
-### AC-JOB-04: Cancel jednoho Jobu
-
-**Priorita:** P0  
-**Požadavky:** JOB-08
-
-**Given** běží dva Joby v různých Session  
-**When** cancel action zobrazí aktivní Joby a uživatel vybere Job A
-**Then** plugin abortuje Session A, zahodí její proposal, extmarky, temp files a dialogy  
-**And** Job A skončí `cancelled`  
-**And** Job B pokračuje.
+Cancel aborts the exact Session turn, clears owned state, and ignores late events.
 
 ### AC-JOB-05: Cancel all
-
-**Priorita:** P1  
-**Požadavky:** JOB-08
-
-**Given** více Runtime obsahuje aktivní Joby  
-**When** uživatel zvolí cancel all  
-**Then** každý snapshotnutý aktivní Job lokálně skončí `cancelled` i při selhání jednoho HTTP abortu  
-**And** žádný pending proposal se později neaplikuje.
-
-### AC-JOB-06: Session ownership, reuse a retention
-
-**Priorita:** P0  
-**Požadavky:** JOB-06, JOB-11, INT-01
-
-**Given** Server vrací jednu plugin-managed reusable Session, jednu foreign Session bez markeru a jednu archived managed Session  
-**When** Plan nebo TUI recovery načte interní Session inventory
-**Then** inventory obsahuje pouze unarchived plugin-managed Session se shodným root hash a contract version
-**When** Plan znovu použije managed Session pro follow-up
-**Then** plugin před dispatchí znovu nastaví a ověří hard permission profile  
-**And** foreign ani archived Session se automaticky nereuse  
-**And** žádná Session se automaticky nesmaže.
-
-### AC-JOB-07: TUI je permanentně input-locked
-
-**Priorita:** P0  
-**Požadavky:** JOB-02, JOB-05, JOB-09, JOB-12
-
-**Given** uživatel focusuje plugin-owned TUI pane
-**When** použije `i`, `a`, `startinsert`, terminal-mode mapping nebo pluginovou input akci  
-**Then** buffer zůstane v Terminal-Normal a žádný input se neodešle TUI channelu  
-**And** transcript lze scrollovat a přepínat pouze přes Plan nebo interní TUI recovery endpoint
-**And** user message může vzniknout pouze registrovanou HTTP cestou s plugin Jobem.
-
-## Event routing a recovery
-
-### AC-EVT-01: Routing podle Session a Message
-
-**Priorita:** P0  
-**Požadavky:** JOB-01, JOB-09
-
-**Given** reusable Session již obsahuje terminální Job A a nyní běží Job B  
-**When** přijde první assistant `message.updated` s novým ID a `parentID == JobB.userMessageID`  
-**Then** plugin bootstrapne mapu nového assistant ID na Job B  
-**And** následující part eventy tohoto assistant ID routuje pouze Jobu B  
-**When** přijde opožděný user event Jobu A nebo assistant part event mapovaný na assistant response Jobu A  
-**Then** event se nepřiřadí Jobu B  
-**And** nezmění state ani buffer.
-
-### AC-EVT-02: Request bez messageID
-
-**Priorita:** P0  
-**Požadavky:** JOB-09, INT-03, INT-04
-
-**Given** Session má právě jeden aktivní Job  
-**When** přijde question nebo permission event s requestID a sessionID bez messageID  
-**Then** request se přiřadí tomuto Jobu  
-**And** opakovaný live event nebo stejný request z pending-list snapshotu se deduplikuje podle root, Session, Jobu a requestID a vytvoří právě jeden dialog
-**When** Session aktivní Job nemá  
-**Then** request se neukáže jako dialog jiného Jobu a reconciliation jej vyřeší fail-closed.
-
-### AC-EVT-03: SSE reconnect s dokončeným výsledkem
-
-**Priorita:** P0  
-**Požadavky:** JOB-10, RUN-06, RUN-07
-
-**Given** SSE se odpojí během running Jobu a agent mezitím dokončí validní structured output  
-**When** se Runtime reconnectne  
-**Then** před novým promptem načte status, exact messages, questions a permissions  
-**And** najde právě jednu assistant response s `parentID` rovným userMessageID Jobu a pokračuje proposal validací právě jednou.
-
-### AC-EVT-04: SSE reconnect bez prokazatelného výsledku
-
-**Priorita:** P0  
-**Požadavky:** JOB-10, RUN-07
-
-**Given** po reconnectu je Session idle, ale exact message nemá validní dokončený výsledek  
-**When** skončí reconciliation  
-**Then** Job skončí `error`  
-**And** nic se neaplikuje  
-**And** Session se může stát reusable.
-
-### AC-EVT-05: Server crash a restart
-
 **Priorita:** P1
-**Požadavky:** RUN-06, RUN-07
 
-**Given** vlastněný Server spadne s aktivním Jobem  
-**When** plugin detekuje ukončení procesu  
-**Then** Runtime přejde `disconnected` a zablokuje prompty  
-**And** automaticky se nepřipojí k jinému Serveru  
-**When** uživatel zvolí restart  
-**Then** vznikne nový vlastněný Server a před použitím proběhne reconciliation nebo fail-closed ukončení starého Jobu; TUI zůstane lazy.
+Cancel-all snapshots active Jobs across Runtimes and handles each independently.
 
-### AC-EVT-06: Delta a updated eventy neobcházejí structured completion
+### AC-JOB-06: Session ownership, reuse, and retention
+**Priorita:** P0
 
+Only matching root/version/permission managed Sessions are reusable; archived or foreign Sessions are not.
+
+### AC-JOB-07: No TUI interaction channel
+**Priorita:** P0
+
+The plugin never starts `opencode attach`, sends TUI input, or depends on `/tui/select-session`.
+
+### AC-EVT-01: Session and message routing
+**Priorita:** P0
+
+Events correlate by Runtime, Session, user message, assistant parent, and registered assistant IDs.
+
+### AC-EVT-02: Request without message ID
+**Priorita:** P0
+
+A request without message ID routes only to the single provable active Job or fails reconciliation.
+
+### AC-EVT-03: Reconnect with completed result
+**Priorita:** P0
+
+Reconciliation completes exactly once only from one valid structured response with the expected parent.
+
+### AC-EVT-04: Reconnect without provable result
+**Priorita:** P0
+
+Missing, duplicate, or invalid remote result ends in error without apply.
+
+### AC-EVT-05: Server crash and restart
 **Priorita:** P1
-**Požadavky:** JOB-09, JOB-10, MODE-02
 
-**Given** profily `v1.17.3` i `v1.18.9` emitují `message.part.updated` a `message.part.delta` ve svém pinovaném tvaru
-**When** Runtime dostane reasoning update a následné delta eventy pro tentýž Job
-**Then** Build dokončení se uzná jen z jedné assistant response s exact `parentID`
-**And** delta eventy nesmí změnit scope, completion count ani výsledný proposal
-**And** obě verze zůstávají contract-kompatibilní.
+Server death disconnects its Runtime, preserves local safety data, and requires owned restart plus reconciliation.
 
-## Questions, permissions a dialog queue
+### AC-EVT-06: Delta events cannot bypass completion
+**Priorita:** P1
 
-### AC-INT-01: Question pokračuje ve správném Jobu
+Reasoning/delta/updated events never replace exact structured completion correlation.
 
-**Priorita:** P0  
-**Požadavky:** INT-04
+## Interaction and State
 
-**Given** Job B vyvolá OpenCode question  
-**When** uživatel odpoví v nativním Snacks pickeru/inputu  
-**Then** odpověď se odešle na přesný requestID  
-**And** pouze Job B přejde z `waiting_user` zpět do `running`.
+### AC-INT-01: Question resumes the correct Job
+**Priorita:** P0
 
-### AC-INT-02: Permission dialog a hard deny
+Native question UI replies once to the exact request and Job.
 
-**Priorita:** P0  
-**Požadavky:** INT-01, INT-02, INT-03
+### AC-INT-02: Permission dialog and hard deny
+**Priorita:** P0
 
-**Given** agent požádá o běžné schvalovatelné oprávnění  
-**When** přijde permission request  
-**Then** nativní dialog ukáže Session/Job identitu a API-supported odpovědi  
-**Given** požadavek odpovídá hard deny edit/bash/task/external nebo neznámému toolu mimo allowlist  
-**Then** OpenCode jej odmítne bez možnosti `once` nebo `always`  
-**Given** nový plugin-owned Server začíná s prázdným Server-wide approval state<br>
-**Then** pokus managed Session použít edit nebo neznámou capability skončí execution-time hard deny bez schvalovacího dialogu<br>
-**Given** contract fixture přímo předvyplní Server-wide `always` approval pro edit<br>
-**Then** managed Session edit ani neznámý tool nemá v resolved model tool surface a approval jej nemůže znovu zpřístupnit<br>
-**And** žádná managed UI cesta nevytvoří `always` approval pro hard-denied capability<br>
-**And** permission pro `read` nebo `external_directory` nikdy nenabídne `always`, pouze `once` nebo `reject`.
+Only allowlisted permissions are approvable; hard-denied or unknown capabilities are rejected without override.
 
 ### AC-INT-03: FIFO dialog queue
+**Priorita:** P1
 
-**Priorita:** P1  
-**Požadavky:** INT-05, INT-06
+Questions, permissions, and conflicts from concurrent Jobs are serialized without cross-routing.
 
-**Given** tři Joby téměř současně vyvolají question, permission nebo conflict dialog  
-**When** jsou requesty přijaty  
-**Then** UI zobrazí právě jeden a ostatní drží ve FIFO pořadí  
-**And** question/permission Job má `waiting_user` a conflict Job zůstává `conflict`  
-**When** uživatel dialog zavře  
-**Then** odešle se explicitní reject/cancel a zobrazí se další request  
-**And** žádný Job nezůstane viset bez pending requestu.
+### AC-INT-04: Snacks is the only managed interaction UI
+**Priorita:** P0
 
-### AC-INT-04: Snacks dialog je jediná managed interakce
+Managed replies occur only through native Snacks UI; there is no sidebar/TUI response path.
 
-**Priorita:** P0  
-**Požadavky:** INT-03, INT-04, INT-07
+### AC-STATE-01: Valid state transitions
+**Priorita:** P0
 
-**Given** managed Job vyvolá question nebo permission a permanentně input-locked TUI pane je viditelný
-**When** plugin request přijme  
-**Then** ve stejném callbacku TUI skryje, visibility-lockne jeho toggle/focus a otevře Snacks dialog  
-**And** podporovaný workflow nemůže odeslat odpověď přes TUI  
-**When** canonical API reply/reject potvrdí matching event  
-**Then** plugin visibility lock zruší a obnoví předchozí visibility jen pokud byl pane předtím viditelný, bez focus steal, ale permanentní input lock zachová
-**And** stejný live/pending request nepřidá druhý dialog ani druhou odpověď
-**And** na requestID existuje právě jedna uživatelská odpověď.
+Only declared Job transitions are allowed; invalid and duplicate transitions fail closed.
 
-## Stavový model
+### AC-STATE-02: Session availability is derived
+**Priorita:** P1
 
-### AC-STATE-01: Povolené a zakázané transitions
+Session availability follows active/nonterminal Job state and becomes reusable after terminal completion.
 
-**Priorita:** P0  
-**Požadavky:** JOB-03, JOB-04
+## Security and Release
 
-**Given** tabulka přechodů z architektury  
-**When** unit suite vyzkouší všechny dvojice Job stavů  
-**Then** povolené přechody uspějí idempotentně  
-**And** nepovolené přechody nezmění state  
-**And** `waiting_user` bez kind question/permission a `conflict` bez kind agent/external_change jsou odmítnuty  
-**And** terminální stav nelze vrátit na neterminální.
+### AC-SEC-01: Metadata-only output
+**Priorita:** P0
 
-### AC-STATE-02: Session availability je odvozená
+Logs, notifications, diagnostics, and release artifacts exclude content, credentials, response bodies, and absolute paths.
 
-**Priorita:** P1  
-**Požadavky:** JOB-02, JOB-03
+### AC-SEC-02: Practical health and release evidence
+**Priorita:** P2
 
-**Given** Job je `running`, `waiting_user`, `pending_apply` nebo `conflict`  
-**Then** Session je `active(jobID)` i když OpenCode hlásí idle  
-**Given** Job skončí `completed`, `cancelled`, `error` nebo `scope_violation`  
-**Then** Session je `reusable`, pokud OpenCode hlásí idle  
-**And** OpenCode busy bez lokálního Jobu je contract violation, která zablokuje prompty a spustí reconciliation  
-**And** Job error nevytvoří samostatný Session error stav.
-
-## Soukromí a diagnostika
-
-### AC-SEC-01: Metadata-only logging
-
-**Priorita:** P0  
-**Požadavky:** RUN-09
-
-**Given** prompt, reasoning preview, Base a replacement obsahují unikátní secrets
-**When** proběhne úspěch, conflict, scope violation, HTTP error a reconnect  
-**Then** žádný default log neobsahuje secret, reasoning preview, source text, diff, absolute home path, port password ani authorization header
-**And** obsahuje pouze povolená metadata z architektury.
-
-### AC-SEC-02: Health check je praktický
-
-**Priorita:** P2  
-**Požadavky:** RUN-04, RUN-05, RUN-12
-
-**Given** chybí postupně podporovaný Neovim, OpenCode, správná verze, `git merge-file`, Snacks input/picker, Tree-sitter parser nebo tmux stack požadavky
-**When** uživatel spustí health check  
-**Then** hard dependencies jsou errors s konkrétní nápravou  
-**And** chybějící Tree-sitter parser je warning s file-scope fallbackem  
-**And** health check jasně pojmenuje `$TMUX`, `$TMUX_PANE`, executable tmux a jeho verzi, pokud nejsou splněné
-**And** health check nevyžaduje `pgrep` ani `lsof` a nemění tmux konfiguraci.
-
-## Traceability matrix
-
-| Oblast požadavků | Pokrývající scénáře |
-|---|---|
-| UI-01 až UI-08 | AC-UI-01 až AC-UI-05, AC-JOB-02 |
-| MODE-01 až MODE-05 | AC-MODE-01 až AC-MODE-03, AC-PROP-01 |
-| CTX-01 až CTX-10 | AC-CTX-01 až AC-CTX-06 |
-| SCOPE-01 až SCOPE-10 | AC-SCOPE-01 až AC-SCOPE-06, AC-PROP-01 až AC-PROP-03 |
-| JOB-01 až JOB-12 | AC-JOB-01 až AC-JOB-07, AC-EVT-01 až AC-EVT-06, AC-STATE-01 až AC-STATE-02 |
-| MERGE-01 až MERGE-17 | AC-PROP-01 až AC-PROP-03, AC-MERGE-01 až AC-MERGE-12, AC-JOB-03 |
-| INT-01 až INT-07 | AC-MODE-01 až AC-MODE-02, AC-EVT-02, AC-INT-01 až AC-INT-04 |
-| RUN-01 až RUN-12 | AC-RUN-01 až AC-RUN-09, AC-EVT-03 až AC-EVT-06, AC-SEC-01 až AC-SEC-02 |
-
-## Release gate
-
-Release candidate je přijatelný pouze tehdy, když:
-
-1. všechny delivery slices jsou dokončené a všechny P0 a P1 scénáře procházejí,
-2. žádný scenario skip nezakrývá unsupported platform nebo API drift,
-3. real OpenCode contract a end-to-end suite procházejí pro profily `v1.17.3` i `v1.18.9`, včetně delta/updated coverage a runtime/integration/multi-root scénářů, bez neznámého legacy fallbacku,
-4. failure-injection suite neprokáže diskový write, stale apply, cross-Job event nebo ztrátu Ours,
-5. P2 scénáře mají automatizovaný výsledek nebo uložený reprodukovatelný manuální protokol.
+Health reports actionable capability metadata. Release evidence has one current checksummed result per scenario/profile and
+explicitly fails missing, stale, skipped, mismatched, or checksum-invalid results.

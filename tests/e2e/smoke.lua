@@ -1,7 +1,15 @@
 ---@diagnostic disable: duplicate-set-field
 
 local target = vim.fn.fnamemodify("tests/fixtures/e2e.lua", ":p")
-local before = vim.fn.sha256(table.concat(vim.fn.readfile(target, "b"), "\n"))
+
+local function read_bytes(path)
+  local file = assert(io.open(path, "rb"))
+  local value = file:read("*a")
+  file:close()
+  return value
+end
+
+local before = read_bytes(target)
 require("snacks").setup({ input = { enabled = true }, picker = { enabled = true } })
 vim.cmd.edit(target)
 
@@ -121,6 +129,17 @@ local function current_job()
   return runtime.jobs[session.active_job_key]
 end
 
+---Returns failure-safe Job metadata without prompt, source, response, credentials, or absolute paths.
+local function failure_diagnostics(job)
+  return vim.inspect({
+    profile = runtime.profile.version,
+    state = job.state,
+    error_class = job.error_class,
+    session = tostring(job.session_id):sub(-8),
+    message = tostring(job.user_message_id):sub(-8),
+  })
+end
+
 local source_win = vim.api.nvim_get_current_win()
 local mapped_flow
 vim.keymap.set({ "n", "x" }, "<C-a>", function()
@@ -182,10 +201,7 @@ assert(
   end),
   "Build completion timed out"
 )
-assert(
-  first_build.state == "completed",
-  vim.inspect({ state = first_build.state, error_class = first_build.error_class })
-)
+assert(first_build.state == "completed", failure_diagnostics(first_build))
 
 local messages, messages_error
 runtime.client
@@ -234,13 +250,7 @@ assert(reused_build.user_message_id ~= first_build.user_message_id, "Build reuse
 local reused_build_finished = vim.wait(120000, function()
   return require("opencode.job").terminal(reused_build.state)
 end)
-assert(
-  reused_build_finished and reused_build.state == "completed",
-  vim.inspect({
-    state = reused_build.state,
-    error_class = reused_build.error_class,
-  })
-)
+assert(reused_build_finished and reused_build.state == "completed", failure_diagnostics(reused_build))
 
 local build_text = ask_with_editor(
   "Change only alpha's return value from 1 to 2 and return the required structured replacement.",
@@ -290,29 +300,68 @@ if not build_finished then
       parts = parts,
     })
   end
-  error(vim.inspect({
-    state = build.state,
-    diagnostics = require("opencode.session").diagnostics(runtime),
-    remote_error = remote_error,
-    messages = summary,
-  }))
+  error(failure_diagnostics(build) .. " remote=" .. vim.inspect({ error = remote_error ~= nil, messages = summary }))
 end
-assert(
-  build.state == "completed",
-  vim.inspect({
-    state = build.state,
-    error_class = build.error_class,
-    assistant_ids = vim.tbl_keys(build.assistant_message_ids or {}),
-    correlation = runtime.correlation,
-  })
-)
+assert(build.state == "completed", failure_diagnostics(build))
 assert(
   table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n"):find("return 2", 1, true),
   "Build was not applied"
 )
 
-local after = vim.fn.sha256(table.concat(vim.fn.readfile(target, "b"), "\n"))
-assert(after == before, "Build changed the source fixture on disk")
+assert(read_bytes(target) == before, "Build changed the source fixture on disk")
+
+local whole_file = vim.fn.fnamemodify("tests/e2e/whole-file.lua", ":p")
+local whole_file_disk = read_bytes(whole_file)
+assert(whole_file_disk:sub(-1) == "\n", "whole-file fixture must end in a newline")
+vim.cmd.edit(whole_file)
+local whole_file_prompt = table.concat({
+  "Replace the entire current file with exactly these three lines, preserving the UTF-8 characters and final newline:",
+  "-- UTF-8 whole-file replacement.",
+  'local greeting = "Příliš žluťoučký kůň běží"',
+  "return greeting",
+}, "\n")
+local expected_lines = {
+  "-- UTF-8 whole-file replacement.",
+  'local greeting = "Příliš žluťoučký kůň běží"',
+  "return greeting",
+}
+local whole_flow = require("opencode").prompt(whole_file_prompt, {
+  mode = "build",
+  scope = "file",
+  new_session = true,
+})
+local whole_dispatch_error
+whole_flow:catch(function(err)
+  whole_dispatch_error = err
+end)
+assert(
+  vim.wait(15000, function()
+    local session = runtime.sessions[runtime.selected_session_id]
+    return whole_dispatch_error ~= nil or (session and session.active_job_key ~= nil)
+  end),
+  "whole-file Build did not dispatch"
+)
+assert(whole_dispatch_error == nil, vim.inspect(whole_dispatch_error))
+local whole_build = current_job()
+assert(
+  vim.wait(120000, function()
+    return require("opencode.job").terminal(whole_build.state)
+  end),
+  failure_diagnostics(whole_build)
+)
+assert(whole_build.state == "completed", failure_diagnostics(whole_build))
+assert(vim.deep_equal(vim.api.nvim_buf_get_lines(0, 0, -1, false), expected_lines), "whole-file UTF-8 mismatch")
+assert(vim.bo.endofline, "whole-file Build removed the final newline")
+assert(vim.bo.modified, "whole-file Build did not leave a live-buffer modification")
+assert(read_bytes(whole_file) == whole_file_disk, "whole-file Build changed the fixture on disk")
+
+local safe_failure = failure_diagnostics(whole_build)
+for _, secret in ipairs({ whole_file_prompt, whole_file, whole_file_disk }) do
+  assert(not safe_failure:find(secret, 1, true), "failure diagnostics leaked protected content")
+end
+for _, secret in pairs({ password = runtime.password, home = vim.env.HOME }) do
+  assert(not safe_failure:find(secret, 1, true), "failure diagnostics leaked protected content")
+end
 vim.ui.select = old_select
 runtime:stop()
 vim.cmd("qa!")

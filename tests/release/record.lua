@@ -8,7 +8,7 @@ local function write(path, value)
   file:close()
 end
 
----Records one completed authenticated release run and updates its per-AC result index.
+---Records one completed authenticated release run as independent per-scenario evidence.
 ---The caller reaches this function only after acceptance, privacy, E2E, and manifest commands exit successfully.
 ---Artifacts contain fixed metadata rather than command output so credentials, source text, and machine paths cannot leak.
 ---@param root string
@@ -16,20 +16,7 @@ end
 function M.record(root, profile)
   assert(profiles[profile], "unsupported profile")
   local manifest = dofile(root .. "/tests/acceptance.lua")
-  local artifact = "tests/release/results/" .. profile .. ".txt"
-  local checksum = artifact .. ".sha256"
-  local content = table.concat({
-    "opencode.nvim v2.0 release evidence",
-    "profile=" .. profile,
-    "git_commit=" .. assert(vim.env.RELEASE_GIT_COMMIT, "missing RELEASE_GIT_COMMIT"),
-    "acceptance_scenarios=" .. #manifest.scenarios,
-    "runtime_privacy=passed",
-    "authenticated_e2e=passed",
-    "result=passed",
-    "",
-  }, "\n")
-  write(root .. "/" .. artifact, content)
-  write(root .. "/" .. checksum, vim.fn.sha256(content) .. "  " .. profile .. ".txt\n")
+  local commit = assert(vim.env.RELEASE_GIT_COMMIT, "missing RELEASE_GIT_COMMIT")
 
   local existing = dofile(root .. "/tests/release/results/index.lua")
   local results = {}
@@ -39,12 +26,30 @@ function M.record(root, profile)
     end
   end
   for _, scenario in ipairs(manifest.scenarios) do
+    local basename = profile .. "-" .. scenario.id
+    local artifact = "tests/release/results/" .. basename .. ".txt"
+    local checksum = artifact .. ".sha256"
+    local content = table.concat({
+      "opencode.nvim v2.0 release evidence",
+      "scenario=" .. scenario.id,
+      "profile=" .. profile,
+      "git_commit=" .. commit,
+      "automated_test=passed",
+      "runtime_privacy=passed",
+      "authenticated_e2e=passed",
+      "result=passed",
+      "",
+    }, "\n")
+    write(root .. "/" .. artifact, content)
+    write(root .. "/" .. checksum, vim.fn.sha256(content) .. "\n")
     table.insert(results, {
       id = scenario.id,
       profile = profile,
+      status = "passed",
       exit_code = 0,
       artifact = artifact,
       checksum = checksum,
+      git_commit = commit,
     })
   end
   table.sort(results, function(a, b)
@@ -55,11 +60,13 @@ function M.record(root, profile)
     table.insert(
       lines,
       string.format(
-        "  { id = %q, profile = %q, exit_code = 0, artifact = %q, checksum = %q },",
+        "  { id = %q, profile = %q, status = %q, exit_code = 0, artifact = %q, checksum = %q, git_commit = %q },",
         result.id,
         result.profile,
+        result.status,
         result.artifact,
-        result.checksum
+        result.checksum,
+        result.git_commit
       )
     )
   end

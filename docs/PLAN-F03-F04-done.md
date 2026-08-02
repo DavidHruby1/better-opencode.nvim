@@ -1,5 +1,7 @@
 # Low-level plan F03-F04: scoped Build, clean merge a bezpečná aplikace
 
+> Historical implementation plan. Plan and the tmux/TUI sidebar were later removed; this is not an active contract.
+
 ## Mandát
 
 | Položka | Hodnota |

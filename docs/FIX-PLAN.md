@@ -1,6 +1,9 @@
 # FIX-PLAN
 
-Stav: implementace dokončena v pracovním stromu; zbývá ověřit plný testovací a release průchod.
+Stav: implementace dokončena; plný release průchod je povinný CI/release gate.
+
+The investigation, old line references, and Plan/tmux/TUI descriptions below are historical. They explain the removed
+implementation and are not an active runtime, API, or acceptance contract.
 
 Datum průzkumu: 2026-08-02
 

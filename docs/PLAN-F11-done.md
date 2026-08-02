@@ -1,5 +1,7 @@
 # Low-level plan F11: UX, privacy, diagnostika a release evidence
 
+> Historical implementation plan. Plan and the tmux/TUI sidebar were later removed; this is not an active contract.
+
 ## Mandát
 
 | Položka | Hodnota |

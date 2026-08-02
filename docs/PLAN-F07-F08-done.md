@@ -1,5 +1,7 @@
 # Low-level plan F07-F08: Session reuse, přesné routing a paralelní Joby
 
+> Historical implementation plan. Plan and the tmux/TUI sidebar were later removed; this is not an active contract.
+
 ## Mandát
 
 | Položka | Hodnota |
