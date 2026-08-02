@@ -31,7 +31,7 @@ local defaults = {
       win = {
         backdrop = false,
         border = "rounded",
-        width = 72,
+        width = 60,
         height = 3,
         bo = { filetype = "opencode_ask" },
       },

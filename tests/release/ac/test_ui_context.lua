@@ -1,3 +1,5 @@
+---@diagnostic disable: duplicate-set-field
+
 local T = MiniTest.new_set()
 local eq = MiniTest.expect.equality
 
@@ -47,7 +49,8 @@ end
 ---@return table
 local function ready_runtime(root, calls, session_id)
   local sessions = require("opencode.session")
-  local runtime = {
+  local runtime
+  runtime = {
     root = root,
     root_hash = vim.fn.sha256(root),
     state = "ready",
@@ -59,8 +62,12 @@ local function ready_runtime(root, calls, session_id)
     jobs = {},
     sidebar = {
       visible = false,
+      input_locked = true,
       show = function()
-        table.insert(calls.order, "split")
+        table.insert(calls.order, runtime.sidebar.visible and "reuse" or "split")
+        if calls.fail_show then
+          return false, calls.show_error or "tui_attach"
+        end
         runtime.sidebar.visible = true
         calls.sidebar_shown = true
         return true
@@ -72,6 +79,9 @@ local function ready_runtime(root, calls, session_id)
         table.insert(calls.order, "select")
         calls.selects = calls.selects + 1
         table.insert(calls.selected, id)
+        if calls.fail_select then
+          return Promise.reject({ error_class = calls.select_error or "session_select" })
+        end
         return Promise.resolve(nil)
       end,
     },
@@ -114,6 +124,22 @@ local function ready_runtime(root, calls, session_id)
       table.insert(calls.order, "prompt")
       calls.prompt_session = id
       table.insert(calls.prompts, payload)
+      if calls.fail_prompt then
+        return Promise.reject({ error_class = "timeout" })
+      end
+      if calls.complete_during_prompt then
+        local session = runtime.sessions[id]
+        require("opencode.job").finish(runtime.jobs[session.active_job_key], session, "completed")
+      end
+      return Promise.resolve({})
+    end,
+    abort = function(_, id)
+      calls.aborts = calls.aborts + 1
+      calls.abort_id = id
+      table.insert(calls.order, "abort")
+      if calls.fail_abort then
+        return Promise.reject({ error_class = "abort" })
+      end
       return Promise.resolve({})
     end,
   }
@@ -141,6 +167,7 @@ local function calls()
     selected = {},
     prompts = {},
     order = {},
+    aborts = 0,
   }
 end
 
@@ -246,11 +273,13 @@ local function with_prompt_window(callback)
     for key, value in pairs(opened) do
       fake[key] = value
     end
-    for _, key in ipairs({ "newline", "newline_fallback", "submit" }) do
+    for _, key in ipairs({ "newline", "submit", "submit_normal", "cancel" }) do
       local mapping = opts.keys[key]
-      vim.keymap.set("i", mapping[1], function()
-        return mapping[2]()
-      end, { buffer = buf, expr = mapping.expr == true })
+      if mapping then
+        vim.keymap.set(mapping.mode or "i", mapping[1], function()
+          return mapping[2]()
+        end, { buffer = buf, expr = mapping.expr == true })
+      end
     end
     opts.on_buf(fake)
     opts.on_win(fake)
@@ -267,7 +296,7 @@ local function with_prompt_window(callback)
   assert(ok, err)
 end
 
-T["AC-UI-01 inline prompt shows Build root function scope and restores source focus"] = function()
+T["AC-UI-01 inline prompt shows compact mode root and scope metadata and restores source focus"] = function()
   local path, buf, source_win = source_buffer({ "local function alpha()", "  return 1", "end" }, "lua")
   vim.api.nvim_win_set_cursor(source_win, { 2, 2 })
   local capture = assert(require("opencode.context").capture())
@@ -277,8 +306,11 @@ T["AC-UI-01 inline prompt shows Build root function scope and restores source fo
     captured.keys.submit_normal[2]()
     eq(await(result), "")
     eq(captured.title:find("Build", 1, true) ~= nil, true)
-    eq(captured.title:find(vim.fs.dirname(path), 1, true) ~= nil, true)
+    eq(captured.title:find(vim.fs.basename(vim.fs.dirname(path)), 1, true) ~= nil, true)
     eq(captured.title:find("function", 1, true) ~= nil, true)
+    eq(captured.title:find(path, 1, true), nil)
+    eq(captured.wo.statuscolumn:find("󰚩", 1, true) ~= nil, true)
+    eq(captured.width, 60)
     eq(fake:text(), "")
   end)
   eq(vim.api.nvim_get_current_win(), source_win)
@@ -298,6 +330,7 @@ T["multiline Enter queues unchanged text until Runtime readiness resolves"] = fu
       submitted = text
       return Promise.resolve(nil)
     end)
+    eq(captured.footer[1][1], " Starting ")
     captured.keys.submit[2]()
     eq(
       vim.wait(50, function()
@@ -314,6 +347,7 @@ T["multiline Enter queues unchanged text until Runtime readiness resolves"] = fu
       true
     )
     eq(submitted, initial)
+    eq(captured.footer[1][1], " Submitting ")
     local value = await(result)
     eq(value, initial)
   end)
@@ -341,6 +375,7 @@ T["startup or dispatch failure keeps multiline input available for retry"] = fun
       end),
       true
     )
+    eq(#captured.footer[1][1] <= 32, true)
     eq(fake:text(), initial)
     captured.keys.submit[2]()
     eq(
@@ -359,7 +394,7 @@ T["startup or dispatch failure keeps multiline input available for retry"] = fun
   vim.fn.delete(path)
 end
 
-T["multiline editor mappings create real lines and visible completion is accepted"] = function()
+T["multiline editor mappings use C-j for newline and CR for completion or submit"] = function()
   local path, buf = source_buffer({ "source" }, "text")
   local context =
     require("opencode.context").new(assert(require("opencode.context").capture()), { root = vim.fs.dirname(path) })
@@ -371,23 +406,23 @@ T["multiline editor mappings create real lines and visible completion is accepte
       return Promise.resolve(nil)
     end)
     captured.keys.newline[2]()
-    captured.keys.newline_fallback[2]()
-    eq(vim.api.nvim_buf_get_lines(fake.buf, 0, -1, false), { "first", "", "" })
+    eq(vim.api.nvim_buf_get_lines(fake.buf, 0, -1, false), { "first", "" })
     vim.fn.pumvisible = function()
       return 1
     end
     eq(captured.keys.submit[2](), "<C-y>")
     eq(submitted, 0)
     vim.fn.pumvisible = old_pumvisible
-    captured.keys.submit_normal[2]()
-    eq(await(result), "first\n\n")
+    captured.keys.submit[2]()
+    eq(await(result), "first\n")
+    eq(submitted, 1)
   end)
   vim.fn.pumvisible = old_pumvisible
   vim.api.nvim_buf_delete(buf, { force = true })
   vim.fn.delete(path)
 end
 
-T["prompt title follows the selected Build or Plan mode"] = function()
+T["prompt title shows compact mode root and effective scope metadata"] = function()
   local path, buf = source_buffer({ "source" }, "text")
   local context =
     require("opencode.context").new(assert(require("opencode.context").capture()), { root = vim.fs.dirname(path) })
@@ -395,7 +430,17 @@ T["prompt title follows the selected Build or Plan mode"] = function()
     with_prompt_window(function(captured)
       local result = require("opencode.ui.ask").ask(nil, context, mode)
       local expected = mode:gsub("^%l", string.upper)
-      eq(captured.title:match("^" .. expected), expected)
+      eq(captured.title:find(expected, 1, true) ~= nil, true)
+      eq(captured.title:find(vim.fs.basename(vim.fs.dirname(path)), 1, true) ~= nil, true)
+      eq(captured.title:find(mode == "plan" and "read-only" or "file", 1, true) ~= nil, true)
+      eq(captured.title:find(path, 1, true), nil)
+      eq(captured.wo.statuscolumn:find("󰚩", 1, true) ~= nil, true)
+      eq({ captured.keys.submit[1], captured.keys.newline[1] }, { "<CR>", "<C-j>" })
+      for _, mapping in pairs(captured.keys) do
+        if type(mapping) == "table" then
+          eq(mapping[1] == "<S-CR>", false)
+        end
+      end
       captured.keys.cancel[2]()
       eq(select(2, await(result)).error_class, "cancelled")
     end)
@@ -405,10 +450,15 @@ T["prompt title follows the selected Build or Plan mode"] = function()
 end
 
 T["prompt geometry stays visible at an edge and grows with multiline input"] = function()
-  local path, buf, source_win = source_buffer({ "edge", "edge", "edge" }, "text")
-  vim.api.nvim_win_set_cursor(source_win, { 3, 4 })
+  local lines = {}
+  for _ = 1, 15 do
+    table.insert(lines, "edge")
+  end
+  local path, buf, source_win = source_buffer(lines, "text")
+  vim.api.nvim_win_set_cursor(source_win, { 10, 4 })
   local capture = assert(require("opencode.context").capture())
   local context = require("opencode.context").new(capture, { root = vim.fs.dirname(path) })
+  local cursor_screen_row = vim.fn.screenpos(source_win, 10, 5).row - 1
   with_prompt_window(function(captured, fake)
     local result = require("opencode.ui.ask").ask("one\ntwo", context, "plan")
     local lines = math.max(vim.o.lines - vim.o.cmdheight, 1)
@@ -416,6 +466,11 @@ T["prompt geometry stays visible at an edge and grows with multiline input"] = f
     eq(captured.col >= 0, true)
     eq(captured.row + captured.height + 2 <= lines, true)
     eq(captured.col + captured.width + 2 <= vim.o.columns, true)
+    eq(captured.width, 60)
+    eq(captured.row + captured.height + 2 <= cursor_screen_row, true)
+    vim.api.nvim_buf_set_lines(fake.buf, 0, -1, false, { string.rep("wide", 20) })
+    vim.api.nvim_exec_autocmds("TextChanged", { buffer = fake.buf })
+    eq(captured.width > 60, true)
     local old_height = captured.height
     vim.api.nvim_buf_set_lines(fake.buf, 0, -1, false, { "1", "2", "3", "4", "5", "6", "7", "8" })
     vim.api.nvim_exec_autocmds("TextChanged", { buffer = fake.buf })
@@ -424,6 +479,35 @@ T["prompt geometry stays visible at an edge and grows with multiline input"] = f
     local _, error = await(result)
     eq(error.error_class, "cancelled")
   end)
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["placeholder highlighting does not expand providers or mark referenced buffers"] = function()
+  local path, buf = source_buffer({ "source" }, "text")
+  local context =
+    require("opencode.context").new(assert(require("opencode.context").capture()), { root = vim.fs.dirname(path) })
+  local config = require("opencode.config")
+  local old_provider = config.opts.contexts["@buffer"]
+  local provider_calls = 0
+  config.opts.contexts["@buffer"] = function()
+    provider_calls = provider_calls + 1
+    return path
+  end
+  with_prompt_window(function(captured, fake)
+    local result = require("opencode.ui.ask").ask("@buffer", context, "plan")
+    eq(provider_calls, 0)
+    eq(context.referenced_buffers[buf], nil)
+    local namespace = vim.api.nvim_get_namespaces().opencode_ask
+    eq(#vim.api.nvim_buf_get_extmarks(fake.buf, namespace, 0, -1, {}) > 0, true)
+    vim.api.nvim_buf_set_lines(fake.buf, 0, -1, false, { "@buffer again" })
+    vim.api.nvim_exec_autocmds("TextChanged", { buffer = fake.buf })
+    eq(provider_calls, 0)
+    eq(context.referenced_buffers[buf], nil)
+    captured.keys.cancel[2]()
+    eq(select(2, await(result)).error_class, "cancelled")
+  end)
+  config.opts.contexts["@buffer"] = old_provider
   vim.api.nvim_buf_delete(buf, { force = true })
   vim.fn.delete(path)
 end
@@ -447,7 +531,7 @@ T["AC-UI-02 sidebar lazily splits the active root and leaves focus detached"] = 
       "-h",
       "-d",
       "-p",
-      "30",
+      "30%",
       "-t",
       "%source",
       "-P",
@@ -465,25 +549,30 @@ T["AC-UI-02 sidebar lazily splits the active root and leaves focus detached"] = 
     })
     eq(state.calls[1].opts.cwd, root)
     eq(state.calls[2].command, { "tmux", "select-pane", "-d", "-t", "%pane-1" })
+    -- Re-show revalidates the live pane and reapplies the detached input lock before explicit focus.
     sidebar:show_root(runtime)
-    eq(#state.calls, 4)
+    eq(#state.calls, 5)
     eq(state.calls[4].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[5].command, { "tmux", "select-pane", "-d", "-t", "%pane-1" })
 
     sidebar:focus()
-    eq(state.calls[5].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
     eq(state.calls[6].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
-    eq(state.calls[7].command, { "tmux", "select-pane", "-t", "%pane-1" })
-    sidebar:toggle()
+    eq(state.calls[7].command, { "tmux", "select-pane", "-d", "-t", "%pane-1" })
     eq(state.calls[8].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
-    eq(state.calls[9].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
-    eq(state.calls[10].command, { "tmux", "kill-pane", "-t", "%pane-1" })
+    eq(state.calls[9].command, { "tmux", "select-pane", "-t", "%pane-1" })
+    sidebar:toggle()
+    eq(state.calls[10].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[11].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[12].command, { "tmux", "kill-pane", "-t", "%pane-1" })
     eq(sidebar:is_visible(), false)
     sidebar:toggle()
     eq(sidebar:is_visible(), true)
-    eq(state.calls[11].command[2], "split-window")
+    eq(state.calls[13].command[2], "split-window")
+    eq(state.calls[14].command, { "tmux", "select-pane", "-d", "-t", "%pane-1" })
+    eq(state.calls[15].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
     sidebar:stop()
-    eq(state.calls[14].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
-    eq(state.calls[15].command, { "tmux", "kill-pane", "-t", "%pane-1" })
+    eq(state.calls[16].command, { "tmux", "display-message", "-p", "-t", "%pane-1", "#{pane_id}\t#{pane_pid}" })
+    eq(state.calls[17].command, { "tmux", "kill-pane", "-t", "%pane-1" })
     Runtime.registry[root], Runtime.active_root = nil, nil
   end)
   vim.fn.delete(root, "rf")
@@ -715,19 +804,24 @@ T["AC-CTX-01 context placeholders resolve file ranges and remain completable"] =
   eq(rendered.plaintext:find("quickfix note", 1, true) ~= nil, true)
   eq(rendered.plaintext:find("value is unusual", 1, true) ~= nil, true)
   eq(context:render("Explain").plaintext:find(path:match("[^/]+$"), 1, true) ~= nil, true)
-  local before = require("opencode.scope").resolve(
-    context,
-    { text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") }
+  local before = assert(
+    require("opencode.scope").resolve(
+      context,
+      { text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") }
+    )
   )
   context:render("@this")
-  local after = require("opencode.scope").resolve(
-    context,
-    { text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") }
+  local after = assert(
+    require("opencode.scope").resolve(
+      context,
+      { text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") }
+    )
   )
   eq({ before.kind, before.start_byte, before.end_byte }, { after.kind, after.start_byte, after.end_byte })
   with_prompt_window(function(captured, fake)
     local prompt = require("opencode.ui.ask").ask("@buffer", context, "plan")
     local completion
+    ---@diagnostic disable-next-line: missing-parameter
     local server = require("opencode.ui.ask.cmp").cmd()
     server.request("textDocument/completion", {
       textDocument = { uri = vim.uri_from_bufnr(fake.buf) },
@@ -999,6 +1093,151 @@ T["AC-MODE-02 Build sends structured proposal with denied source-write tools and
   vim.fn.delete(path)
 end
 
+T["Plan creates or reuses its pane and selects the transcript without focusing it"] = function()
+  local path, buf = source_buffer({ "local value = 1" }, "lua")
+  local call_log = calls()
+  local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_plan_pane")
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
+
+  local first, first_error = await(require("opencode.api.prompt").prompt("inspect", context, { mode = "plan" }))
+  eq(first_error, nil)
+  eq(call_log.updates, 0)
+  eq(call_log.order, { "prompt", "split", "select" })
+  eq(call_log.selected, { "ses_plan_pane" })
+  eq(runtime.selected_session_id, "ses_plan_pane")
+  eq(runtime.sidebar.input_locked, true)
+  require("opencode.job").finish(first, runtime.sessions.ses_plan_pane, "completed")
+  runtime.sessions.ses_plan_pane.remote_status = "idle"
+
+  local second, second_error = await(require("opencode.api.prompt").prompt("inspect again", context, { mode = "plan" }))
+  eq(second_error, nil)
+  eq(call_log.creates, 1)
+  eq(call_log.updates, 1)
+  eq(call_log.order, { "prompt", "split", "select", "prompt", "reuse", "select" })
+  eq(call_log.selected, { "ses_plan_pane", "ses_plan_pane" })
+  eq(second.session_id, first.session_id)
+  require("opencode.job").finish(second, runtime.sessions.ses_plan_pane, "completed")
+
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["Plan pane creation and selection failures abort remote work before allowing retry"] = function()
+  local failures = {
+    { field = "fail_show", error_class = "tui_attach" },
+    { field = "fail_select", error_class = "session_select" },
+  }
+  for _, failure in ipairs(failures) do
+    local path, buf = source_buffer({ "local value = 1" }, "lua")
+    local call_log = calls()
+    call_log[failure.field] = true
+    local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_plan_retry")
+    local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
+    local _, error = await(require("opencode.api.prompt").prompt("inspect", context, { mode = "plan" }))
+    eq(error.error_class, failure.error_class, failure.field)
+
+    local session = runtime.sessions.ses_plan_retry
+    local active = 0
+    for _, job in pairs(runtime.jobs) do
+      if not require("opencode.job").terminal(job.state) then
+        active = active + 1
+      end
+    end
+    eq({ active, session.active_job_key, session.remote_status, session.availability }, { 0, nil, "idle", "reusable" })
+    eq({ call_log.aborts, call_log.abort_id }, { 1, "ses_plan_retry" }, failure.field)
+
+    call_log[failure.field] = false
+    local retry, retry_error = await(require("opencode.api.prompt").prompt("retry", context, { mode = "plan" }))
+    eq(retry_error, nil, failure.field)
+    eq(call_log.creates, 1, failure.field)
+    eq(call_log.updates, 1, failure.field)
+    eq(call_log.aborts, 1, failure.field)
+    eq(runtime.sessions.ses_plan_retry.active_job_key, retry.key, failure.field)
+    require("opencode.job").finish(retry, runtime.sessions.ses_plan_retry, "completed")
+
+    vim.api.nvim_buf_delete(buf, { force = true })
+    vim.fn.delete(path)
+  end
+end
+
+T["Plan pane failure blocks Session reuse when remote abort fails"] = function()
+  local path, buf = source_buffer({ "local value = 1" }, "lua")
+  local call_log = calls()
+  call_log.fail_show, call_log.fail_abort = true, true
+  local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_plan_abort")
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
+
+  local _, err = await(require("opencode.api.prompt").prompt("inspect", context, { mode = "plan" }))
+  local session = runtime.sessions.ses_plan_abort
+  eq(err.error_class, "tui_attach")
+  eq({ call_log.aborts, session.active_job_key }, { 1, nil })
+  eq({ session.remote_status, session.availability, session.availability_reason }, {
+    "busy",
+    "blocked",
+    "remote_busy_without_job",
+  })
+  eq({ runtime.prompt_locked, runtime.reconciliation_required, runtime.reconciliation_blocked }, { true, true, true })
+
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["ambiguous prompt failure aborts before releasing the Session"] = function()
+  local path, buf = source_buffer({ "local value = 1" }, "lua")
+  local call_log = calls()
+  call_log.fail_prompt = true
+  local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_prompt_timeout")
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
+
+  local _, err = await(require("opencode.api.prompt").prompt("inspect", context, { mode = "plan" }))
+  local session = runtime.sessions.ses_prompt_timeout
+  eq(err.error_class, "timeout")
+  eq({ call_log.aborts, session.active_job_key, session.remote_status, session.availability }, {
+    1,
+    nil,
+    "idle",
+    "reusable",
+  })
+  eq(call_log.order, { "prompt", "abort" })
+
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["correlated completion before HTTP acknowledgment remains successful"] = function()
+  local path, buf = source_buffer({ "local value = 1" }, "lua")
+  local call_log = calls()
+  call_log.complete_during_prompt = true
+  local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_fast_complete")
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
+
+  local job, err = await(require("opencode.api.prompt").prompt("inspect", context, { mode = "build" }))
+  eq(err, nil)
+  eq({ job.state, call_log.aborts, call_log.order }, { "completed", 0, { "prompt" } })
+
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["late runtime blocker does not register a local Job"] = function()
+  local path, buf = source_buffer({ "local value = 1" }, "lua")
+  local call_log = calls()
+  local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_late_blocker")
+  local get_session = runtime.client.get_session
+  runtime.client.get_session = function(client, id)
+    runtime.state = "error"
+    return get_session(client, id)
+  end
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
+
+  local _, err = await(require("opencode.api.prompt").prompt("inspect", context, { mode = "plan" }))
+  eq(err.error_class, "runtime_not_ready")
+  eq({ next(runtime.jobs), next(runtime.sessions), #call_log.prompts }, { nil, nil, 0 })
+
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
 T["AC-MODE-03 Plan to Build follow-up reuses the Session with a new Job identity and Base"] = function()
   local path, buf = source_buffer({ "local value = 1" }, "lua")
   local call_log = calls()
@@ -1006,12 +1245,13 @@ T["AC-MODE-03 Plan to Build follow-up reuses the Session with a new Job identity
   local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
   local plan_job = await(require("opencode.api.prompt").prompt("inspect", context, { mode = "plan" }))
   require("opencode.job").finish(plan_job, runtime.sessions.ses_mode_03, "completed")
+  runtime.sessions.ses_mode_03.remote_status = "idle"
   local second_job, err = await(require("opencode.api.prompt").prompt("now change", context, { mode = "build" }))
   eq(err, nil)
   eq(call_log.creates, 1)
-  eq(call_log.updates > 0, true)
+  eq(call_log.updates, 1)
   eq(#call_log.prompts, 2)
-  eq(call_log.order, { "split", "select", "prompt", "prompt" })
+  eq(call_log.order, { "prompt", "split", "select", "prompt" })
   eq(call_log.selected, { "ses_mode_03" })
   eq(plan_job.session_id, second_job.session_id)
   eq(plan_job.user_message_id ~= second_job.user_message_id, true)

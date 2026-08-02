@@ -117,6 +117,16 @@ function Context.format(opts)
   return result
 end
 
+---Returns configured context placeholders longest-first for matching and expansion.
+---Sorting longer keys first keeps overlapping placeholders such as `@buffers` ahead of `@buffer`.
+local function context_keys()
+  local keys = vim.tbl_keys(require("opencode.config").opts.contexts)
+  table.sort(keys, function(a, b)
+    return #a > #b
+  end)
+  return keys
+end
+
 ---Splits prompt text into plain and highlighted context-placeholder segments.
 ---The earliest match wins and longer keys win ties, so `@buffers` is never partially styled as `@buffer`.
 local function input_segments(prompt, keys)
@@ -146,16 +156,22 @@ local function input_segments(prompt, keys)
   return segments
 end
 
+---Identifies configured placeholders without calling their providers or changing referenced buffers.
+---The returned segments are used only for prompt highlighting; full expansion stays in `render` for submit and completion resolution.
+---@param prompt string
+---@return opencode.context.rendered.Rendered
+function Context:input(prompt)
+  local Rendered = require("opencode.context.rendered")
+  return setmetatable(input_segments(prompt, context_keys()), Rendered)
+end
+
 ---Expands configured placeholders and prepends the active location exactly once.
----Input keeps placeholder segments for multiline highlights while output records referenced buffers for dirty preflight.
+---Input keeps cheap placeholder segments for multiline highlights while output calls providers and records referenced buffers for dirty preflight.
 ---@param prompt string
 ---@return { input: table, output: table, plaintext: string }
 function Context:render(prompt)
   local contexts = require("opencode.config").opts.contexts
-  local keys = vim.tbl_keys(contexts)
-  table.sort(keys, function(a, b)
-    return #a > #b
-  end)
+  local keys = context_keys()
   local output = prompt
   for _, key in ipairs(keys) do
     if output:find(key, 1, true) then
@@ -171,7 +187,7 @@ function Context:render(prompt)
   end
   local Rendered = require("opencode.context.rendered")
   return {
-    input = setmetatable(input_segments(prompt, keys), Rendered),
+    input = self:input(prompt),
     output = setmetatable({ { output } }, Rendered),
     plaintext = output,
   }

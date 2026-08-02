@@ -29,6 +29,14 @@ local function pane_details(pane_id)
   return id and { pane_id = id, pane_pid = tonumber(pid) } or nil
 end
 
+---Disables input for a verified plugin-owned pane while targeting that pane explicitly.
+---The same command is reused on creation and reuse; focus calls show first so it keeps that lock intact.
+---@param pane_id string
+---@return vim.SystemCompleted
+local function lock_pane(pane_id)
+  return tmux({ "select-pane", "-d", "-t", pane_id })
+end
+
 ---Stores one TUI process identity in the Runtime's private ownership manifest.
 ---Clearing it after verified pane removal prevents later shutdown from targeting an unrelated reused process ID.
 ---@param runtime table
@@ -115,6 +123,11 @@ function Sidebar:show_root(runtime)
     return false, "interaction_locked"
   end
   if shared_is_live() and shared.runtime == runtime then
+    local locked = lock_pane(shared.pane_id)
+    if locked.code ~= 0 then
+      runtime.tui_live, runtime.tui_status = false, "error"
+      return false, "tui_lock"
+    end
     runtime.tui_live, runtime.tui_status = true, "live"
     return true
   end
@@ -133,7 +146,7 @@ function Sidebar:show_root(runtime)
     "-h",
     "-d",
     "-p",
-    tostring(percentage),
+    tostring(percentage) .. "%",
     "-t",
     vim.env.TMUX_PANE,
     "-P",
@@ -160,7 +173,7 @@ function Sidebar:show_root(runtime)
     return false, "tui_attach"
   end
   shared.pane_id, shared.pane_pid, shared.runtime = pane_id, pane_pid, runtime
-  local disabled = tmux({ "select-pane", "-d", "-t", pane_id })
+  local disabled = lock_pane(pane_id)
   local identity = require("opencode.runtime.ownership").identity(pane_pid)
   if disabled.code ~= 0 or not identity then
     kill_shared()
@@ -231,21 +244,28 @@ function Sidebar:toggle()
   end
 end
 
----Lazily shows this Runtime and asks tmux to focus its reverified pane.
----The initial split remains detached; only this explicit manual action changes tmux focus.
+---Lazily shows this Runtime and asks tmux to focus its reverified, input-disabled pane.
+---The initial split remains detached; callers select a transcript separately so that failure is reported before focus.
+---Only this explicit action changes tmux focus, and failures stay retryable.
+---@return boolean
+---@return string?
 function Sidebar:focus()
   if self.runtime.interaction_locked then
-    return
+    return false, "interaction_locked"
   end
-  local shown = self:show()
-  if shown and self:is_visible() then
-    if self.runtime.selected_session_id then
-      self:select_session(self.runtime.selected_session_id):catch(function()
-        require("opencode.ui.notify").error("session_select")
-      end)
-    end
-    tmux({ "select-pane", "-t", shared.pane_id })
+  local shown, show_error = self:show()
+  if not shown then
+    return false, show_error or "tui_unavailable"
   end
+  if not self:is_visible() then
+    return false, "tui_unavailable"
+  end
+  local focused = tmux({ "select-pane", "-t", shared.pane_id })
+  if focused.code ~= 0 then
+    self.runtime.tui_status = "error"
+    return false, "tui_focus"
+  end
+  return true
 end
 
 ---Marks a missing TUI without changing Server, SSE, Session, or Job state.

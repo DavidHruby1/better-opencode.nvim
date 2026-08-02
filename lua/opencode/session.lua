@@ -129,63 +129,69 @@ end
 
 ---Loads and verifies the Runtime-local managed Session inventory.
 ---It checks every metadata candidate through detail GET, then derives availability and activity ordering.
----Only verified details enter the local registry or picker dataset.
+---Only verified details enter the local registry or picker dataset. A supplied status snapshot avoids
+---requesting /session/status again when startup passes the response on to reconciliation.
 ---@param runtime table
+---@param statuses? table
 ---@return Promise<table[]>
-function M.inventory(runtime)
+function M.inventory(runtime, statuses)
   local Promise = require("opencode.promise")
-  return Promise.all({ runtime.client:list_sessions(), runtime.client:session_status() }):next(function(results)
-    local listed, statuses = results[1], results[2]
-    local checks = {}
-    for _, candidate in ipairs(listed or {}) do
-      if M.managed(candidate, runtime, false) then
-        table.insert(
-          checks,
-          runtime.client:get_session(candidate.id):catch(function()
-            return nil
-          end)
-        )
-      end
-    end
-    return Promise.all(checks):next(function(details)
-      local sessions = {}
-      for _, detail in ipairs(details) do
-        if detail and M.managed(detail, runtime, true) then
-          local local_session = runtime.sessions[detail.id] or { id = detail.id, root = runtime.root }
-          local_session.title = detail.title
-          local_session.metadata = vim.deepcopy(detail.metadata)
-          local_session.remote_status = status_value(statuses, detail.id) or "idle"
-          local_session.last_mode = detail.metadata and detail.metadata.last_mode or local_session.last_mode
-          local_session.activity = activity(detail)
-          local_session.availability, local_session.availability_reason =
-            M.availability(runtime, local_session, local_session.remote_status)
-          runtime.sessions[detail.id] = local_session
-          table.insert(sessions, local_session)
+  return Promise.all({ runtime.client:list_sessions(), statuses or runtime.client:session_status() })
+    :next(function(results)
+      local listed, statuses = results[1], results[2]
+      local checks = {}
+      for _, candidate in ipairs(listed or {}) do
+        if M.managed(candidate, runtime, false) then
+          table.insert(
+            checks,
+            runtime.client:get_session(candidate.id):catch(function()
+              return nil
+            end)
+          )
         end
       end
-      M.assign_short_ids(sessions)
-      table.sort(sessions, function(a, b)
-        if (a.availability == "active") ~= (b.availability == "active") then
-          return a.availability == "active"
+      return Promise.all(checks):next(function(details)
+        local sessions = {}
+        for _, detail in ipairs(details) do
+          if detail and M.managed(detail, runtime, true) then
+            local local_session = runtime.sessions[detail.id] or { id = detail.id, root = runtime.root }
+            local_session.title = detail.title
+            local_session.metadata = vim.deepcopy(detail.metadata)
+            local_session.remote_status = status_value(statuses, detail.id) or "idle"
+            local_session.last_mode = detail.metadata and detail.metadata.last_mode or local_session.last_mode
+            local_session.activity = activity(detail)
+            local_session.availability, local_session.availability_reason =
+              M.availability(runtime, local_session, local_session.remote_status)
+            runtime.sessions[detail.id] = local_session
+            table.insert(sessions, local_session)
+          end
         end
-        return a.activity > b.activity
+        M.assign_short_ids(sessions)
+        table.sort(sessions, function(a, b)
+          if (a.availability == "active") ~= (b.availability == "active") then
+            return a.availability == "active"
+          end
+          return a.activity > b.activity
+        end)
+        return Promise.resolve(sessions)
       end)
-      return sessions
     end)
-  end)
 end
 
----Appends and verifies the exact permission suffix immediately before Session reuse.
----A fresh detail GET proves ownership, canonical root, and that no later rule can override the profile.
+---Verifies a Session before reuse, appending the exact permission suffix when it was not supplied by creation.
+---The detail GET proves ownership, canonical root, and that no later rule can override the profile. Fresh Sessions
+---already received the same metadata and permissions in POST, so they skip only the duplicate PATCH.
 ---@param runtime table
 ---@param session_id string
 ---@param mode "plan"|"build"
+---@param skip_update? boolean
 ---@return Promise<table>
-function M.revalidate(runtime, session_id, mode)
+function M.revalidate(runtime, session_id, mode, skip_update)
   local metadata = M.metadata(runtime.root_hash)
   metadata.last_mode = mode
-  return runtime.client
-    :update_session(session_id, { metadata = metadata, permission = M.permissions })
+  local update = skip_update and require("opencode.promise").resolve(nil)
+    or runtime.client:update_session(session_id, { metadata = metadata, permission = M.permissions })
+  return update
     :next(function()
       return runtime.client:get_session(session_id)
     end)

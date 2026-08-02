@@ -47,7 +47,7 @@ local function prepare_session(runtime, mode, path, opts)
       permission = sessions.permissions,
     })
     :next(function(created)
-      return sessions.revalidate(runtime, created.id, mode)
+      return sessions.revalidate(runtime, created.id, mode, true)
     end)
 end
 
@@ -65,7 +65,7 @@ end
 
 ---Dispatches one Plan or scoped Build through Session HTTP after target and dirty preflight.
 ---The Job is registered before prompt_async so immediate SSE cannot outrun local correlation state. Build stays editor-only,
----while Plan must attach the lazy tmux pane before selecting its transcript and sending the prompt.
+---while Plan dispatches first, then attaches or reuses the lazy tmux pane and selects its transcript without focusing it.
 ---@param text string
 ---@param context table
 ---@param opts? opencode.PromptOpts
@@ -125,6 +125,10 @@ function M.prompt(text, context, opts)
     end
     return prepare_session(runtime, mode, context.path, opts)
       :next(function(remote)
+        local dispatch_blocker = prompt_blocker(runtime)
+        if dispatch_blocker then
+          return Promise.reject({ error_class = dispatch_blocker })
+        end
         local session = runtime.sessions[remote.id]
           or { id = remote.id, root = runtime.root, short_id = remote.id:sub(-8), active_job_key = nil }
         session.title = remote.title
@@ -144,39 +148,41 @@ function M.prompt(text, context, opts)
         runtime.jobs[job.key] = job
         session.active_job_key = job.key
         session.activity = vim.uv.now()
-        local dispatch_blocker = prompt_blocker(runtime)
-        if dispatch_blocker then
-          require("opencode.job").transition(job, "error", { session = session })
-          return Promise.reject({ error_class = dispatch_blocker })
-        end
         runtime.selected_session_id = session.id
-        local tui_ready = Promise.resolve(nil)
-        if mode == "plan" then
-          local shown, show_error = runtime.sidebar:show()
-          if not shown or not runtime.sidebar:is_visible() then
-            return Promise.reject({ error_class = show_error or "tui_unavailable" })
-          end
-          tui_ready = runtime.sidebar:select_session(session.id)
+        local payload = {
+          messageID = job.user_message_id,
+          agent = mode,
+          parts = { { type = "text", text = rendered.plaintext } },
+        }
+        if mode == "build" then
+          payload.format = { type = "json_schema", schema = vim.deepcopy(require("opencode.proposal").schema) }
+          payload.parts[1].text = build_instruction(context, rendered, base, scope)
         end
-        return tui_ready
+        return runtime.client
+          :prompt_async(session.id, payload)
           :next(function()
-            local payload = {
-              messageID = job.user_message_id,
-              agent = mode,
-              parts = { { type = "text", text = rendered.plaintext } },
-            }
-            if mode == "build" then
-              payload.format = { type = "json_schema", schema = vim.deepcopy(require("opencode.proposal").schema) }
-              payload.parts[1].text = build_instruction(context, rendered, base, scope)
+            if job.cancelling or job.state == "cancelled" then
+              return Promise.reject({ error_class = "cancelled" })
             end
-            return runtime.client:prompt_async(session.id, payload):next(function()
+            if mode ~= "plan" then
+              return job
+            end
+            local shown, show_error = runtime.sidebar:show()
+            if not shown or not runtime.sidebar:is_visible() then
+              return Promise.reject({ error_class = show_error or "tui_unavailable" })
+            end
+            return runtime.sidebar:select_session(session.id):next(function()
+              if job.cancelling or job.state == "cancelled" then
+                return Promise.reject({ error_class = "cancelled" })
+              end
               return job
             end)
           end)
           :catch(function(err)
             job.error_class = type(err) == "table" and err.error_class or "prompt_http"
-            require("opencode.job").transition(job, "error", { session = session })
-            return Promise.reject(err)
+            return require("opencode.job").cancel(runtime, job.key):next(function()
+              return Promise.reject(err)
+            end)
           end)
       end)
       :catch(function(err)
