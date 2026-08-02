@@ -354,6 +354,75 @@ T["AC-MERGE-05 discards a stale changedtick result and merges fresh Ours"] = fun
   close_fixture(fixture, runtime, { job = job })
 end
 
+T["AC-MERGE-05 restarts a changed Runtime generation before applying"] = function()
+  local fixture = open_fixture("alpha\nbeta")
+  local base = assert(require("opencode.snapshot").capture(fixture.buf))
+  local scope = fragment_range(fixture.path, base.text, "beta")
+  local runtime, job = new_runtime_job(fixture, "merge_05_generation", scope, "alpha\nBETA")
+  local real_merge = require("opencode.merge")
+  local Promise = require("opencode.promise")
+  local calls = 0
+  package.loaded["opencode.merge"] = {
+    run = function()
+      calls = calls + 1
+      if calls == 1 then
+        runtime.generation = runtime.generation + 1
+      end
+      return Promise.resolve({ kind = "clean", text = job.theirs })
+    end,
+    cleanup = real_merge.cleanup,
+  }
+
+  require("opencode.apply").start(job, runtime)
+  wait_for_state(job, "completed")
+  package.loaded["opencode.merge"] = real_merge
+  eq(calls, 2)
+  eq(logical(fixture.buf), "alpha\nBETA")
+  close_fixture(fixture, runtime, { job = job })
+end
+
+T["AC-MERGE-05 bounds repeated stale source retries with a typed error"] = function()
+  local fixture = open_fixture("alpha\nbeta")
+  local base = assert(require("opencode.snapshot").capture(fixture.buf))
+  local scope = { kind = "file", path = fixture.path, start_byte = 0, end_byte = #base.text }
+  local runtime, job = new_runtime_job(fixture, "merge_05_bound", scope, "ALPHA\nbeta")
+  local real_merge = require("opencode.merge")
+  local Promise = require("opencode.promise")
+  local calls = 0
+  package.loaded["opencode.merge"] = {
+    run = function()
+      calls = calls + 1
+      vim.api.nvim_buf_set_text(fixture.buf, 0, 0, 0, 1, { string.char(96 + calls) })
+      return Promise.resolve({ kind = "clean", text = job.theirs })
+    end,
+    cleanup = real_merge.cleanup,
+  }
+
+  require("opencode.apply").start(job, runtime)
+  wait_for_state(job, "error")
+  package.loaded["opencode.merge"] = real_merge
+  eq({ calls, job.error_class }, { 4, "stale_source" })
+  eq(logical(fixture.buf) == job.theirs, false)
+  eq(select(1, require("opencode.snapshot").read_raw(fixture.path)), base.text)
+  close_fixture(fixture, runtime, { job = job })
+end
+
+T["AC-MERGE-05 rejects a valid but unloaded source buffer"] = function()
+  local fixture = open_fixture("alpha\nbeta")
+  local base = assert(require("opencode.snapshot").capture(fixture.buf))
+  local scope = fragment_range(fixture.path, base.text, "beta")
+  local runtime, job = new_runtime_job(fixture, "merge_05_unloaded", scope, "alpha\nBETA")
+  vim.cmd.enew()
+  vim.cmd("bunload! " .. fixture.buf)
+  eq({ vim.api.nvim_buf_is_valid(fixture.buf), vim.api.nvim_buf_is_loaded(fixture.buf) }, { true, false })
+
+  require("opencode.apply").start(job, runtime)
+  eq(job.state, "error")
+  eq(vim.api.nvim_buf_is_loaded(fixture.buf), false)
+  eq(select(1, require("opencode.snapshot").read_raw(fixture.path)), base.text)
+  close_fixture(fixture, runtime, { job = job })
+end
+
 T["AC-MERGE-06 offers exactly three conflict choices and preserves nonconflicting edits"] = function()
   local fixture = open_fixture("base-one\nbase-two\nbase-three\nbase-four")
   local base = assert(require("opencode.snapshot").capture(fixture.buf))
@@ -456,6 +525,38 @@ T["AC-MERGE-07 exposes manual diff buffers and supports cancel plus confirmed re
   vim.fn.delete(runtime.temp_root, "rf")
 end
 
+T["AC-MERGE-07 keeps manual conflict results inside the current scope"] = function()
+  local fixture = open_fixture("alpha\nbeta\ngamma")
+  local base = assert(require("opencode.snapshot").capture(fixture.buf))
+  local scope = fragment_range(fixture.path, base.text, "beta")
+  local runtime, job = new_runtime_job(fixture, "merge_07_scope", scope, "alpha\nBETA\ngamma")
+  require("opencode.job").transition(job, "conflict", {
+    session = runtime.sessions[job.session_id],
+    conflict_kind = "agent",
+    conflict_payload = { base = base, ours = base.text, theirs = job.theirs },
+  })
+  local callback_error
+
+  eq(
+    require("opencode.apply").manual(job, runtime, "ALPHA\nBETA\ngamma", function(_, err)
+      callback_error = err
+    end),
+    true
+  )
+  eq(
+    vim.wait(1000, function()
+      return callback_error ~= nil
+    end),
+    true
+  )
+  eq({ callback_error, job.state, logical(fixture.buf) }, { "scope_violation", "conflict", base.text })
+
+  eq(require("opencode.apply").manual(job, runtime, "alpha\nBETA\ngamma"), true)
+  wait_for_state(job, "completed")
+  eq(logical(fixture.buf), "alpha\nBETA\ngamma")
+  close_fixture(fixture, runtime, { job = job })
+end
+
 T["AC-MERGE-08 applies one minimal undoable span without writing or reloading"] = function()
   local fixture = open_fixture("one\ntwo\nthree")
   local base = assert(require("opencode.snapshot").capture(fixture.buf))
@@ -490,9 +591,12 @@ T["AC-MERGE-09 reports external disk change and blocks retry until reconciliatio
   local runtime, job = new_runtime_job(fixture, "merge_09", scope, "one\nTWO")
   local before = logical(fixture.buf)
   local old_select = vim.ui.select
-  local choices
-  vim.ui.select = function(items)
+  local choices, select_callback
+  local dialog_count = 0
+  vim.ui.select = function(items, _, callback)
+    dialog_count = dialog_count + 1
     choices = vim.deepcopy(items)
+    select_callback = callback
   end
   vim.fn.writefile({ "external", "disk" }, fixture.path)
   require("opencode.apply").start(job, runtime)
@@ -514,8 +618,17 @@ T["AC-MERGE-09 reports external disk change and blocks retry until reconciliatio
     end),
     true
   )
-  vim.ui.select = old_select
   eq(choices, { "open external diff", "retry apply", "cancel" })
+  select_callback("retry apply")
+  eq(
+    vim.wait(1000, function()
+      return dialog_count == 2
+    end),
+    true
+  )
+  vim.wait(20)
+  eq(dialog_count, 2)
+  vim.ui.select = old_select
   eq(logical(fixture.buf), before)
   require("opencode.job").transition(job, "cancelled", { session = runtime.sessions[job.session_id] })
   close_fixture(fixture, runtime, { job = job })
@@ -621,6 +734,45 @@ T["AC-MERGE-12 preserves EOL metadata and distinguishes empty trailing lines"] =
   eq(err.error_class, "invalid_structured_output")
   eq(logical(fixture.buf), base.text)
   close_fixture(fixture, runtime, { job = job })
+end
+
+T["AC-MERGE-12 completes partial private writes and removes every operand"] = function()
+  local merge = require("opencode.merge")
+  local directory = vim.fn.tempname()
+  local real_write = vim.uv.fs_write
+  local write_calls, result = 0, nil
+  vim.uv.fs_write = function(handle, text, offset)
+    write_calls = write_calls + 1
+    local length = math.max(1, math.floor(#text / 2))
+    return real_write(handle, text:sub(1, length), offset)
+  end
+  merge
+    .run("base contents", "ours contents", "theirs contents", {
+      temp_dir = directory,
+      owner_key = "partial-write",
+      runner = function(command, _, callback)
+        eq(select(1, require("opencode.snapshot").read_raw(command[#command - 2])), "ours contents")
+        eq(select(1, require("opencode.snapshot").read_raw(command[#command - 1])), "base contents")
+        eq(select(1, require("opencode.snapshot").read_raw(command[#command])), "theirs contents")
+        callback({ code = 0, signal = 0, stdout = "merged contents" })
+      end,
+    })
+    :next(function(value)
+      result = value
+    end)
+  vim.uv.fs_write = real_write
+
+  eq(
+    vim.wait(1000, function()
+      return result ~= nil
+    end),
+    true
+  )
+  eq(result, { kind = "clean", text = "merged contents" })
+  eq(write_calls > 3, true)
+  eq(vim.fn.glob(directory .. "/*", false, true), {})
+  eq(merge.active["partial-write"], nil)
+  vim.fn.delete(directory, "rf")
 end
 
 T["AC-JOB-03 applies two non-overlapping Jobs in either order without disk or worktree changes"] = function()

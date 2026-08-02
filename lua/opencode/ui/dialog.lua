@@ -18,16 +18,28 @@ local function close(request, state)
   require("opencode.interaction").complete_current(request.id)
 end
 
+---Schedules one fresh display of a still-current request.
+---Repeated failures and scratch-buffer close events share the pending marker so they cannot open duplicate dialogs.
+function M.reshow(request)
+  if request.state == "closed" or request.reshow_scheduled then
+    return false
+  end
+  request.reshow_scheduled = true
+  vim.schedule(function()
+    request.reshow_scheduled = nil
+    if request.state ~= "closed" then
+      M.show(request)
+    end
+  end)
+  return true
+end
+
 local function retry_visible(request, error_class)
   if request.state == "closed" then
     return
   end
   require("opencode.ui.notify").error(error_class or "interaction_failed")
-  vim.schedule(function()
-    if request.state ~= "closed" then
-      M.show(request)
-    end
-  end)
+  M.reshow(request)
 end
 
 local function submit(request, promise)
@@ -76,13 +88,9 @@ local function show_conflict(request)
       then
         return
       end
-      vim.schedule(function()
-        M.show(request)
-      end)
+      M.reshow(request)
     else
-      vim.schedule(function()
-        M.show(request)
-      end)
+      M.reshow(request)
     end
   end)
 end
