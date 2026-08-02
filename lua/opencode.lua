@@ -103,14 +103,32 @@ function M.prompt(text, opts)
   return flow
 end
 
----Cancels the selected Session's active Job without touching Jobs in another Session or root.
+---Cancels the current Runtime's only active Job or lets the user choose one when several are running.
+---The picker uses a stable Job key from one status snapshot, so cancellation never depends on Session selection.
 function M.cancel()
   local runtime = require("opencode.runtime").current()
-  local session = runtime and runtime.selected_session_id and runtime.sessions[runtime.selected_session_id]
-  if runtime and session and session.active_job_key then
-    return require("opencode.job").cancel(runtime, session.active_job_key)
+  if not runtime then
+    require("opencode.ui.notify").warn("no_active_job")
+    return
   end
-  require("opencode.ui.notify").warn("no_active_job")
+  local jobs = require("opencode.ui.status").jobs(runtime)
+  if #jobs == 0 then
+    require("opencode.ui.notify").warn("no_active_job")
+    return
+  end
+  if #jobs == 1 then
+    return require("opencode.job").cancel(runtime, jobs[1].key)
+  end
+  vim.ui.select(jobs, {
+    prompt = "Cancel OpenCode Job",
+    format_item = function(job)
+      return string.format("%s | %s | %s | %s", job.mode, job.file, job.state, job.job)
+    end,
+  }, function(job)
+    if job then
+      require("opencode.job").cancel(runtime, job.key)
+    end
+  end)
 end
 
 ---Cancels a stable snapshot of all active Jobs across owned Runtimes.
@@ -118,7 +136,8 @@ function M.cancel_all()
   return require("opencode.runtime").cancel_all()
 end
 
----Selects the F02 Runtime UI actions.
+---Selects one of the three recovery actions for the current Runtime.
+---Readiness and interaction guards run before the picker, while each action keeps its existing Runtime behavior.
 function M.select()
   local runtime = require("opencode.runtime").current()
   if not runtime or runtime.state == "stopping" or runtime.state == "stopped" then
@@ -130,42 +149,16 @@ function M.select()
     return
   end
   vim.ui.select({
-    "Ask Build",
-    "Ask Plan",
-    "New Build session",
-    "Sessions",
-    "Cancel current Job",
-    "Cancel all",
     "Retry TUI attach",
     "Restart runtime",
     "Show diagnostics",
-    "Toggle sidebar",
-    "Focus sidebar",
   }, { prompt = "OpenCode" }, function(choice)
-    if choice == "Ask Build" then
-      M.ask()
-    elseif choice == "Ask Plan" then
-      M.ask(nil, { mode = "plan" })
-    elseif choice == "New Build session" then
-      M.ask(nil, { mode = "build", new_session = true })
-    elseif choice == "Sessions" then
-      require("opencode.ui.select_session").show(runtime)
-    elseif choice == "Cancel current Job" then
-      M.cancel()
-    elseif choice == "Cancel all" then
-      M.cancel_all()
-    elseif choice == "Retry TUI attach" then
+    if choice == "Retry TUI attach" then
       runtime:retry_tui():catch(notify_error)
     elseif choice == "Restart runtime" then
       runtime:restart():catch(notify_error)
     elseif choice == "Show diagnostics" then
       require("opencode.ui.notify").diagnostics(runtime)
-    end
-    if choice == "Toggle sidebar" then
-      runtime.sidebar:toggle()
-    end
-    if choice == "Focus sidebar" then
-      runtime.sidebar:focus()
     end
   end)
 end

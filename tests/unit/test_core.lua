@@ -154,6 +154,7 @@ T["byte coordinates round trip only at UTF-8 boundaries"] = function()
   local text = "až\n中b"
   for _, offset in ipairs({ 0, 1, 3, 4, 7, 8 }) do
     local row, col = snapshot.offset_to_position(text, offset)
+    assert(type(row) == "number" and type(col) == "number")
     eq(snapshot.position_to_offset(text, row, col), offset)
   end
   eq(select(2, snapshot.offset_to_position(text, 2)), "mid_codepoint")
@@ -183,11 +184,11 @@ T["visual ranges are half-open and blockwise is rejected"] = function()
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "abc", "def" })
   local context =
     { buf = buf, path = "/r/a", cursor = { 1, 0 }, range = { from = { 1, 1 }, to = { 1, 1 }, kind = "char" } }
-  local scope = require("opencode.scope").resolve(context, { text = "abc\ndef" })
+  local scope = assert(require("opencode.scope").resolve(context, { text = "abc\ndef" }))
   eq({ scope.start_byte, scope.end_byte }, { 1, 2 })
   context.range.kind = "line"
   context.range.from, context.range.to = { 1, 0 }, { 1, 2 }
-  scope = require("opencode.scope").resolve(context, { text = "abc\ndef" })
+  scope = assert(require("opencode.scope").resolve(context, { text = "abc\ndef" }))
   eq({ scope.start_byte, scope.end_byte }, { 0, 4 })
   context.range.kind = "block"
   eq(select(2, require("opencode.scope").resolve(context, { text = "abc\ndef" })), "blockwise_selection")
@@ -216,7 +217,7 @@ T["proposal schema and identity construct exact Theirs"] = function()
     replacement = "TWO",
     summary = "change",
   }
-  local validated = require("opencode.proposal").validate(value, job)
+  local validated = assert(require("opencode.proposal").validate(value, job))
   eq(require("opencode.proposal").schema.properties.version.type, "integer")
   eq(validated.theirs, "one\nTWO\nthree")
   value.scope.end_byte = 8
@@ -433,6 +434,10 @@ T["cancel one is local and isolated even when abort fails"] = function()
   runtime.sessions.ses_a = { id = "ses_a", active_job_key = a.key }
   runtime.sessions.ses_b = { id = "ses_b", active_job_key = b.key }
   runtime.jobs[a.key], runtime.jobs[b.key] = a, b
+  local reconciliations = 0
+  runtime.begin_reconciliation = function()
+    reconciliations = reconciliations + 1
+  end
   local report
   require("opencode.job").cancel(runtime, a.key):next(function(value)
     report = value
@@ -445,7 +450,21 @@ T["cancel one is local and isolated even when abort fails"] = function()
   )
   eq({ a.state, b.state, report.cancelled, report.errors }, { "cancelled", "running", 1, 1 })
   eq(runtime.sessions.ses_a.active_job_key, nil)
+  eq({ runtime.sessions.ses_a.remote_status, runtime.sessions.ses_a.availability }, { "busy", "blocked" })
   eq(runtime.sessions.ses_b.active_job_key, b.key)
+  eq(reconciliations, 1)
+end
+
+T["blocked Session idle event retriggers reconciliation"] = function()
+  local runtime = require("opencode.runtime").new("/root")
+  runtime.sessions.ses_blocked = { id = "ses_blocked", availability = "blocked" }
+  local reconciliations = 0
+  runtime.begin_reconciliation = function()
+    reconciliations = reconciliations + 1
+  end
+  runtime:route_event({ type = "session.idle", properties = { sessionID = "ses_blocked" } })
+  eq(reconciliations, 1)
+  eq({ runtime.sessions.ses_blocked.remote_status, runtime.sessions.ses_blocked.availability }, { "idle", "reusable" })
 end
 
 return T

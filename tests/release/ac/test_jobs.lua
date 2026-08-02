@@ -1,3 +1,5 @@
+---@diagnostic disable: duplicate-set-field, need-check-nil
+
 local T = MiniTest.new_set()
 local eq = MiniTest.expect.equality
 
@@ -23,7 +25,7 @@ local function fake_client(methods)
 end
 
 ---Creates a ready Runtime with a small observable sidebar double.
----The fake exposes only the visibility and focus effects used by interaction and Session selection paths.
+---The fake exposes only the visibility and focus effects used by interaction and internal transcript selection paths.
 ---Keeping the Runtime registered makes callbacks that carry a root identity use the same public lookup as production.
 local function runtime_fixture(root, client)
   local sidebar = {
@@ -36,20 +38,31 @@ local function runtime_fixture(root, client)
   function sidebar:is_visible()
     return self.visible
   end
+  ---Reports a visible pane and records the current transcript for internal selection tests.
+  ---The true result matches the real sidebar boundary so Session selection can continue to the endpoint call.
   function sidebar:show()
     self.visible = true
     self.show_calls = self.show_calls + 1
     if self.runtime then
       self.transcript_session = self.runtime.selected_session_id
     end
+    return true
   end
   function sidebar:hide()
     self.visible = false
     self.hide_calls = self.hide_calls + 1
   end
+  ---Shows the fixture pane for the supplied Runtime and preserves the selected transcript metadata.
+  ---Returning the delegated result matches the recovery path's visible-pane check without starting tmux.
   function sidebar:show_root(runtime)
     self.transcript_session = runtime.selected_session_id
-    self:show()
+    return self:show()
+  end
+  ---Records an internal transcript switch and sends only its Session ID through the fake client.
+  ---The fixture keeps this endpoint separate from the removed public Session picker.
+  function sidebar:select_session(session_id)
+    self.transcript_session = session_id
+    return self.runtime.client:select_session(session_id)
   end
 
   local runtime = Runtime.new(root)
@@ -117,6 +130,50 @@ local function fake_dialog()
   end
 end
 
+---Temporarily replaces notification rendering with a warning recorder for public command tests.
+---The returned restore callback puts the previously loaded notification module back after the assertion.
+---@return table warnings
+---@return function restore
+local function fake_notifications()
+  local old = package.loaded["opencode.ui.notify"]
+  local warnings = {}
+  package.loaded["opencode.ui.notify"] = {
+    warn = function(value)
+      table.insert(warnings, value)
+    end,
+  }
+  return warnings, function()
+    package.loaded["opencode.ui.notify"] = old
+  end
+end
+
+---Adds one status-visible Job and its active Session pointer to a Runtime fixture.
+---The values stay explicit so public cancel tests can inspect the exact picker metadata and cancellation target.
+---@param runtime table
+---@param spec table
+---@return table
+local function public_job(runtime, spec)
+  local job = vim.tbl_extend("force", {
+    root = runtime.root,
+    session_id = spec.session_id,
+    user_message_id = spec.key,
+    state = "running",
+    mode = "build",
+    path = runtime.root .. "/" .. spec.key .. ".lua",
+  }, spec)
+  runtime.jobs[job.key] = job
+  runtime.sessions[job.session_id] = { id = job.session_id, active_job_key = job.key }
+  return job
+end
+
+---Makes a Runtime fixture current through the real root-selection boundary used by public commands.
+---The setup counter is reset afterward so public cancel assertions observe only their own UI work.
+---@param runtime table
+local function activate_runtime(runtime)
+  Runtime.show_root(runtime.root)
+  runtime.sidebar.show_calls = 0
+end
+
 T["AC-JOB-01 active Session rejects follow-up instead of queueing a Job"] = function()
   local prompt = require("opencode.api.prompt")
   local root = "/acceptance/job-01"
@@ -155,45 +212,19 @@ T["AC-JOB-01 active Session rejects follow-up instead of queueing a Job"] = func
   clear_fixture(runtime)
 end
 
-T["AC-JOB-02 picker switches the exact transcript without cross-Session events"] = function()
+T["AC-JOB-02 internal transcript selection preserves exact event ownership"] = function()
   local sessions = require("opencode.session")
-  local select_session = require("opencode.ui.select_session")
   local events = require("opencode.events")
   local root = "/acceptance/job-02"
   local client = fake_client({
-    list_sessions = {
-      { id = "ses_first", directory = root, metadata = sessions.metadata(vim.fn.sha256(root)) },
-      { id = "ses_second", directory = root, metadata = sessions.metadata(vim.fn.sha256(root)) },
-    },
-    session_status = { ses_first = "idle", ses_second = "idle" },
-    get_session = function(_, id)
-      return Promise.resolve({
-        id = id,
-        directory = root,
-        title = id == "ses_first" and "First transcript" or "Second transcript",
-        metadata = sessions.metadata(vim.fn.sha256(root)),
-      })
-    end,
     select_session = function(_, id)
       return Promise.resolve({ selected = id })
     end,
   })
   local runtime = runtime_fixture(root, client)
-  local old_select = vim.ui.select
-  local picker_items
-  vim.ui.select = function(items, _, callback)
-    picker_items = items
-    callback(items[2])
-  end
-
-  select_session.show(runtime)
-  eq(
-    vim.wait(1000, function()
-      return runtime.selected_session_id == "ses_second"
-    end),
-    true
-  )
-  eq(#picker_items, 2)
+  runtime.sessions.ses_first, runtime.sessions.ses_second = { id = "ses_first" }, { id = "ses_second" }
+  local selected, selection_error = settle(sessions.select(runtime, "ses_second"))
+  eq({ selected, selection_error }, { runtime.sessions.ses_second, nil })
   eq(runtime.selected_session_id, "ses_second")
   eq(runtime.sidebar.transcript_session, "ses_second")
   eq(client.calls[#client.calls].name, "select_session")
@@ -227,46 +258,6 @@ T["AC-JOB-02 picker switches the exact transcript without cross-Session events"]
   eq(second_job.assistant_message_ids.assistant_first, nil)
   eq(runtime.selected_session_id, "ses_second")
 
-  vim.ui.select = old_select
-  clear_fixture(runtime)
-end
-
-T["session picker reports a failed TUI selection instead of swallowing it"] = function()
-  local sessions = require("opencode.session")
-  local root = "/acceptance/job-02-select-failure"
-  local metadata = sessions.metadata(vim.fn.sha256(root))
-  local client = fake_client({
-    list_sessions = { { id = "ses_select_failure", directory = root, metadata = metadata } },
-    session_status = { ses_select_failure = "idle" },
-    get_session = {
-      id = "ses_select_failure",
-      directory = root,
-      title = "Selection failure",
-      metadata = metadata,
-    },
-    select_session = function()
-      return Promise.reject({ error_class = "http" })
-    end,
-  })
-  local runtime = runtime_fixture(root, client)
-  local old_select, old_notify = vim.ui.select, vim.notify
-  local notifications = {}
-  vim.notify = function(message)
-    table.insert(notifications, message)
-  end
-  vim.ui.select = function(items, _, callback)
-    callback(items[1])
-  end
-  require("opencode.ui.select_session").show(runtime)
-  eq(
-    vim.wait(500, function()
-      return #notifications > 0
-    end),
-    true
-  )
-  eq(notifications[1]:find("session_select", 1, true) ~= nil, true)
-  eq(runtime.selected_session_id, nil)
-  vim.ui.select, vim.notify = old_select, old_notify
   clear_fixture(runtime)
 end
 
@@ -317,6 +308,7 @@ T["AC-JOB-04 cancel removes one Job locally while the other continues"] = functi
   eq(report.cancelled, 1)
   eq({ a.state, b.state }, { "cancelled", "running" })
   eq({ runtime.sessions.ses_a.active_job_key, runtime.sessions.ses_b.active_job_key }, { nil, b.key })
+  eq({ runtime.sessions.ses_a.remote_status, runtime.sessions.ses_a.availability }, { "idle", "reusable" })
   eq({ a.proposal, a.marks }, { nil, nil })
   eq(interaction.current and interaction.current.job_key, b.key)
   eq(interaction.queue, {})
@@ -325,6 +317,176 @@ T["AC-JOB-04 cancel removes one Job locally while the other continues"] = functi
 
   restore_dialog()
   vim.api.nvim_buf_delete(buf, { force = true })
+  clear_fixture(runtime)
+end
+
+T["public cancel warns when no active Jobs remain, including terminal Jobs"] = function()
+  local opencode = require("opencode")
+  local root = "/acceptance/public-cancel-none"
+  local client = fake_client()
+  local runtime = runtime_fixture(root, client)
+  activate_runtime(runtime)
+  public_job(runtime, {
+    key = "job_done",
+    session_id = "ses_done",
+    user_message_id = "msg_DONE000",
+    state = "completed",
+  })
+  local warnings, restore_notifications = fake_notifications()
+
+  opencode.cancel()
+
+  restore_notifications()
+  eq(warnings, { "no_active_job" })
+  eq(client.calls, {})
+  clear_fixture(runtime)
+end
+
+T["concurrent cancellation callers share one remote abort"] = function()
+  local jobs = require("opencode.job")
+  local release_abort
+  local client = fake_client({
+    abort = function()
+      return Promise.new(function(resolve)
+        release_abort = resolve
+      end)
+    end,
+  })
+  local runtime = runtime_fixture("/acceptance/cancel-shared", client)
+  local job = { key = "job_shared", root = runtime.root, session_id = "ses_shared", state = "running", mode = "plan" }
+  runtime.jobs[job.key] = job
+  runtime.sessions.ses_shared = { id = "ses_shared", active_job_key = job.key, remote_status = "busy" }
+
+  local first = jobs.cancel(runtime, job.key)
+  local second = jobs.cancel(runtime, job.key)
+  eq(first, second)
+  eq(#client.calls, 1)
+  assert(release_abort)({})
+  eq(settle(first), { cancelled = 1, errors = 0 })
+  eq({ runtime.sessions.ses_shared.remote_status, runtime.sessions.ses_shared.availability }, { "idle", "reusable" })
+
+  clear_fixture(runtime)
+end
+
+T["public cancel cancels one active Job immediately without opening a picker"] = function()
+  local opencode = require("opencode")
+  local root = "/acceptance/public-cancel-one"
+  local client = fake_client({
+    abort = function(_, session_id)
+      return Promise.resolve({ aborted = session_id })
+    end,
+  })
+  local runtime = runtime_fixture(root, client)
+  activate_runtime(runtime)
+  local job = public_job(runtime, {
+    key = "job_only",
+    session_id = "ses_only",
+    user_message_id = "msg_ONLY000",
+  })
+  local old_select = vim.ui.select
+  local picker_calls = 0
+  vim.ui.select = function()
+    picker_calls = picker_calls + 1
+  end
+
+  local report = assert(settle(opencode.cancel()), "cancel report missing")
+
+  vim.ui.select = old_select
+  eq(picker_calls, 0)
+  eq(report, { cancelled = 1, errors = 0 })
+  eq(job.state, "cancelled")
+  eq({ runtime.sessions.ses_only.remote_status, runtime.sessions.ses_only.availability }, { "idle", "reusable" })
+  eq(client.calls[1].args, { "ses_only" })
+  clear_fixture(runtime)
+end
+
+T["public cancel offers only active Jobs with complete rows and cancels the selected Job"] = function()
+  local opencode = require("opencode")
+  local root = "/acceptance/public-cancel-many"
+  local client = fake_client({
+    abort = function(_, session_id)
+      return Promise.resolve({ aborted = session_id })
+    end,
+  })
+  local runtime = runtime_fixture(root, client)
+  activate_runtime(runtime)
+  local first = public_job(runtime, {
+    key = "job_first",
+    session_id = "ses_first",
+    user_message_id = "msg_12345678",
+    mode = "plan",
+    path = root .. "/first.lua",
+    state = "running",
+  })
+  local second = public_job(runtime, {
+    key = "job_second",
+    session_id = "ses_second",
+    user_message_id = "msg_ABCDEFGH",
+    mode = "build",
+    path = root .. "/second.lua",
+    state = "pending_apply",
+  })
+  public_job(runtime, {
+    key = "job_terminal",
+    session_id = "ses_terminal",
+    user_message_id = "msg_TERMINAL",
+    state = "completed",
+  })
+  local old_select = vim.ui.select
+  local offered, options, picker_calls = nil, nil, 0
+  vim.ui.select = function(items, opts, callback)
+    picker_calls = picker_calls + 1
+    offered, options = items, opts
+    callback(items[2])
+  end
+
+  opencode.cancel()
+
+  vim.ui.select = old_select
+  local items = assert(offered, "cancel picker items missing")
+  local picker_options = assert(options, "cancel picker options missing")
+  local format_item = assert(picker_options.format_item, "cancel picker formatter missing")
+  local rows = {}
+  for _, item in ipairs(items) do
+    table.insert(rows, format_item(item))
+  end
+  eq(picker_calls, 1)
+  eq(rows, {
+    "plan | first.lua | running | 12345678",
+    "build | second.lua | pending_apply | ABCDEFGH",
+  })
+  eq(first.state, "running")
+  eq(second.state, "cancelled")
+  eq(client.calls[1].args, { "ses_second" })
+  eq(#client.calls, 1)
+  clear_fixture(runtime)
+end
+
+T["public cancel does nothing when the active Job picker is cancelled"] = function()
+  local opencode = require("opencode")
+  local root = "/acceptance/public-cancel-picker-cancel"
+  local client = fake_client({
+    abort = function(_, session_id)
+      return Promise.resolve({ aborted = session_id })
+    end,
+  })
+  local runtime = runtime_fixture(root, client)
+  activate_runtime(runtime)
+  local first = public_job(runtime, { key = "job_first", session_id = "ses_first" })
+  local second = public_job(runtime, { key = "job_second", session_id = "ses_second" })
+  local old_select = vim.ui.select
+  local picker_calls = 0
+  vim.ui.select = function(_, _, callback)
+    picker_calls = picker_calls + 1
+    callback(nil)
+  end
+
+  opencode.cancel()
+
+  vim.ui.select = old_select
+  eq(picker_calls, 1)
+  eq({ first.state, second.state }, { "running", "running" })
+  eq(client.calls, {})
   clear_fixture(runtime)
 end
 
@@ -343,6 +505,10 @@ T["AC-JOB-05 cancel all snapshots every Runtime despite one abort failure"] = fu
     end,
   })
   local runtime_a, runtime_b = runtime_fixture(root_a, client_a), runtime_fixture(root_b, client_b)
+  local reconciliations = 0
+  runtime_a.begin_reconciliation = function()
+    reconciliations = reconciliations + 1
+  end
   local a = { key = "job_a", root = root_a, session_id = "ses_a", state = "running", proposal = { value = "a" } }
   local b = { key = "job_b", root = root_b, session_id = "ses_b", state = "pending_apply", proposal = { value = "b" } }
   runtime_a.jobs[a.key], runtime_b.jobs[b.key] = a, b
@@ -354,6 +520,9 @@ T["AC-JOB-05 cancel all snapshots every Runtime despite one abort failure"] = fu
   eq({ a.state, b.state }, { "cancelled", "cancelled" })
   eq({ a.proposal, b.proposal }, { nil, nil })
   eq({ runtime_a.sessions.ses_a.active_job_key, runtime_b.sessions.ses_b.active_job_key }, { nil, nil })
+  eq({ runtime_a.sessions.ses_a.remote_status, runtime_a.sessions.ses_a.availability }, { "busy", "blocked" })
+  eq({ runtime_b.sessions.ses_b.remote_status, runtime_b.sessions.ses_b.availability }, { "idle", "reusable" })
+  eq(reconciliations, 1)
   eq(#client_a.calls, 1)
   eq(#client_b.calls, 1)
 
@@ -361,9 +530,8 @@ T["AC-JOB-05 cancel all snapshots every Runtime despite one abort failure"] = fu
   clear_fixture(runtime_b)
 end
 
-T["AC-JOB-06 picker retains only owned Sessions and revalidates before reuse"] = function()
+T["AC-JOB-06 internal inventory retains only owned Sessions and revalidates reuse"] = function()
   local sessions = require("opencode.session")
-  local select_session = require("opencode.ui.select_session")
   local root = "/acceptance/job-06"
   local root_hash = vim.fn.sha256(root)
   local owned_metadata = sessions.metadata(root_hash)
@@ -386,26 +554,13 @@ T["AC-JOB-06 picker retains only owned Sessions and revalidates before reuse"] =
     update_session = function(_, id, body)
       return Promise.resolve({ id = id, body = body })
     end,
-    select_session = function(_, id)
-      return Promise.resolve({ id = id })
-    end,
   })
   local runtime = runtime_fixture(root, client)
-  local old_select = vim.ui.select
-  local offered
-  vim.ui.select = function(items, _, callback)
-    offered = items
-    callback(items[1])
-  end
-  select_session.show(runtime)
-  eq(
-    vim.wait(1000, function()
-      return runtime.selected_session_id == "ses_owned"
-    end),
-    true
-  )
-  eq(#offered, 1)
-  eq(offered[1].id, "ses_owned")
+  local inventory, inventory_error = settle(sessions.inventory(runtime))
+  eq(inventory_error, nil)
+  eq(#inventory, 1)
+  eq(inventory[1].id, "ses_owned")
+  eq(runtime.sessions.ses_owned.id, "ses_owned")
 
   local detail, error = settle(sessions.revalidate(runtime, "ses_owned", "build"))
   eq(error, nil)
@@ -423,7 +578,6 @@ T["AC-JOB-06 picker retains only owned Sessions and revalidates before reuse"] =
   )
   eq(update.args[2].permission, sessions.permissions)
 
-  vim.ui.select = old_select
   clear_fixture(runtime)
 end
 
@@ -881,7 +1035,7 @@ T["AC-INT-03 dialogs remain FIFO while waiting Jobs and conflicts keep their sta
   events.route(runtime, { type = "question.rejected", properties = { sessionID = "ses_question", requestID = "q" } })
   eq(
     vim.wait(1000, function()
-      return interaction.current and interaction.current.job_key == permission.key
+      return interaction.current ~= nil and interaction.current.job_key == permission.key
     end),
     true
   )
@@ -894,14 +1048,14 @@ T["AC-INT-03 dialogs remain FIFO while waiting Jobs and conflicts keep their sta
   )
   eq(
     vim.wait(1000, function()
-      return interaction.current and interaction.current.job_key == conflict.key and conflict_callback ~= nil
+      return interaction.current ~= nil and interaction.current.job_key == conflict.key and conflict_callback ~= nil
     end),
     true
   )
   eq(replies[2], { name = "permission_reply", id = "p", response = "reject" })
   eq(interaction.current.job_key, conflict.key)
   eq(interaction.queue, {})
-  conflict_callback(nil)
+  assert(conflict_callback)(nil)
   eq(conflict.state, "cancelled")
   eq(interaction.current, nil)
   vim.ui.select = old_select

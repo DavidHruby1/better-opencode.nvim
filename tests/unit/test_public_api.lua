@@ -1,3 +1,5 @@
+---@diagnostic disable: duplicate-set-field
+
 local T = MiniTest.new_set()
 local eq = MiniTest.expect.equality
 local Promise = require("opencode.promise")
@@ -73,8 +75,8 @@ T["public ask dispatches explicit Plan and default Build modes"] = function()
       end,
     },
   }, function()
-    local plan = opencode.ask(nil, { mode = "plan" })
-    local build = opencode.ask()
+    local plan = assert(opencode.ask(nil, { mode = "plan" }))
+    local build = assert(opencode.ask())
     eq(type(plan.next), "function")
     eq(type(build.next), "function")
   end)
@@ -88,6 +90,57 @@ T["public ask dispatches explicit Plan and default Build modes"] = function()
   eq(prompt_calls[2].opts, nil)
 end
 
+T["public select exposes only recovery actions and dispatches the chosen action"] = function()
+  local opencode = require("opencode")
+  local actions, diagnostics_runtime, menus = {}, nil, {}
+  local runtime = {
+    state = "ready",
+    interaction_locked = false,
+    retry_tui = function(self)
+      table.insert(actions, "retry_tui")
+      return Promise.resolve(self)
+    end,
+    restart = function(self)
+      table.insert(actions, "restart")
+      return Promise.resolve(self)
+    end,
+  }
+  local choices = { "Retry TUI attach", "Restart runtime", "Show diagnostics" }
+  local original_select = vim.ui.select
+  local ok, failure = xpcall(function()
+    with_modules({
+      ["opencode.runtime"] = {
+        current = function()
+          return runtime
+        end,
+      },
+      ["opencode.ui.notify"] = {
+        diagnostics = function(value)
+          diagnostics_runtime = value
+        end,
+      },
+    }, function()
+      for _, choice in ipairs(choices) do
+        vim.ui.select = function(items, opts, callback)
+          table.insert(menus, { items = vim.deepcopy(items), prompt = opts.prompt })
+          callback(choice)
+        end
+        opencode.select()
+      end
+    end)
+  end, debug.traceback)
+  vim.ui.select = original_select
+  assert(ok, failure)
+
+  eq(#menus, #choices)
+  for _, menu in ipairs(menus) do
+    eq(menu.items, choices)
+    eq(menu.prompt, "OpenCode")
+  end
+  eq(actions, { "retry_tui", "restart" })
+  eq(diagnostics_runtime, runtime)
+end
+
 T["operator rejects an invalid mode before installing an operator"] = function()
   local opencode = require("opencode")
   local original_notify = vim.notify
@@ -96,10 +149,11 @@ T["operator rejects an invalid mode before installing an operator"] = function()
   vim.notify = function(value)
     message = value
   end
+  ---@diagnostic disable-next-line: assign-type-mismatch
   local result = opencode.operator("ignored", { mode = "review" })
   vim.notify = original_notify
   eq(result, "")
-  eq(message:find("mode_unavailable", 1, true) ~= nil, true)
+  eq(assert(message):find("mode_unavailable", 1, true) ~= nil, true)
   eq(vim.o.operatorfunc, original_operator)
 end
 

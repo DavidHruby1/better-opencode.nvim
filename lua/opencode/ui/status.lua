@@ -58,8 +58,8 @@ local function job_kind(job)
 end
 
 ---Builds one immutable, privacy-safe view of Runtime status for foreground and background UI.
----The registry and Job tables are read once, copied into plain metadata, and never changed; callers can
----render this value without HTTP, window operations, transcript selection, or another generation read.
+---The registry and Job tables are read once, copied into plain metadata, and never changed; Job rows include
+---their cancellation key, mode, file name, state, and short ID without HTTP or transcript selection.
 ---@param runtime table
 ---@return table
 function M.snapshot(runtime)
@@ -115,6 +115,7 @@ function M.snapshot(runtime)
       session = session_short_id or short_id(job.session_id, 8),
       job = short_id(job.user_message_id or key, 8),
       mode = job.mode or "unknown",
+      file = job.path and vim.fs.basename(job.path) or "unknown",
       state = job.state or "unknown",
       kind = job_kind(job),
     }
@@ -131,7 +132,8 @@ function M.snapshot(runtime)
   return snapshot
 end
 
----Returns every active Job without consulting or changing transcript selection.
+---Returns every active Job with its exact cancellation key and display metadata without changing transcript selection.
+---The rows come from one Runtime snapshot, and terminal Jobs are excluded before callers receive them.
 ---@param runtime table
 ---@return table[]
 function M.jobs(runtime)
@@ -140,9 +142,11 @@ function M.jobs(runtime)
     if not require("opencode.job").terminal(job.state) then
       table.insert(rows, {
         root = vim.fs.basename(runtime.root),
+        key = job.key,
         session = job.session,
         job = job.job,
         mode = job.mode,
+        file = job.file,
         state = job.state,
         kind = job.kind,
       })

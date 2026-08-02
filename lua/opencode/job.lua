@@ -143,16 +143,22 @@ function M.transition(job, state, attrs)
   return true
 end
 
----Cancels one Job locally before making a best-effort remote abort request.
----Owned marks, proposal, merge files, callbacks, and dialogs are removed by their behavior homes.
----The early cancelling guard makes every later event or apply callback a no-op even when abort fails.
+---Cancels one Job locally before making one remote abort request shared by every caller.
+---Owned marks, proposal, merge files, callbacks, and dialogs are removed by their behavior homes. A successful abort
+---releases the Session; a failed abort blocks reuse and starts reconciliation because remote work may still be running.
 ---@param runtime table
 ---@param key string
 ---@return Promise<table>
 function M.cancel(runtime, key)
   local Promise = require("opencode.promise")
   local job = runtime.jobs[key]
-  if not job or M.terminal(job.state) or job.cancelling then
+  if not job then
+    return Promise.resolve({ cancelled = 0, errors = 0 })
+  end
+  if job.cancel_promise then
+    return job.cancel_promise
+  end
+  if M.terminal(job.state) then
     return Promise.resolve({ cancelled = 0, errors = 0 })
   end
   job.cancelling = true
@@ -164,18 +170,37 @@ function M.cancel(runtime, key)
     merge.cleanup(job.merge_key or job.key)
   end
   M.transition(job, "cancelled", { session = session })
-  if not runtime.client or job.remote_idle then
-    return Promise.resolve({ cancelled = 1, errors = 0 })
+  local function report(errors)
+    if session then
+      if errors == 0 then
+        session.remote_status = "idle"
+        session.availability = "reusable"
+        session.availability_reason = nil
+      else
+        session.remote_status = "busy"
+        session.availability, session.availability_reason =
+          require("opencode.session").availability(runtime, session, session.remote_status)
+        if runtime.begin_reconciliation then
+          runtime:begin_reconciliation()
+        end
+      end
+    end
+    return { cancelled = 1, errors = errors }
   end
-  return runtime.client
+  if not runtime.client or job.remote_idle then
+    job.cancel_promise = Promise.resolve(report(0))
+    return job.cancel_promise
+  end
+  job.cancel_promise = runtime.client
     :abort(job.session_id)
     :next(function()
-      return { cancelled = 1, errors = 0 }
+      return Promise.resolve(report(0))
     end)
     :catch(function(err)
       job.cancel_error_class = type(err) == "table" and err.error_class or "abort"
-      return { cancelled = 1, errors = 1 }
+      return Promise.resolve(report(1))
     end)
+  return job.cancel_promise
 end
 
 ---Cancels a snapshot of every nonterminal Job in one Runtime.
@@ -199,7 +224,7 @@ function M.cancel_all(runtime)
       report.cancelled = report.cancelled + result.cancelled
       report.errors = report.errors + result.errors
     end
-    return report
+    return require("opencode.promise").resolve(report)
   end)
 end
 
