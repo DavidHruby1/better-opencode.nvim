@@ -83,6 +83,7 @@ function Context.new(capture, runtime)
     root = runtime.root,
     runtime = runtime,
     referenced_buffers = {},
+    provider_referenced_buffers = {},
   }, Context)
 end
 
@@ -165,15 +166,16 @@ function Context:input(prompt)
   return setmetatable(input_segments(prompt, context_keys()), Rendered)
 end
 
----Expands configured placeholders and prepends the active location exactly once.
----Input keeps cheap placeholder segments for multiline highlights while output calls providers and records referenced buffers for dirty preflight.
+---Expands configured placeholders once and records only references from that result.
+---References attached before rendering remain explicit inputs, while stale provider references from an earlier pass are removed.
 ---@param prompt string
----@return { input: table, output: table, plaintext: string }
-function Context:render(prompt)
+---@param explicit table<integer, boolean>
+---@return string
+function Context:_expand(prompt, explicit)
+  self.referenced_buffers = vim.deepcopy(explicit)
   local contexts = require("opencode.config").opts.contexts
-  local keys = context_keys()
   local output = prompt
-  for _, key in ipairs(keys) do
+  for _, key in ipairs(context_keys()) do
     if output:find(key, 1, true) then
       local value = contexts[key](self) or key
       output = output:gsub(vim.pesc(key), function()
@@ -184,6 +186,61 @@ function Context:render(prompt)
   local location = require("opencode.context.builtins").this(self)
   if not output:find(location, 1, true) then
     output = location .. "\n\n" .. output
+  end
+  return output
+end
+
+---Expands placeholder documentation without saving files or retaining provider references.
+---Completion previews may call providers for useful text, but they must not turn browsing a completion menu into a write.
+---@param prompt string
+---@return { input: table, output: table, plaintext: string }
+function Context:preview(prompt)
+  local references = self.referenced_buffers
+  local output = self:_expand(prompt, references)
+  self.referenced_buffers = references
+  local Rendered = require("opencode.context.rendered")
+  return {
+    input = self:input(prompt),
+    output = setmetatable({ { output } }, Rendered),
+    plaintext = output,
+  }
+end
+
+---Expands placeholders against the final post-save editor state and prepends the active location exactly once.
+---Providers run before each save pass. After write hooks, expansion repeats until no referenced buffer is dirty and both the
+---rendered text and reference set are stable; failure to settle rejects dispatch instead of capturing a stale Base.
+---Input keeps cheap placeholder segments for multiline highlights without running providers.
+---@param prompt string
+---@return { input: table, output: table, plaintext: string }
+function Context:render(prompt)
+  local explicit = {}
+  for buf in pairs(self.referenced_buffers) do
+    if not self.provider_referenced_buffers[buf] then
+      explicit[buf] = true
+    end
+  end
+  local output
+  local settled = false
+  for _ = 1, 8 do
+    output = self:_expand(prompt, explicit)
+    local ok, err, wrote = require("opencode.context.preflight").save(self)
+    if not ok then
+      error({ error_class = err })
+    end
+    if not wrote then
+      settled = true
+      break
+    end
+  end
+  if not settled then
+    error({ error_class = "write_failed" })
+  end
+  output = assert(output)
+  self.provider_referenced_buffers = {}
+  for buf in pairs(self.referenced_buffers) do
+    if not explicit[buf] then
+      self.provider_referenced_buffers[buf] = true
+    end
   end
   local Rendered = require("opencode.context.rendered")
   return {

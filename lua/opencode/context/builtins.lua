@@ -12,7 +12,9 @@ function M.this(context)
   if context.range then
     local from = { context.range.from[1] }
     local to = { context.range.to[1] }
-    if context.range.kind ~= "line" then
+    if context.range.kind == "bytes" then
+      from[2], to[2] = context.range.from[2] + 1, context.range.to[2]
+    elseif context.range.kind ~= "line" then
       from[2], to[2] = context.range.from[2] + 1, context.range.to[2] + 1
     end
     return context.format({ buf = context.buf, from = from, to = to, rel = context.root })
