@@ -56,7 +56,6 @@ local safe_classes = {
   session_active = true,
   session_busy = true,
   session_inventory = true,
-  session_select = true,
   session_verification = true,
   sse_disconnected = true,
   sse_spawn = true,
@@ -66,9 +65,6 @@ local safe_classes = {
   startup_timeout = true,
   timeout = true,
   transport_closed = true,
-  tui_attach = true,
-  tui_identity = true,
-  tui_unavailable = true,
   unknown_session = true,
   unknown_session_status = true,
   unsupported_version = true,
@@ -76,14 +72,13 @@ local safe_classes = {
 }
 
 local actionable_messages = {
-  agent_unavailable = "agent_unavailable: OpenCode must provide both primary build and plan agents",
+  agent_unavailable = "agent_unavailable: OpenCode must provide the primary build agent",
   config_parse = "config_parse: OpenCode config could not be parsed; fix it or use a clean config (see docs/RECOVERY.md)",
   custom_tool = "custom_tool: custom OpenCode tools are blocked; use a clean config (see docs/RECOVERY.md)",
   decode = "decode: OpenCode returned an invalid response; restart the owned runtime (see docs/RECOVERY.md)",
   disk_read = "disk_read: the source file could not be read; check its permissions and try again",
   disconnected = "disconnected: the owned OpenCode runtime is disconnected; restart it and retry",
   reconciliation_failed = "reconciliation_failed: OpenCode state could not be verified; retry reconciliation or restart the runtime",
-  tui_unavailable = "tui_unavailable: the OpenCode sidebar attach failed; retry the attach or restart the runtime",
   http = "http: OpenCode request failed; retry or run :checkhealth opencode (see docs/RECOVERY.md)",
   server_spawn = "server_spawn: owned OpenCode startup failed; check runtime.binary and run :checkhealth opencode (see docs/RECOVERY.md)",
   startup_timeout = "startup_timeout: owned OpenCode startup timed out; run :checkhealth opencode (see docs/RECOVERY.md)",
@@ -91,17 +86,16 @@ local actionable_messages = {
   unsupported_version = "unsupported_version: unsupported OpenCode version; install exactly 1.17.3 or 1.18.9 (see docs/RECOVERY.md)",
 }
 
-local function focus_snapshot(runtime)
+---Captures the editor window and cursor so a notification can prove it did not move normal UI focus.
+local function focus_snapshot()
   local current = vim.api.nvim_get_current_win()
   local cursor = vim.api.nvim_win_get_cursor(current)
-  local sidebar_buffer = runtime and runtime.sidebar and runtime.sidebar.buf or nil
-  return { window = current, cursor = cursor, sidebar_buffer = sidebar_buffer }
+  return { window = current, cursor = cursor }
 end
 
+---Compares the editor focus facts captured before and after a notification.
 local function same_focus(before, after)
-  return before.window == after.window
-    and vim.deep_equal(before.cursor, after.cursor)
-    and before.sidebar_buffer == after.sidebar_buffer
+  return before.window == after.window and vim.deep_equal(before.cursor, after.cursor)
 end
 
 local function safe_class(value)
@@ -172,7 +166,7 @@ function M.snapshot(runtime, job)
     root = vim.fs.basename((runtime and runtime.root) or job.root or ""),
     root_key = runtime and runtime.root_hash or vim.fn.sha256(job.root or ""),
     session_short_id = session_short_id or tostring(job.session_id or "unknown"):sub(-8),
-    mode = job.mode or "unknown",
+    mode = "build",
     state = job.state or "unknown",
     job_key = job.key or "unknown",
     error_class = safe_class(job.error_class),
@@ -210,7 +204,7 @@ function M.format(kind, metadata)
   return identity .. ": error " .. safe_class(metadata.error_class)
 end
 
----Emits one metadata-only notification without changing focus, cursor, or sidebar visibility.
+---Emits one metadata-only notification without changing editor focus or cursor.
 ---Terminal states deduplicate by root and Job key; queued questions, permissions, and conflicts deduplicate by Job.
 ---@param kind string
 ---@param metadata table
@@ -229,11 +223,11 @@ function M.emit(kind, metadata, runtime)
     return false
   end
   M.seen[dedupe_key] = true
-  local before = focus_snapshot(runtime)
+  local before = focus_snapshot()
   local notify_opts = vim.deepcopy(opts.opts or {})
   notify_opts.title = notify_opts.title or "OpenCode"
   vim.notify(M.format(kind, metadata), levels[kind] or vim.log.levels.INFO, notify_opts)
-  M.last_focus_safe = same_focus(before, focus_snapshot(runtime))
+  M.last_focus_safe = same_focus(before, focus_snapshot())
   return true
 end
 
@@ -253,10 +247,10 @@ end
 ---Shows a colorless metadata status snapshot for diagnostics without exposing Session content.
 ---@param runtime table
 function M.diagnostics(runtime)
-  local before = focus_snapshot(runtime)
+  local before = focus_snapshot()
   local status = require("opencode.ui.status")
   vim.notify(status.text(status.snapshot(runtime)), vim.log.levels.INFO, { title = "OpenCode diagnostics" })
-  M.last_focus_safe = same_focus(before, focus_snapshot(runtime))
+  M.last_focus_safe = same_focus(before, focus_snapshot())
 end
 
 ---Returns whether the last emit callback preserved the captured editor focus facts.

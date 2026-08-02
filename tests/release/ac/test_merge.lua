@@ -42,25 +42,12 @@ local function close_fixture(fixture, runtime, jobs)
 end
 
 ---Creates the smallest Runtime and Job assembly accepted by the snapshot, scope, and apply modules.
----The sidebar stub is only the UI seam needed by conflict queue tests; no merge or source behavior is replaced.
 local function new_runtime_job(fixture, key, scope, theirs, state, base_override)
   local Runtime = require("opencode.runtime")
   local runtime = Runtime.new(fixture.root)
   runtime.generation = 1
   runtime.temp_root = vim.fn.tempname()
   vim.fn.mkdir(runtime.temp_root, "p")
-  runtime.sidebar = {
-    visible = true,
-    is_visible = function(self)
-      return self.visible
-    end,
-    hide = function(self)
-      self.visible = false
-    end,
-    show = function(self)
-      self.visible = true
-    end,
-  }
   Runtime.registry[runtime.root] = runtime
 
   local session_id = "session_" .. key

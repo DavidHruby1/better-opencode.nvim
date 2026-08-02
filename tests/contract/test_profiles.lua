@@ -117,7 +117,7 @@ T["both profiles require the canonical permission reply field"] = function()
   end
 end
 
-T["Session reuse and cancellation use canonical endpoints"] = function()
+T["Session inventory, reuse, deletion, and cancellation use canonical endpoints without TUI calls"] = function()
   local runner, calls, options = require("tests.helpers.fake_opencode").runner({ {}, {}, {}, {}, {} })
   local client = require("opencode.client").new({
     host = "127.0.0.1",
@@ -131,7 +131,7 @@ T["Session reuse and cancellation use canonical endpoints"] = function()
   client:session_status()
   client:update_session("ses_1", { permission = { { permission = "*", pattern = "*", action = "deny" } } })
   client:abort("ses_1")
-  client:select_session("ses_1")
+  client:delete_session("ses_1")
   eq(
     vim.wait(100, function()
       return #calls == 5
@@ -143,8 +143,10 @@ T["Session reuse and cancellation use canonical endpoints"] = function()
   eq(table.concat(calls[3], "\0"):find("/session/ses_1", 1, true) ~= nil, true)
   eq(options[3].stdin:find("permission", 1, true) ~= nil, true)
   eq(table.concat(calls[4], "\0"):find("/session/ses_1/abort", 1, true) ~= nil, true)
-  eq(table.concat(calls[5], "\0"):find("/tui/select-session", 1, true) ~= nil, true)
-  eq(options[5].stdin:find("ses_1", 1, true) ~= nil, true)
+  eq(table.concat(calls[5], "\0"):find("/session/ses_1", 1, true) ~= nil, true)
+  eq(table.concat(calls[5], "\0"):find("-X\0DELETE", 1, true) ~= nil, true)
+  eq(table.concat(calls[5], "\0"):find("/tui/", 1, true), nil)
+  eq(options[5].stdin:find("ses_1", 1, true), nil)
 end
 
 return T

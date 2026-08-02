@@ -78,10 +78,10 @@ local function exact(runtime, job)
   return true
 end
 
----Feeds transient reasoning only to the exact mapped, active Build Job that owns the status.
+---Feeds transient reasoning only to the exact mapped, active Job that owns the status.
 ---Full reasoning updates register part identity first; text deltas for any unregistered identity are discarded.
 local function route_reasoning(job, event, session_id, assistant_id)
-  if job.mode ~= "build" or not job.request_status then
+  if not job.request_status then
     return
   end
   local properties = event.properties or {}

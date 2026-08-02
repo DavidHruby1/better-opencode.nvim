@@ -51,7 +51,7 @@ local function contains(list, value)
   return false
 end
 
----Builds a Runtime with fake process, HTTP, config, reconciliation, and sidebar boundaries.
+---Builds a Runtime with fake process, HTTP, config, reconciliation, and SSE boundaries.
 ---The fakes retain argv, request order, ownership, and lifecycle facts for outer-boundary assertions.
 ---Each harness redirects state-backed manifests and logs to a disposable root and verifies teardown.
 ---@param spec? table
@@ -60,7 +60,7 @@ local function runtime_harness(spec)
   spec = spec or {}
   local root = spec.root or temp_root()
   local state_root = temp_root()
-  local calls = { client = {}, jobs = {}, jobstops = {}, tui = {}, manifests = {}, aborts = {}, selected_sessions = {} }
+  local calls = { client = {}, jobs = {}, jobstops = {}, manifests = {}, aborts = {} }
   local saved_modules, saved_functions = {}, {}
   local live, pid_for_job = {}, {}
   local subscriptions = {}
@@ -152,7 +152,7 @@ local function runtime_harness(spec)
   end
   function client:agents()
     table.insert(calls.client, "agents")
-    return result(spec.agents or { { name = "build", mode = "primary" }, { name = "plan", mode = "primary" } })
+    return result(spec.agents or { { name = "build", mode = "primary" } })
   end
   function client:subscribe(on_event, on_exit, options)
     table.insert(calls.client, "subscribe")
@@ -188,10 +188,6 @@ local function runtime_harness(spec)
     if spec.abort_error then
       return Promise.reject({ error_class = "http" })
     end
-    return Promise.resolve(nil)
-  end
-  function client:select_session(session_id)
-    table.insert(calls.selected_sessions, session_id)
     return Promise.resolve(nil)
   end
   function client:session_status()
@@ -239,38 +235,6 @@ local function runtime_harness(spec)
       end,
     })
   end
-  replace("opencode.ui.sidebar", {
-    available = function()
-      return true
-    end,
-    new = function(runtime)
-      return {
-        runtime = runtime,
-        show_root = function(_, shown_runtime)
-          calls.shown_root = shown_runtime.root
-          return true
-        end,
-        show = function()
-          calls.sidebar_shown = true
-          return true
-        end,
-        stop = function()
-          calls.sidebar_stopped = true
-        end,
-        dead = function()
-          calls.sidebar_dead = true
-        end,
-        is_visible = function()
-          return false
-        end,
-        select_session = function(_, session_id)
-          table.insert(calls.selected_sessions, session_id)
-          return Promise.resolve(nil)
-        end,
-      }
-    end,
-  })
-
   saved_functions.jobstart, saved_functions.jobpid, saved_functions.jobstop, saved_functions.jobwait =
     vim.fn.jobstart, vim.fn.jobpid, vim.fn.jobstop, vim.fn.jobwait
   saved_functions.chanclose = vim.fn.chanclose
@@ -351,9 +315,6 @@ local function runtime_harness(spec)
       vim.fn[name] = value
     end
     runtime_module.registry[root] = nil
-    if vim.api.nvim_buf_is_valid(runtime.sidebar and runtime.sidebar.buf or -1) then
-      vim.api.nvim_buf_delete(runtime.sidebar.buf, { force = true })
-    end
     eq(vim.uv.fs_stat(runtime.owner_manifest), nil)
     eq(vim.uv.fs_stat(runtime.temp_root), nil)
     vim.fn.delete(harness.log_path)
@@ -381,9 +342,8 @@ T["AC-RUN-01 starts one owned root-bound Runtime"] = function()
   eq(harness.calls.jobs[1].options.cwd, harness.root)
   eq(harness.calls.jobs[1].options.env.OPENCODE_SERVER_PASSWORD, runtime.password)
   eq(harness.calls.tui_starts, nil)
-  eq(runtime.tui_live, false)
-  eq(runtime.tui_status, "stopped")
-  eq(harness.calls.client, { "health", "doc", "path", "config", "agents", "subscribe" })
+  eq({ runtime.tui_live, runtime.tui_status, runtime.sidebar }, { nil, nil, nil })
+  eq(harness.calls.client, { "health", "doc", "path", "config", "agents", "subscribe", "session_status" })
 
   local fake_runner, command_calls = require("tests.helpers.fake_opencode").runner({
     { body = { version = "1.17.3" } },
@@ -427,7 +387,7 @@ T["AC-RUN-02 routes requests only to the Runtime-owned endpoint"] = function()
   eq(runtime.client.root, harness.root)
   eq(runtime.client.url:match("^http://127%.0%.0%.1:%d+$") ~= nil, true)
   eq(runtime.client.url:find("foreign", 1, true), nil)
-  eq(harness.calls.tui, {})
+  eq(harness.calls.tui, nil)
   eq(#harness.calls.jobs, 1)
   harness.restore()
 end
@@ -461,21 +421,11 @@ T["AC-RUN-04 times out owned startup and stops partial processes"] = function()
   harness.restore()
 end
 
-T["AC-RUN-05 keeps roots, sidebars, Jobs, and events isolated"] = function()
+T["AC-RUN-05 keeps roots, Jobs, and events isolated without a TUI"] = function()
   local first, second = temp_root(), temp_root()
   local calls = {}
   local runtime_a, runtime_b = Runtime.new(first), Runtime.new(second)
   runtime_a.state, runtime_b.state = "ready", "ready"
-  runtime_a.sidebar = {
-    show_root = function()
-      calls.first = true
-    end,
-  }
-  runtime_b.sidebar = {
-    show_root = function()
-      calls.second = true
-    end,
-  }
   local session_a = { id = "session-a", active_job_key = "session-a:message-a" }
   local session_b = { id = "session-b", active_job_key = "session-b:message-b" }
   local job_a = {
@@ -500,8 +450,8 @@ T["AC-RUN-05 keeps roots, sidebars, Jobs, and events isolated"] = function()
   runtime_b.sessions[session_b.id], runtime_b.jobs[job_b.key] = session_b, job_b
   Runtime.registry[first], Runtime.registry[second] = runtime_a, runtime_b
 
-  eq(Runtime.show_root(second), runtime_b)
-  eq(calls.second, true)
+  eq({ runtime_a.sidebar, runtime_b.sidebar }, { nil, nil })
+  eq(calls, {})
   runtime_a:route_event({
     type = "message.updated",
     properties = {
@@ -522,7 +472,7 @@ T["AC-RUN-06 stops owned processes, Jobs, temp data, and manifest"] = function()
   local runtime, error = await(harness.runtime:start())
   eq(error, nil)
   local session = { id = "session-shutdown", active_job_key = "job-shutdown" }
-  local job = { key = "job-shutdown", session_id = session.id, root = harness.root, state = "running", mode = "plan" }
+  local job = { key = "job-shutdown", session_id = session.id, root = harness.root, state = "running", mode = "build" }
   runtime.sessions[session.id], runtime.jobs[job.key] = session, job
   local temporary = runtime.temp_root .. "/proposal.tmp"
   vim.fn.mkdir(runtime.temp_root, "p")
@@ -535,7 +485,7 @@ T["AC-RUN-06 stops owned processes, Jobs, temp data, and manifest"] = function()
   eq(job.state, "cancelled")
   eq(vim.uv.fs_stat(temporary), nil)
   eq(vim.uv.fs_stat(runtime.owner_manifest), nil)
-  eq(harness.calls.sidebar_stopped, true)
+  eq(harness.runtime.sidebar, nil)
   eq(#harness.calls.jobstops >= 2, true)
   harness.restore()
 end
@@ -629,23 +579,16 @@ T["supplemental stale cleanup retries after the blocking problem is corrected"] 
   harness.restore()
 end
 
-T["AC-RUN-08 TUI loss is independent from Server, SSE, and Job state"] = function()
+T["AC-RUN-08 Runtime has no TUI lifecycle state"] = function()
   local root = temp_root()
-  local old_sidebar_module = package.loaded["opencode.ui.sidebar"]
-  package.loaded["opencode.ui.sidebar"] = nil
-  local Sidebar = require("opencode.ui.sidebar")
   local runtime = Runtime.new(root)
-  runtime.state, runtime.sse_live, runtime.tui_live = "ready", true, true
-  runtime.tui_status = "live"
+  runtime.state, runtime.sse_live = "ready", true
   runtime.jobs["session-visible:job"] = { key = "session-visible:job", state = "running" }
   runtime.server_job = 41
-  runtime.sidebar = Sidebar.new(runtime)
-  runtime.sidebar:dead()
-  eq({ runtime.tui_live, runtime.tui_status }, { false, "dead" })
+  eq({ runtime.tui_live, runtime.tui_status, runtime.sidebar }, { nil, nil, nil })
   eq(runtime.server_job, 41)
   eq(runtime.jobs["session-visible:job"].state, "running")
   eq({ runtime.state, runtime.sse_live }, { "ready", true })
-  package.loaded["opencode.ui.sidebar"] = old_sidebar_module
   vim.fn.delete(root, "rf")
 end
 
@@ -717,7 +660,7 @@ T["AC-EVT-05 disconnects on Server crash and restarts with fail-closed reconcili
     user_message_id = "msg_old",
     root = harness.root,
     state = "running",
-    mode = "plan",
+    mode = "build",
     assistant_message_ids = {},
     assistant_messages = {},
   }
@@ -727,7 +670,7 @@ T["AC-EVT-05 disconnects on Server crash and restarts with fail-closed reconcili
   eq(runtime.state, "disconnected")
   eq(runtime.prompt_locked, true)
   eq(runtime.reconciling, true)
-  eq(harness.calls.sidebar_dead, true)
+  eq(harness.runtime.sidebar, nil)
   eq(old_client.closed, true)
 
   local restarted, restart_error = await(runtime:restart())
@@ -824,11 +767,11 @@ T["startup readiness waits for server.connected before exposing SSE"] = function
     end),
     true
   )
-  eq({ harness.runtime.sse_live, harness.runtime.tui_live }, { false, false })
+  eq({ harness.runtime.sse_live, harness.runtime.tui_live, harness.runtime.tui_status }, { false, nil, nil })
   harness.emit_sse_connected()
   local runtime, error = await(readiness)
   eq(error, nil)
-  eq({ runtime.state, runtime.sse_live, runtime.tui_live, runtime.tui_status }, { "ready", true, false, "stopped" })
+  eq({ runtime.state, runtime.sse_live, runtime.tui_live, runtime.tui_status }, { "ready", true, nil, nil })
   harness.restore()
 end
 
@@ -841,19 +784,26 @@ T["startup fails closed when SSE exits before its first connected event"] = func
   harness.restore()
 end
 
-T["startup does not attach or wait for the lazy TUI"] = function()
+T["startup does not attach or wait for a TUI"] = function()
   local harness = runtime_harness()
   local runtime, error = await(harness.runtime:start())
   eq(error, nil)
-  eq({ runtime.state, runtime.sse_live, runtime.tui_live, runtime.tui_status }, { "ready", true, false, "stopped" })
+  eq({ runtime.state, runtime.sse_live, runtime.tui_live, runtime.tui_status }, { "ready", true, nil, nil })
   eq(harness.calls.tui_starts, nil)
   harness.restore()
 end
 
-T["startup requires both primary Build and Plan agents"] = function()
+T["startup requires a primary Build agent and does not require Plan"] = function()
+  local harness = runtime_harness({ agents = { { name = "build", mode = "primary" } } })
+  local runtime, error = await(harness.runtime:start())
+  eq(error, nil)
+  eq(runtime.state, "ready")
+  harness.restore()
+
   for _, agents in ipairs({
-    { { name = "build", mode = "primary" } },
-    { { name = "build", mode = "secondary" }, { name = "plan", mode = "primary" } },
+    { { name = "build", mode = "secondary" } },
+    { { name = "plan", mode = "primary" } },
+    {},
   }) do
     local harness = runtime_harness({ agents = agents })
     local runtime, error = await(harness.runtime:start())

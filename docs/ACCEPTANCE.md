@@ -19,10 +19,12 @@ Scénáře definují pozorovatelné chování, nikoli konkrétní test framework
 | Unit | Scope převody, overlap, schema, hash, state transitions, event correlation |
 | Neovim integration | Buffery, changedtick, extmarky, undo, InsertLeave, views, dialogs |
 | Contract | HTTP/SSE payloady proti uloženým OpenCode `v1.17.3` a `v1.18.9` `/doc` fixtures |
-| End-to-end | Skutečný plugin-owned Server + TUI + Neovim workflow |
+| End-to-end | Skutečný plugin-owned Server + Neovim workflow without TUI/tmux |
 | Failure injection | Crash, disconnect, late event, save failure, invalid proposal, merge error |
 
 Contract suite MUSÍ obsahovat dva neměnné `/doc` fixtures: OpenCode `v1.17.3` z commitu `8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74` a OpenCode `v1.18.9` z commitu `4da7bb44c84e013fa53e9c5d02ac753d1435c81a`. Všechny povinné contract scénáře a end-to-end suite MUSÍ běžet proti oběma přesně odpovídajícím binárkám; rozdíl smí obsloužit pouze explicitní version profile, ne best-effort fallback. Profil `v1.18.9` navíc může nést delta/diagnostické eventy, ale completion pořád rozhoduje jen exact `parentID` a jedna structured assistant message.
+
+Aktuální implementace je Build-only. Historické scénáře níže, které ještě zmiňují Plan, shared TUI pane nebo `/tui/select-session`, jsou superseded `docs/FIX-PLAN.md` a nesmí být použity jako očekávání pro nový runtime; funkční acceptance coverage je v `tests/unit`, `tests/integration`, `tests/contract` a `tests/release`.
 
 ## Společné testovací fixture
 

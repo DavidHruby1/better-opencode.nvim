@@ -2,7 +2,7 @@
 
 Neovim-native managed workflow based on `nickjvandyke/opencode.nvim` commit `7749a034db61258ece828df70a89ff31bb27ff47`. The upstream project and its license remain the origin of this fork; see `LICENSE` and `CHANGELOG.md`.
 
-This fork owns one loopback OpenCode Server and one input-locked TUI client per canonical project root. Build returns a scoped structured proposal and applies it only to the live buffer through a Base/Ours/Theirs merge. Dirty files are saved before Build dispatch; applying the proposal still leaves the live buffer modified. Plan is read-only.
+This fork owns one loopback OpenCode Server per canonical project root. Build runs inline in the editor: `ask()` opens the Build prompt, `prompt()` dispatches Build immediately, and `select_session()` reuses a verified Session before Build resumes. Build returns a scoped structured proposal and applies it only to the live buffer through a Base/Ours/Theirs merge. Dirty files are saved before Build dispatch; applying the proposal still leaves the live buffer modified.
 
 ## Requirements
 
@@ -11,30 +11,38 @@ This fork owns one loopback OpenCode Server and one input-locked TUI client per 
 - `curl`
 - `git` with `git merge-file -p --diff3`
 - `snacks.nvim` with input and picker enabled
-- `tmux` (required for the Plan transcript pane)
 
 OpenCode support is an exact compatibility matrix, not a semver range. Other versions fail the preflight.
 
 ## Configuration
 
+The repo does not ship default keymaps. The OpenCode-specific examples below use a `<leader>o*` namespace. See `docs/COMMANDS.md` for the public API and mapping names.
+
 ```lua
 vim.g.opencode_opts = {
   runtime = { binary = "opencode", startup_timeout = 10000 },
   notify = { enabled = true },
-  sidebar = { width = 30 },
 }
 
--- Recommended Build: start a new Session and use the default scope resolution
+-- Build prompt (local example)
 vim.keymap.set({ "n", "x" }, "<C-a>", function()
-  require("opencode").ask(nil, { mode = "build", new_session = true })
+  require("opencode").ask(nil, { mode = "build" })
 end)
 
--- Explicit read-only Plan
-vim.keymap.set({ "n", "x" }, "<leader>op", function()
-  require("opencode").ask(nil, { mode = "plan" })
+-- Reuse a verified Session
+vim.keymap.set({ "n", "x" }, "<leader>oi", function()
+  require("opencode").select_session({ mode = "build" })
 end)
 
--- Recovery actions, cancel one/all, sidebar, and diagnostics
+-- Immediate Build
+vim.keymap.set({ "n", "x" }, "<leader>od", function()
+  require("opencode").prompt("Implement the current target safely and return the required structured replacement.", {
+    mode = "build",
+    new_session = true,
+  })
+end)
+
+-- Recovery actions and cancellation
 vim.keymap.set("n", "<leader>os", function()
   require("opencode").select()
 end)
@@ -44,35 +52,27 @@ end)
 vim.keymap.set("n", "<leader>oC", function()
   require("opencode").cancel_all()
 end)
-vim.keymap.set("n", "<leader>ot", function()
-  local runtime = require("opencode.runtime").current()
-  if runtime then runtime.sidebar:toggle() end
-end)
-vim.keymap.set("n", "<leader>of", function()
-  local runtime = require("opencode.runtime").current()
-  if runtime then runtime.sidebar:focus() end
-end)
 ```
 
-The recommended Build mapping captures an active visual selection. In normal mode it uses the function under the cursor and falls back to the full file when no supported function is found; this uses the existing `ask()` API and adds no public function. The multiline prompt uses an upstream-like `Snacks.win` icon and style, keeps metadata compact instead of using a long title, and shows only short temporary states while it starts, submits, or waits for retry. `<CR>` submits or accepts visible completion, `<C-j>` inserts a newline, and `<Esc>` cancels. Failed startup or dispatch keeps the text available for retry.
+The recommended Build mapping captures an active visual selection. In normal mode it uses the function under the cursor and falls back to the full file when no supported function is found; this uses the existing `ask()` API and adds no public function. The Build prompt opens at one row, soft-wraps as content grows, and uses `<CR>` to submit or accept visible completion, Shift+Enter (`<S-CR>`) to insert a newline, `<C-j>` as the newline fallback, and `<Esc>` to cancel. Failed startup or dispatch keeps the text available for retry.
 
-`select()` is a recovery-only action menu for runtime and TUI problems, not a routine Session-navigation action. `cancel()` opens the active-Job picker when one Job must be chosen, while `cancel_all()` cancels every active Job. Plan creates a managed Session or reuses a selected reusable one, selects its transcript through the internal `/tui/select-session` request, and shows the shared input-locked pane without stealing source focus; the explicit Focus sidebar action is the only action that focuses the pane.
+`select()` is a recovery-only action menu for runtime problems, not a routine Session-navigation action. `select_session()` opens the reusable-Session picker and returns to Build with the captured Context. `cancel()` opens the active-Job picker when one Job must be chosen, while `cancel_all()` cancels every active Job.
 
 ## Safety model
 
-- Build and Plan use ordered Session rules with a default deny and explicit read-only allowlist. Both exact profiles filter hard-denied and unknown tools from the final model surface and apply execution-time hard deny on a fresh isolated Server.
+- Build uses ordered Session rules with a default deny and explicit read-only allowlist. Both exact profiles filter hard-denied and unknown tools from the final model surface and apply execution-time hard deny on a fresh isolated Server.
 - Passive config guards ignore custom plugins and enabled MCPs, while rejecting custom tools before startup; effective config is checked without calling `/mcp`.
-- Dirty buffers are saved automatically before Build; Plan requires explicit `save and continue` or `cancel`. Clean merge changes only the buffer, preserves `modified`, and is one undo step.
+- Dirty buffers are saved automatically before Build. Clean merge changes only the buffer, preserves `modified`, and is one undo step.
 - External disk changes, conflicts, stale changedticks, scope violations, unknown events, and unowned processes fail closed.
 - Default logs and notifications contain metadata only. They omit prompts, source, diffs, replacements, credentials, response bodies, and absolute paths.
 
 ## Workflow
 
-- Build defaults to the current function, visual range, or file fallback. Plan must be selected explicitly.
+- Build defaults to the current function, visual range, or file fallback. `select_session()` reuses a verified Session, and `prompt()` skips the prompt window.
 - A conflict offers `keep my changes`, `accept agent changes`, or `open manual diff`. External changes offer `open external diff`, `retry apply`, or `cancel`.
-- A Plan Session can be reused for a new Build after it becomes reusable. Active Sessions never queue a follow-up.
+- A Build Session can be reused for a new Build after it becomes reusable. Active Sessions never queue a follow-up.
 - Parallel non-overlapping Build scopes are allowed in one buffer. Overlap is rejected before dispatch and rechecked before application.
-- Multiple canonical roots have separate Servers, Sessions, Jobs, and event streams; at most one lazy tmux pane shows the selected root's TUI.
+- Multiple canonical roots have separate Servers, Sessions, Jobs, and event streams.
 
 ## Deferred
 

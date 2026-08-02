@@ -29,7 +29,7 @@ local function with_modules(modules, callback)
   assert(ok, failure)
 end
 
-T["public ask dispatches explicit Plan and default Build modes"] = function()
+T["public ask uses Build for default and explicit Build modes"] = function()
   local ask_calls, prompt_calls = {}, {}
   local runtime = {
     prompt_blocker = function()
@@ -64,8 +64,8 @@ T["public ask dispatches explicit Plan and default Build modes"] = function()
           ask_calls,
           { default = default, context = context, mode = mode, opts = opts, readiness = readiness }
         )
-        submit(mode .. " input")
-        return Promise.resolve(mode .. " input")
+        submit("Build input")
+        return Promise.resolve("Build input")
       end,
     },
     ["opencode.api.prompt"] = {
@@ -75,19 +75,59 @@ T["public ask dispatches explicit Plan and default Build modes"] = function()
       end,
     },
   }, function()
-    local plan = assert(opencode.ask(nil, { mode = "plan" }))
-    local build = assert(opencode.ask())
-    eq(type(plan.next), "function")
+    local build = assert(opencode.ask(nil, { mode = "build" }))
+    local default_build = assert(opencode.ask())
     eq(type(build.next), "function")
+    eq(type(default_build.next), "function")
   end)
 
   eq(#prompt_calls, 2)
-  eq(ask_calls[1].mode, "plan")
-  eq(prompt_calls[1].text, "plan input")
-  eq(prompt_calls[1].opts.mode, "plan")
+  eq(ask_calls[1].mode, "build")
+  eq(prompt_calls[1].text, "Build input")
+  eq(prompt_calls[1].opts.mode, "build")
   eq(ask_calls[2].mode, "build")
-  eq(prompt_calls[2].text, "build input")
+  eq(prompt_calls[2].text, "Build input")
   eq(prompt_calls[2].opts, nil)
+end
+
+T["public ask rejects Plan before opening UI or acquiring a Runtime"] = function()
+  local calls = { acquire = 0, ask = 0 }
+  local opencode = require("opencode")
+  local old_notify = vim.notify
+  local message
+  vim.notify = function(value)
+    message = value
+  end
+
+  with_modules({
+    ["opencode.runtime"] = {
+      acquire = function()
+        calls.acquire = calls.acquire + 1
+      end,
+    },
+    ["opencode.ui.ask"] = {
+      ask = function()
+        calls.ask = calls.ask + 1
+      end,
+    },
+  }, function()
+    local rejection = opencode.ask(nil, { mode = "plan" })
+    local error
+    rejection:catch(function(value)
+      error = value
+    end)
+    eq(error, { error_class = "mode_unavailable" })
+    local prompt_rejection = opencode.prompt("ignored", { mode = "plan" })
+    local prompt_error
+    prompt_rejection:catch(function(value)
+      prompt_error = value
+    end)
+    eq(prompt_error, { error_class = "mode_unavailable" })
+  end)
+
+  vim.notify = old_notify
+  eq(calls, { acquire = 0, ask = 0 })
+  eq(message:find("mode_unavailable", 1, true) ~= nil, true)
 end
 
 T["public select exposes only recovery actions and dispatches the chosen action"] = function()
@@ -96,16 +136,12 @@ T["public select exposes only recovery actions and dispatches the chosen action"
   local runtime = {
     state = "ready",
     interaction_locked = false,
-    retry_tui = function(self)
-      table.insert(actions, "retry_tui")
-      return Promise.resolve(self)
-    end,
     restart = function(self)
       table.insert(actions, "restart")
       return Promise.resolve(self)
     end,
   }
-  local choices = { "Retry TUI attach", "Restart runtime", "Show diagnostics" }
+  local choices = { "Restart runtime", "Show diagnostics" }
   local original_select = vim.ui.select
   local ok, failure = xpcall(function()
     with_modules({
@@ -137,8 +173,48 @@ T["public select exposes only recovery actions and dispatches the chosen action"
     eq(menu.items, choices)
     eq(menu.prompt, "OpenCode")
   end
-  eq(actions, { "retry_tui", "restart" })
+  eq(actions, { "restart" })
   eq(diagnostics_runtime, runtime)
+end
+
+T["public session picker keeps the Build boundary and captured context"] = function()
+  local opencode = require("opencode")
+  local runtime, captured_context, picker_opts
+  local context = {}
+  local fake_runtime = {}
+
+  with_modules({
+    ["opencode.context"] = {
+      capture = function()
+        return context
+      end,
+      new = function()
+        return { marker = "captured" }
+      end,
+    },
+    ["opencode.runtime"] = {
+      acquire = function()
+        return fake_runtime, Promise.resolve(fake_runtime)
+      end,
+    },
+    ["opencode.ui.session_picker"] = {
+      open = function(value, captured, opts)
+        runtime, captured_context, picker_opts = value, captured, opts
+        return Promise.resolve("picked")
+      end,
+    },
+  }, function()
+    local result = opencode.select_session({ mode = "build" })
+    local picked
+    result:next(function(value)
+      picked = value
+    end)
+    eq(picked, "picked")
+  end)
+
+  eq(runtime, fake_runtime)
+  eq(captured_context.marker, "captured")
+  eq(picker_opts.mode, "build")
 end
 
 T["operator rejects an invalid mode before installing an operator"] = function()
@@ -186,7 +262,7 @@ T["public startup rejection reaches the safe notification boundary"] = function(
         end,
       },
     }, function()
-      opencode.ask(nil, { mode = "plan" })
+      opencode.ask(nil, { mode = "build" })
     end)
     eq(messages[1]:find("owned OpenCode startup timed out", 1, true) ~= nil, true)
     for _, secret in ipairs({ "STARTUP_RESPONSE_SECRET", "password", "secret", "raw exception", "/private/project" }) do

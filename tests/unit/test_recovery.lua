@@ -21,7 +21,6 @@ T["Runtime prompt blocker exposes the concrete lifecycle gate"] = function()
   eq(runtime:prompt_blocker(), "starting")
   runtime.state, runtime.sse_live = "ready", true
   eq(runtime:prompt_blocker(), nil)
-  runtime.tui_live = true
   runtime.state, runtime.reconciling = "disconnected", true
   eq(runtime:prompt_blocker(), "disconnected")
   runtime.reconciling = false
@@ -172,7 +171,7 @@ T["direct reconciliation fetches status when no snapshot is supplied"] = functio
     root = "/root",
     buf = 1,
     path = "/root/file.lua",
-    mode = "plan",
+    mode = "build",
   })
   runtime.jobs[job.key] = job
   runtime.sessions.ses_1 = { id = "ses_1", active_job_key = job.key }
@@ -217,7 +216,7 @@ end
 T["failed reconciliation stays blocked and notifies until a later snapshot succeeds"] = function()
   local Promise = require("opencode.promise")
   local runtime = require("opencode.runtime").new("/root")
-  runtime.state, runtime.sse_live, runtime.tui_live = "ready", true, true
+  runtime.state, runtime.sse_live = "ready", true
   local calls, notifications = 0, {}
   local old_notify = vim.notify
   vim.notify = function(message)
@@ -292,7 +291,7 @@ T["cancel all snapshots every Runtime and reports aggregate failures"] = functio
       end,
     }
     runtime.sessions.s = { id = "s", active_job_key = key }
-    runtime.jobs[key] = { key = key, root = runtime.root, session_id = "s", state = "running", mode = "plan" }
+    runtime.jobs[key] = { key = key, root = runtime.root, session_id = "s", state = "running", mode = "build" }
   end
   local report
   Runtime.cancel_all():next(function(value)

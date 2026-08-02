@@ -5,6 +5,7 @@ local eq = MiniTest.expect.equality
 
 local Promise = require("opencode.promise")
 local Runtime = require("opencode.runtime")
+local real_current = Runtime.current
 
 ---Creates a deterministic client double at the HTTP boundary.
 ---Each declared method records its arguments and returns a resolved Promise unless its value is a callback.
@@ -24,50 +25,11 @@ local function fake_client(methods)
   return client
 end
 
----Creates a ready Runtime with a small observable sidebar double.
----The fake exposes only the visibility and focus effects used by interaction and internal transcript selection paths.
+---Creates a ready Runtime with a deterministic client boundary.
 ---Keeping the Runtime registered makes callbacks that carry a root identity use the same public lookup as production.
 local function runtime_fixture(root, client)
-  local sidebar = {
-    visible = true,
-    show_calls = 0,
-    hide_calls = 0,
-    input_locked = true,
-    transcript_session = nil,
-  }
-  function sidebar:is_visible()
-    return self.visible
-  end
-  ---Reports a visible pane and records the current transcript for internal selection tests.
-  ---The true result matches the real sidebar boundary so Session selection can continue to the endpoint call.
-  function sidebar:show()
-    self.visible = true
-    self.show_calls = self.show_calls + 1
-    if self.runtime then
-      self.transcript_session = self.runtime.selected_session_id
-    end
-    return true
-  end
-  function sidebar:hide()
-    self.visible = false
-    self.hide_calls = self.hide_calls + 1
-  end
-  ---Shows the fixture pane for the supplied Runtime and preserves the selected transcript metadata.
-  ---Returning the delegated result matches the recovery path's visible-pane check without starting tmux.
-  function sidebar:show_root(runtime)
-    self.transcript_session = runtime.selected_session_id
-    return self:show()
-  end
-  ---Records an internal transcript switch and sends only its Session ID through the fake client.
-  ---The fixture keeps this endpoint separate from the removed public Session picker.
-  function sidebar:select_session(session_id)
-    self.transcript_session = session_id
-    return self.runtime.client:select_session(session_id)
-  end
-
   local runtime = Runtime.new(root)
-  runtime.state, runtime.sse_live, runtime.client, runtime.sidebar = "ready", true, client, sidebar
-  sidebar.runtime = runtime
+  runtime.state, runtime.sse_live, runtime.client = "ready", true, client
   Runtime.registry[root] = runtime
   Runtime.active_root = root
   return runtime
@@ -76,6 +38,7 @@ end
 ---Clears global Runtime and interaction state left by one isolated acceptance case.
 ---The registries are reset explicitly because MiniTest runs all functions in one Neovim process.
 local function clear_fixture(runtime)
+  Runtime.current = real_current
   if runtime and Runtime.registry[runtime.root] == runtime then
     Runtime.registry[runtime.root] = nil
   end
@@ -87,6 +50,7 @@ local function clear_fixture(runtime)
 end
 
 local function reset_globals()
+  Runtime.current = real_current
   for root in pairs(Runtime.registry) do
     Runtime.registry[root] = nil
   end
@@ -166,12 +130,12 @@ local function public_job(runtime, spec)
   return job
 end
 
----Makes a Runtime fixture current through the real root-selection boundary used by public commands.
----The setup counter is reset afterward so public cancel assertions observe only their own UI work.
+---Makes a Runtime fixture current through the public command lookup while keeping the production lookup restorable.
 ---@param runtime table
 local function activate_runtime(runtime)
-  Runtime.show_root(runtime.root)
-  runtime.sidebar.show_calls = 0
+  Runtime.current = function()
+    return runtime
+  end
 end
 
 T["AC-JOB-01 active Session rejects follow-up instead of queueing a Job"] = function()
@@ -212,23 +176,13 @@ T["AC-JOB-01 active Session rejects follow-up instead of queueing a Job"] = func
   clear_fixture(runtime)
 end
 
-T["AC-JOB-02 internal transcript selection preserves exact event ownership"] = function()
-  local sessions = require("opencode.session")
+T["AC-JOB-02 selected Session identity remains separate from event ownership"] = function()
   local events = require("opencode.events")
   local root = "/acceptance/job-02"
-  local client = fake_client({
-    select_session = function(_, id)
-      return Promise.resolve({ selected = id })
-    end,
-  })
-  local runtime = runtime_fixture(root, client)
+  local runtime = runtime_fixture(root, fake_client())
   runtime.sessions.ses_first, runtime.sessions.ses_second = { id = "ses_first" }, { id = "ses_second" }
-  local selected, selection_error = settle(sessions.select(runtime, "ses_second"))
-  eq({ selected, selection_error }, { runtime.sessions.ses_second, nil })
+  runtime.selected_session_id = "ses_second"
   eq(runtime.selected_session_id, "ses_second")
-  eq(runtime.sidebar.transcript_session, "ses_second")
-  eq(client.calls[#client.calls].name, "select_session")
-  eq(client.calls[#client.calls].args, { "ses_second" })
 
   local first_job = {
     key = "ses_first:msg_first",
@@ -353,7 +307,7 @@ T["concurrent cancellation callers share one remote abort"] = function()
     end,
   })
   local runtime = runtime_fixture("/acceptance/cancel-shared", client)
-  local job = { key = "job_shared", root = runtime.root, session_id = "ses_shared", state = "running", mode = "plan" }
+  local job = { key = "job_shared", root = runtime.root, session_id = "ses_shared", state = "running", mode = "build" }
   runtime.jobs[job.key] = job
   runtime.sessions.ses_shared = { id = "ses_shared", active_job_key = job.key, remote_status = "busy" }
 
@@ -414,7 +368,7 @@ T["public cancel offers only active Jobs with complete rows and cancels the sele
     key = "job_first",
     session_id = "ses_first",
     user_message_id = "msg_12345678",
-    mode = "plan",
+    mode = "build",
     path = root .. "/first.lua",
     state = "running",
   })
@@ -452,7 +406,7 @@ T["public cancel offers only active Jobs with complete rows and cancels the sele
   end
   eq(picker_calls, 1)
   eq(rows, {
-    "plan | first.lua | running | 12345678",
+    "build | first.lua | running | 12345678",
     "build | second.lua | pending_apply | ABCDEFGH",
   })
   eq(first.state, "running")
@@ -581,20 +535,13 @@ T["AC-JOB-06 internal inventory retains only owned Sessions and revalidates reus
   clear_fixture(runtime)
 end
 
-T["AC-JOB-07 locked sidebar rejects manual focus and toggle without starting a pane"] = function()
-  local Sidebar = require("opencode.ui.sidebar")
+T["AC-JOB-07 interaction locking blocks new prompts without a TUI"] = function()
   local root = "/acceptance/job-07"
   local runtime = Runtime.new(root)
   runtime.interaction_locked = true
-  local old_system, system_calls = vim.system, 0
-  vim.system = function()
-    system_calls = system_calls + 1
-  end
-  local sidebar = assert(Sidebar.new(runtime))
-  sidebar:focus()
-  sidebar:toggle()
-  eq(system_calls, 0)
-  vim.system = old_system
+  runtime.state, runtime.sse_live = "ready", true
+  eq(runtime:prompt_blocker(), "interaction_locked")
+  eq(runtime.sidebar, nil)
 end
 
 T["AC-EVT-01 Runtime routes assistant parts by exact Session and Message identity"] = function()
@@ -814,7 +761,7 @@ T["AC-EVT-04 idle reconnect without an exact result ends the Job without applyin
     session_id = session.id,
     user_message_id = "msg_missing_result",
     state = "running",
-    mode = "plan",
+    mode = "build",
     assistant_message_ids = {},
     assistant_messages = {},
   }
@@ -1062,7 +1009,7 @@ T["AC-INT-03 dialogs remain FIFO while waiting Jobs and conflicts keep their sta
   clear_fixture(runtime)
 end
 
-T["AC-INT-04 canonical reply restores sidebar visibility without unlocking TUI input"] = function()
+T["AC-INT-04 canonical reply releases the interaction queue without a TUI"] = function()
   local events = require("opencode.events")
   local root = "/acceptance/int-04"
   local replies = {}
@@ -1073,12 +1020,6 @@ T["AC-INT-04 canonical reply restores sidebar visibility without unlocking TUI i
     end,
   })
   local runtime = runtime_fixture(root, client)
-  local old_sidebar_module = package.loaded["opencode.ui.sidebar"]
-  package.loaded["opencode.ui.sidebar"] = {
-    visible_root = function()
-      return runtime.sidebar.visible and runtime.root or nil
-    end,
-  }
   local job = { key = "job_interaction", root = root, session_id = "ses_interaction", state = "running" }
   runtime.jobs[job.key], runtime.sessions[job.session_id] = job, { id = job.session_id, active_job_key = job.key }
   local old_select = vim.ui.select
@@ -1101,29 +1042,21 @@ T["AC-INT-04 canonical reply restores sidebar visibility without unlocking TUI i
     end),
     true
   )
-  eq(
-    { runtime.interaction_locked, runtime.prompt_locked, runtime.sidebar.visible, runtime.sidebar.hide_calls },
-    { true, true, false, 1 }
-  )
-  eq(runtime.sidebar.input_locked, true)
+  eq({ runtime.interaction_locked, runtime.prompt_locked, runtime.sidebar }, { true, true, nil })
   eq(replies, { { id = "req_once", answers = { { "yes" } } } })
   events.route(
     runtime,
     { type = "question.replied", properties = { sessionID = job.session_id, requestID = "req_once" } }
   )
-  eq(
-    { runtime.interaction_locked, runtime.prompt_locked, runtime.sidebar.visible, runtime.sidebar.show_calls },
-    { false, false, true, 1 }
-  )
+  eq({ runtime.interaction_locked, runtime.prompt_locked, runtime.sidebar }, { false, false, nil })
   eq(job.state, "running")
   vim.ui.select = old_select
-  package.loaded["opencode.ui.sidebar"] = old_sidebar_module
   clear_fixture(runtime)
 end
 
-T["question and permission replies do not restore a pane that was hidden already"] = function()
+T["question and permission replies do not create TUI state"] = function()
   local events = require("opencode.events")
-  local old_sidebar_module, old_select = package.loaded["opencode.ui.sidebar"], vim.ui.select
+  local old_select = vim.ui.select
   for _, kind in ipairs({ "question", "permission" }) do
     local root = "/acceptance/int-04-hidden-" .. kind
     local replies = {}
@@ -1138,12 +1071,6 @@ T["question and permission replies do not restore a pane that was hidden already
       end,
     })
     local runtime = runtime_fixture(root, client)
-    runtime.sidebar.visible = false
-    package.loaded["opencode.ui.sidebar"] = {
-      visible_root = function()
-        return nil
-      end,
-    }
     vim.ui.select = function(items, _, callback)
       callback(items[1])
     end
@@ -1170,11 +1097,10 @@ T["question and permission replies do not restore a pane that was hidden already
       type = kind .. ".replied",
       properties = { sessionID = job.session_id, requestID = "request-" .. kind },
     })
-    eq({ runtime.sidebar.hide_calls, runtime.sidebar.show_calls, runtime.sidebar.visible }, { 0, 0, false }, kind)
+    eq(runtime.sidebar, nil, kind)
     clear_fixture(runtime)
   end
   vim.ui.select = old_select
-  package.loaded["opencode.ui.sidebar"] = old_sidebar_module
 end
 
 T["AC-STATE-01 Job transition matrix accepts only declared transitions and required kinds"] = function()

@@ -26,7 +26,7 @@ T["status snapshot is colorless and collision safe"] = function()
       short_id = nil,
       last_mode = "build",
     },
-    second = { id = "ses_secondsame-tail", title = "Second", short_id = nil, last_mode = "plan" },
+    second = { id = "ses_secondsame-tail", title = "Second", short_id = nil, last_mode = "build" },
   }
   runtime.jobs = {
     job = { key = "job", session_id = "first", user_message_id = "msg_first", mode = "build", state = "running" },
@@ -149,7 +149,7 @@ T["configuration validation exposes only documented source scopes"] = function()
   local config = require("opencode.config")
   eq(select(1, config.validate({ runtime = { binary = "opencode", startup_timeout = 1 } })), true)
   eq(select(2, config.validate({ runtime = { unknown = true } })).scope, "runtime.unknown")
-  eq(select(2, config.validate({ sidebar = { width = 2 } })).reason, "type_or_range")
+  eq(select(2, config.validate({ sidebar = { width = 2 } })).reason, "unsupported_key")
   eq(select(2, config.validate({ notify = { opts = "content" } })).scope, "notify.opts")
 end
 
@@ -162,7 +162,6 @@ T["configuration documentation names every supported option"] = function()
     "runtime.reconnect.max_attempts",
     "runtime.reconnect.backoff_ms",
     "runtime.reconnect.max_backoff_ms",
-    "sidebar.width",
     "contexts",
     "ask.snacks.win",
     "notify.enabled",

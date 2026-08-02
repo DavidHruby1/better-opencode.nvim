@@ -54,12 +54,12 @@ local function job_kind(job)
   if not job then
     return "none"
   end
-  return job.conflict_kind or job.waiting_kind or job.mode or "unknown"
+  return job.conflict_kind or job.waiting_kind or "build"
 end
 
 ---Builds one immutable, privacy-safe view of Runtime status for foreground and background UI.
 ---The registry and Job tables are read once, copied into plain metadata, and never changed; Job rows include
----their cancellation key, mode, file name, state, and short ID without HTTP or transcript selection.
+---their cancellation key, Build marker, file name, state, and short ID without HTTP or transcript selection.
 ---@param runtime table
 ---@return table
 function M.snapshot(runtime)
@@ -77,7 +77,6 @@ function M.snapshot(runtime)
     root = vim.fs.basename(runtime.root or ""),
     runtime_state = runtime.state or "unknown",
     prompt_blocker = runtime.prompt_blocker and runtime:prompt_blocker() or nil,
-    tui_status = runtime.tui_status or "unknown",
     compatibility = runtime.profile and runtime.profile.version or "unknown",
     foreground = require("opencode.runtime").current() == runtime,
     sessions = {},
@@ -89,7 +88,7 @@ function M.snapshot(runtime)
     local job = session.active_job_key and runtime.jobs and runtime.jobs[session.active_job_key]
     local availability = session_availability(runtime, session, job)
     item.title = session.title or "Untitled"
-    item.last_mode = session.last_mode or (job and job.mode) or "unknown"
+    item.last_mode = "build"
     item.availability = availability
     item.job_state = job and job.state or session.last_job_state or "idle"
     item.job_kind = job_kind(job)
@@ -114,7 +113,7 @@ function M.snapshot(runtime)
       key = key,
       session = session_short_id or short_id(job.session_id, 8),
       job = short_id(job.user_message_id or key, 8),
-      mode = job.mode or "unknown",
+      mode = "build",
       file = job.path and vim.fs.basename(job.path) or "unknown",
       state = job.state or "unknown",
       kind = job_kind(job),
@@ -145,7 +144,7 @@ function M.jobs(runtime)
         key = job.key,
         session = job.session,
         job = job.job,
-        mode = job.mode,
+        mode = "build",
         file = job.file,
         state = job.state,
         kind = job.kind,
@@ -155,8 +154,8 @@ function M.jobs(runtime)
   return rows
 end
 
----Renders a colorless status summary with separate Runtime, prompt blocker, and TUI truth.
----Only titles and roots are width-limited; short IDs, states, modes, and lifecycle diagnostics remain complete.
+---Renders a colorless status summary with separate Runtime, prompt blocker, and Session state.
+---Only titles and roots are width-limited; short IDs, states, Build markers, and lifecycle diagnostics remain complete.
 ---@param snapshot table
 ---@param width? integer
 ---@return string
@@ -164,10 +163,9 @@ function M.text(snapshot, width)
   width = width or 120
   local counts = snapshot.counts
   local result = string.format(
-    "%s | Runtime %s | TUI %s | Blocker %s | OpenCode %s | Sessions active=%d reusable=%d | Jobs active=%d terminal=%d",
+    "%s | Runtime %s | Blocker %s | OpenCode %s | Sessions active=%d reusable=%d | Jobs active=%d terminal=%d",
     truncate(snapshot.root, math.max(12, math.floor(width * 0.18))),
     snapshot.runtime_state,
-    snapshot.tui_status,
     snapshot.prompt_blocker or "none",
     snapshot.compatibility,
     counts.active_sessions,

@@ -1,16 +1,34 @@
 local M = {}
 
 ---@class opencode.PromptOpts
----@field mode? "plan"|"build"
+---@field mode? "build"
 ---@field scope? "file"
 ---@field auto_apply? boolean
 ---@field new_session? boolean
+---@field session_id? string
+---@field range? opencode.context.Range
 
 local function notify_error(err)
   local class = type(err) == "table" and err.error_class or "cancelled"
   if class ~= "cancelled" then
     require("opencode.ui.notify").error(err)
   end
+end
+
+---Checks the compatibility mode accepted by public prompt entrypoints.
+---Omitted mode and explicit Build use the same workflow; every other value is unavailable.
+local function accepts_build_mode(opts)
+  return not opts or opts.mode == nil or opts.mode == "build"
+end
+
+---Creates a handled rejection for an unavailable prompt mode while preserving it for the caller.
+---The attached handler keeps the public error notification, and the returned Promise retains the exact error class.
+local function reject_mode()
+  local Promise = require("opencode.promise")
+  local rejection, _, reject = Promise.with_resolvers()
+  rejection:catch(notify_error)
+  reject({ error_class = "mode_unavailable" })
+  return rejection
 end
 
 ---Captures the source and starts or reuses its Runtime without waiting for readiness.
@@ -65,22 +83,21 @@ local function submit_when_ready(text, context, opts)
   end)
 end
 
----Opens the managed Build input, or an explicit read-only Plan input.
+---Opens the managed Build input and rejects unavailable modes before runtime startup.
+---Dirty buffers are checked before the editor opens, while the submit callback preserves the existing Build dispatch.
 ---@param default? string
 ---@param opts? opencode.PromptOpts
 function M.ask(default, opts)
-  if opts and opts.mode and opts.mode ~= "plan" and opts.mode ~= "build" then
-    notify_error({ error_class = "mode_unavailable" })
-    return
+  if not accepts_build_mode(opts) then
+    return reject_mode()
   end
-  local mode = (opts and opts.mode) or "build"
   local context, readiness = acquire_context()
   if not context then
     readiness:catch(notify_error)
     return readiness
   end
-  local flow = require("opencode.context.preflight").run(context, mode):next(function()
-    return require("opencode.ui.ask").ask(default, context, mode, opts, readiness, function(input)
+  local flow = require("opencode.context.preflight").run(context):next(function()
+    return require("opencode.ui.ask").ask(default, context, "build", opts, readiness, function(input)
       return submit_when_ready(input, context, opts)
     end)
   end)
@@ -88,15 +105,15 @@ function M.ask(default, opts)
   return flow
 end
 
----Dispatches a managed Build directly, or an explicit read-only Plan.
+---Dispatches a managed Build directly and rejects unavailable modes before runtime startup.
+---The private prompt boundary repeats the mode check so direct internal callers cannot bypass the Build-only contract.
 ---@param text string
 ---@param opts? opencode.PromptOpts
 function M.prompt(text, opts)
-  if opts and opts.mode and opts.mode ~= "plan" and opts.mode ~= "build" then
-    notify_error({ error_class = "mode_unavailable" })
-    return
+  if not accepts_build_mode(opts) then
+    return reject_mode()
   end
-  local flow = ready_context():next(function(context)
+  local flow = ready_context(opts and opts.range):next(function(context)
     return require("opencode.api.prompt").prompt(text, context, opts)
   end)
   flow:catch(notify_error)
@@ -136,7 +153,7 @@ function M.cancel_all()
   return require("opencode.runtime").cancel_all()
 end
 
----Selects one of the three recovery actions for the current Runtime.
+---Selects one of the two recovery actions for the current Runtime.
 ---Readiness and interaction guards run before the picker, while each action keeps its existing Runtime behavior.
 function M.select()
   local runtime = require("opencode.runtime").current()
@@ -149,13 +166,10 @@ function M.select()
     return
   end
   vim.ui.select({
-    "Retry TUI attach",
     "Restart runtime",
     "Show diagnostics",
   }, { prompt = "OpenCode" }, function(choice)
-    if choice == "Retry TUI attach" then
-      runtime:retry_tui():catch(notify_error)
-    elseif choice == "Restart runtime" then
+    if choice == "Restart runtime" then
       runtime:restart():catch(notify_error)
     elseif choice == "Show diagnostics" then
       require("opencode.ui.notify").diagnostics(runtime)
@@ -163,12 +177,34 @@ function M.select()
   end)
 end
 
----Creates an operator range and sends it through the Build workflow by default.
+---Captures the current editor context before opening a fresh managed-session picker.
+---The picker only selects a verified reusable Session; the unchanged capture is then passed to the Build prompt.
+---@param opts? opencode.PromptOpts
+---@return Promise<any>
+function M.select_session(opts)
+  if opts and opts.mode and opts.mode ~= "build" then
+    return reject_mode()
+  end
+  local context, readiness = acquire_context()
+  if not context then
+    readiness:catch(notify_error)
+    return readiness
+  end
+  local flow = readiness
+    :next(function(runtime)
+      return require("opencode.ui.session_picker").open(runtime, context, opts)
+    end)
+    :catch(notify_error)
+  return flow
+end
+
+---Creates an operator range and sends it through the Build workflow.
+---Unavailable modes are reported before the operator is installed, while a valid invocation captures its range at use time.
 ---@param text string
 ---@param opts? opencode.PromptOpts
 ---@return string
 function M.operator(text, opts)
-  if opts and opts.mode and opts.mode ~= "plan" and opts.mode ~= "build" then
+  if not accepts_build_mode(opts) then
     notify_error({ error_class = "mode_unavailable" })
     return ""
   end

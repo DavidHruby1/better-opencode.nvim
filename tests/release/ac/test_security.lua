@@ -18,12 +18,11 @@ local function argv_key(command)
   return table.concat(command, "\0")
 end
 
----Rejects shell-style, discovery, and tmux-mutating probes at the command boundary.
----It accepts only the fixed Git probe and read-only tmux version argv used by health.
+---Rejects shell-style, discovery, and terminal-mutating probes at the command boundary.
+---Health only performs the fixed Git probe; tmux is not a runtime prerequisite.
 local function assert_read_only_commands(calls)
   local allowed = {
     ["git\0merge-file\0-p\0--diff3\0/dev/null\0/dev/null\0/dev/null"] = true,
-    ["tmux\0-V"] = true,
   }
   for _, command in ipairs(calls.system) do
     eq(type(command), "table")
@@ -34,18 +33,6 @@ local function assert_read_only_commands(calls)
     eq(#command, 2)
     eq(command[2], "--version")
   end
-end
-
----Checks the exact tmux argv emitted for one health observation.
----The expected order follows capability collection so extra probes or mutation commands fail visibly.
-local function assert_tmux_argv(calls, expected)
-  local actual = {}
-  for _, command in ipairs(calls.system) do
-    if command[1] == "tmux" then
-      table.insert(actual, argv_key(command))
-    end
-  end
-  eq(actual, expected)
 end
 
 ---Runs the public health check against local capability boundaries without starting OpenCode.
@@ -305,51 +292,14 @@ local function assert_private_health(observations, calls)
   end
 end
 
-T["AC-SEC-02 health reports tmux transport boundaries without mutation"] = function()
+T["AC-SEC-02 health works outside tmux without terminal probes"] = function()
   local outside, outside_calls = run_health({ in_tmux = false })
-  eq(contains(outside.error, "tmux is required; start Neovim inside tmux (TMUX is not set)"), true)
-  eq(contains(outside.error, "TMUX_PANE is not set; restart Neovim inside tmux"), false)
-  assert_tmux_argv(outside_calls, { "tmux\0-V" })
-  assert_private_health(outside, outside_calls)
-
-  local missing_executable, missing_executable_calls = run_health({
-    in_tmux = true,
-    executable = { tmux = false },
-  })
-  eq(
-    contains(missing_executable.error, "tmux executable is required; install tmux and restart Neovim inside tmux"),
-    true
-  )
-  assert_tmux_argv(missing_executable_calls, {})
-  assert_private_health(missing_executable, missing_executable_calls)
-
-  local missing_version, missing_version_calls = run_health({ in_tmux = true, tmux_version_error = true })
-  eq(contains(missing_version.error, "tmux version could not be read; ensure `tmux -V` succeeds"), true)
-  eq(contains(missing_version.ok, "tmux pane target is available"), true)
-  assert_tmux_argv(missing_version_calls, { "tmux\0-V" })
-  assert_private_health(missing_version, missing_version_calls)
-
-  local missing_pane, missing_pane_calls = run_health({ in_tmux = true, tmux_pane = false })
-  eq(contains(missing_pane.error, "TMUX_PANE is not set; restart Neovim inside tmux"), true)
-  eq(contains(missing_pane.ok, "tmux pane target is available"), false)
-  assert_tmux_argv(missing_pane_calls, { "tmux\0-V" })
-  assert_private_health(missing_pane, missing_pane_calls)
-
-  local healthy, healthy_calls = run_health({
-    in_tmux = true,
-    version = "1.17.3",
-  })
-  for _, message in ipairs({
-    "Neovim is running inside tmux",
-    "tmux available: tmux 3.4",
-    "tmux pane target is available",
-  }) do
-    eq(contains(healthy.ok, message), true, message)
+  local output = table.concat(outside.error, "\n") .. "\n" .. table.concat(outside.ok, "\n")
+  eq(output:find("tmux", 1, true), nil)
+  for _, command in ipairs(outside_calls.system) do
+    eq(command[1], "git")
   end
-  assert_tmux_argv(healthy_calls, {
-    "tmux\0-V",
-  })
-  assert_private_health(healthy, healthy_calls)
+  assert_private_health(outside, outside_calls)
 end
 
 T["AC-SEC-02 health reports actionable local capability failures without discovery"] = function()

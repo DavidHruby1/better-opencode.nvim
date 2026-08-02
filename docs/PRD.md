@@ -12,15 +12,15 @@
 | OpenCode baselines | `v1.17.3` (`8c8011336163d7e7fb24a6a4a049cdb1f6e6ee74`) a `v1.18.9` (`4da7bb44c84e013fa53e9c5d02ac753d1435c81a`) |
 | Jazyk | Čeština |
 
-Tento dokument je autoritou pro produktové chování a rozsah. `docs/ARCHITECTURE.md` je autoritou pro implementační kontrakty a `docs/ACCEPTANCE.md` pro ověření. Při rozporu se nejprve opraví dokumentace; implementace nesmí rozpor řešit skrytým předpokladem.
+Tento dokument je autoritou pro produktové chování a rozsah. `docs/ARCHITECTURE.md` je autoritou pro implementační kontrakty a `docs/ACCEPTANCE.md` pro ověření. Aktuální změny Build-only/no-TUI jsou shrnuté v `docs/FIX-PLAN.md`; starší Plan/TUI pasáže v tomto historickém PRD se nesmí použít jako nový runtime kontrakt.
 
 ## Shrnutí produktu
 
-Fork mění `opencode.nvim` z tenkého bridge na Neovim-native nástroj pro inline vývoj. Uživatel zadává Build i Plan přes víceřádkový `Snacks.win` float u kurzoru. Build je input-only: po úspěšném dispatchi se float zavře, neotevře sidebar ani tmux pane a stav běhu se ukazuje jen inline v cílovém bufferu. Inline Build stav používá dvě `virt_lines` u začátku scope: spinner `⠙ Implementing` a volitelný jednorádkový preview skutečného OpenCode reasoning, které se whitespace-collapse, ořízne na šířku source window a po terminálním stavu nebo konfliktu zmizí. Nic z toho se nepersistuje, neloguje ani neposílá přes notifikaci.
+Fork mění `opencode.nvim` z tenkého bridge na Neovim-native nástroj pro inline Build vývoj. Uživatel zadává Build přes one-line `Snacks.win` float u kurzoru; dlouhý text se vizuálně zalomí a `<S-CR>` vloží skutečný newline. Po úspěšném dispatchi se float zavře a stav běhu se ukazuje jen inline v cílovém bufferu. Inline Build stav používá dvě `virt_lines` u začátku scope: spinner `⠙ Implementing` a volitelný jednorádkový preview skutečného OpenCode reasoning, které se whitespace-collapse, ořízne na šířku source window a po terminálním stavu nebo konfliktu zmizí. Nic z toho se nepersistuje, neloguje ani neposílá přes notifikaci.
 
 Build agent nikdy nezapisuje přímo do source souborů. Vrací strukturovaný návrh změny autorizovaného rozsahu. Plugin z něj vytvoří Theirs, ověří hard scope a provede třícestný merge Base/Ours/Theirs do živého Neovim bufferu. Výsledek se nezapisuje na disk a zůstává jedním undo krokem.
 
-Pro Plan a ruční show/focus existuje jeden sdílený lazy pravý tmux pane napříč rooty. Otevírá se jen tehdy, když je transcript opravdu potřeba; input je zamčený a root switch nezastaví background Joby.
+Ověřené Sessions lze vybrat v Snacks pickeru, znovu použít pro Build nebo bezpečně smazat. Runtime je headless a nevyžaduje tmux.
 
 Více Build Jobů může běžet paralelně ve stejném souboru a stejné branch, pokud mají nepřekrývající se hard scopes. Worktrees ani kopie workspace se pro tento workflow nepoužívají.
 
@@ -32,8 +32,8 @@ Upstream integrace poskytuje hodnotný input, kontext, completion, event základ
 2. Změna mimo viditelný hard scope se nemůže aplikovat.
 3. Souběžné změny uživatele a agentů se slučují bez tiché ztráty dat.
 4. Eventy, otázky a oprávnění se nemíchají mezi Joby.
-5. Plan je skutečně needitující.
-6. Plugin vlastní a bezpečně spravuje svůj OpenCode server i TUI klient.
+5. Reusable Session reuse je ověřený podle rootu, ownership metadat a permissions.
+6. Plugin vlastní a bezpečně spravuje svůj OpenCode server bez attachování cizích procesů.
 
 ## Cíle
 
@@ -41,7 +41,7 @@ Upstream integrace poskytuje hodnotný input, kontext, completion, event základ
 2. Poskytnout rychlý Build nad visual range, funkcí nebo aktuálním souborem.
 3. Umožnit bezpečné paralelní Joby nad nepřekrývajícími se rozsahy stejného bufferu.
 4. Zachovat uživatelovy neuložené změny pomocí Base/Ours/Theirs merge.
-5. Umožnit Plan konzultaci a následný Build ve stejné Session.
+5. Umožnit výběr, reuse a bezpečné mazání managed Session.
 6. Zachovat hodnotné upstream UX a odstranit cizí process discovery a blind reload.
 
 ## Non-goals pro verzi 2.0
@@ -58,7 +58,7 @@ Upstream integrace poskytuje hodnotný input, kontext, completion, event základ
 10. Vlastní `#command` nebo `#skill` namespace.
 11. Specializovaný Review artefakt, Plan-to-scaffold a vlastní Search-to-quickfix workflow.
 12. Blockwise visual Build; verze 2.0 podporuje pouze souvislý characterwise nebo linewise range.
-13. Přímý TUI prompt jako Build workflow; Build Joby používají float editor a TUI slouží jen jako transcript pro Plan a ruční show/focus.
+13. Přímý TUI prompt nebo TUI transcript workflow.
 14. Spouštění OpenCode custom commands; command templates nejsou součástí bezpečného proposal-only workflow verze 2.0.
 
 ## Cílový uživatel a hlavní workflow

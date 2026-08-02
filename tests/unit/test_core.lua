@@ -72,7 +72,7 @@ T["permission profile keeps hard denies last"] = function()
   eq(require("opencode.session").verify_permissions(rules), true)
 end
 
-T["Session errors terminate only an exactly correlated Plan"] = function()
+T["Session errors terminate only an exactly correlated Build Job"] = function()
   local runtime = require("opencode.runtime").new("/root")
   local session = { id = "ses_1", active_job_key = "ses_1:msg_1" }
   local job = { key = session.active_job_key, state = "running", user_message_id = "msg_1" }
@@ -113,8 +113,8 @@ end
 
 T["assistant routing keeps old turn identity during Session reuse"] = function()
   local runtime = require("opencode.runtime").new("/root")
-  local old = require("opencode.job").new("ses_1", { root = "/root", buf = 1, path = "/root/a", mode = "plan" })
-  local current = require("opencode.job").new("ses_1", { root = "/root", buf = 1, path = "/root/a", mode = "plan" })
+  local old = require("opencode.job").new("ses_1", { root = "/root", buf = 1, path = "/root/a", mode = "build" })
+  local current = require("opencode.job").new("ses_1", { root = "/root", buf = 1, path = "/root/a", mode = "build" })
   old.state = "completed"
   runtime.jobs[old.key], runtime.jobs[current.key] = old, current
   runtime.sessions.ses_1 = { id = "ses_1", active_job_key = current.key }
@@ -429,8 +429,8 @@ T["cancel one is local and isolated even when abort fails"] = function()
       return Promise.reject({ error_class = "http" })
     end,
   }
-  local a = { key = "job_a", root = "/root", session_id = "ses_a", state = "running", mode = "plan" }
-  local b = { key = "job_b", root = "/root", session_id = "ses_b", state = "running", mode = "plan" }
+  local a = { key = "job_a", root = "/root", session_id = "ses_a", state = "running", mode = "build" }
+  local b = { key = "job_b", root = "/root", session_id = "ses_b", state = "running", mode = "build" }
   runtime.sessions.ses_a = { id = "ses_a", active_job_key = a.key }
   runtime.sessions.ses_b = { id = "ses_b", active_job_key = b.key }
   runtime.jobs[a.key], runtime.jobs[b.key] = a, b

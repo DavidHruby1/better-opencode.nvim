@@ -12,12 +12,11 @@ local function disk_logical(buf)
   })
 end
 
----Saves dirty files before dispatch, asking for confirmation only for Plan.
----Build writes immediately; Plan offers save and cancel. Every write is checked after hooks, and failure stops dispatch before Session or Job creation.
+---Saves every dirty referenced file before dispatch.
+---Each write is checked after hooks, and any failure stops dispatch before Session or Job creation.
 ---@param context table
----@param mode? "plan"|"build"
 ---@return Promise<boolean>
-function M.run(context, mode)
+function M.run(context)
   local Promise = require("opencode.promise")
   local dirty = {}
   context.referenced_buffers[context.buf] = true
@@ -43,19 +42,7 @@ function M.run(context, mode)
     end
     return Promise.resolve(true)
   end
-  if mode == "build" then
-    return save()
-  end
-  return require("opencode.promise.ui")
-    .select({ "save and continue", "cancel" }, {
-      prompt = "Dirty files: " .. #dirty,
-    })
-    :next(function(choice)
-      if choice ~= "save and continue" then
-        return Promise.reject({ error_class = "cancelled" })
-      end
-      return save()
-    end)
+  return save()
 end
 
 return M

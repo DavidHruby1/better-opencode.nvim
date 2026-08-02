@@ -21,8 +21,8 @@ local function resolve(request)
   return runtime, job
 end
 
----Reopens prompt dispatch after a remote dialog and restores only the pane that the dialog hid.
----The saved root is resolved again because its Runtime may have shut down while the question or permission was open.
+---Reopens prompt dispatch after a remote dialog.
+---The request identity is resolved again because its Runtime may have shut down while the question or permission was open.
 local function unlock(request)
   if not remote_kinds[request.kind] then
     return
@@ -31,23 +31,12 @@ local function unlock(request)
   if runtime then
     runtime.interaction_locked = false
     runtime.prompt_locked = request.prompt_was_locked or runtime.reconciling or runtime.reconciliation_required == true
-    if request.sidebar_root then
-      local visible_runtime = require("opencode.runtime").for_root(request.sidebar_root)
-      if visible_runtime and visible_runtime.sidebar then
-        local shown = visible_runtime.sidebar:show_root(visible_runtime)
-        if shown and visible_runtime.selected_session_id then
-          visible_runtime.sidebar:select_session(visible_runtime.selected_session_id):catch(function()
-            require("opencode.ui.notify").error("session_select")
-          end)
-        end
-      end
-    end
   end
 end
 
 ---Displays the oldest queued request after resolving its Runtime and Job from immutable identity.
----Only this function changes queued to shown. Remote questions and permissions hide the one shared pane and remember its root,
----so completion restores it only when a verified pane was visible before the dialog.
+---Only this function changes queued to shown. Remote questions and permissions lock prompt dispatch until their request is confirmed,
+---so the FIFO remains serialized without depending on a terminal pane.
 function M.advance()
   if M.current then
     return
@@ -59,16 +48,8 @@ function M.advance()
       M.current = request
       request.state = "shown"
       if remote_kinds[request.kind] then
-        local Sidebar = require("opencode.ui.sidebar")
-        request.sidebar_root = Sidebar.visible_root()
         request.prompt_was_locked = runtime.prompt_locked == true
         runtime.interaction_locked, runtime.prompt_locked = true, true
-        if request.sidebar_root then
-          local visible_runtime = require("opencode.runtime").for_root(request.sidebar_root)
-          if visible_runtime and visible_runtime.sidebar then
-            visible_runtime.sidebar:hide()
-          end
-        end
       end
       require("opencode.ui.dialog").show(request)
       return
@@ -118,7 +99,7 @@ function M.complete_current(id)
 end
 
 ---Removes every queued or shown request owned by one Job.
----A removed current request releases its visibility lock before the next request is shown.
+---A removed current request releases its interaction lock before the next request is shown.
 function M.remove_by_job(root, job_key)
   local kept = {}
   for _, request in ipairs(M.queue) do

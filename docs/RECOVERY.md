@@ -21,7 +21,7 @@ Health and startup report only the blocking category; they never print config co
 
 Use the select menu's `Restart runtime` only after checking the diagnostic error class. Restart is explicit and reconciles the owned Runtime before prompts reopen. The plugin never attaches to a foreign process.
 
-If diagnostics show `TUI dead` or `TUI error` while the Runtime remains ready, use `Retry TUI attach`. A failed transcript selection remains visible as `session_select`; it is not treated as a successful attach.
+The recovery menu has no terminal/TUI attach step. Use `Restart runtime` for a disconnected Runtime or `Show diagnostics` to inspect the safe error class. Use `select_session()` for normal verified Session reuse.
 
 ## Conflicts
 

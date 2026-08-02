@@ -163,6 +163,9 @@ end
 function Client:update_session(id, body)
   return self:request("PATCH", "/session/" .. id, body)
 end
+function Client:delete_session(id)
+  return self:request("DELETE", "/session/" .. id)
+end
 
 ---Rejects a Session response whose returned directory is not the client's canonical root.
 local function verify_session_root(client, value)
@@ -191,9 +194,6 @@ function Client:prompt_async(id, body)
 end
 function Client:abort(id)
   return self:request("POST", "/session/" .. id .. "/abort")
-end
-function Client:select_session(id)
-  return self:request("POST", "/tui/select-session", { sessionID = id })
 end
 function Client:questions()
   return self:request("GET", "/question")

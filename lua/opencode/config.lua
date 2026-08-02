@@ -1,6 +1,5 @@
 ---@class opencode.Opts
 ---@field runtime? { binary?: string, startup_timeout?: integer, reconnect?: { max_attempts?: integer, backoff_ms?: integer, max_backoff_ms?: integer }, shutdown_timeout?: integer }
----@field sidebar? { width?: integer }
 ---@field contexts? table<string, function>
 ---@field ask? { snacks?: { win?: snacks.win.Config } }
 ---@field notify? { enabled?: boolean, opts?: table }
@@ -15,7 +14,6 @@ local defaults = {
     reconnect = { max_attempts = 5, backoff_ms = 100, max_backoff_ms = 2000 },
     shutdown_timeout = 2000,
   },
-  sidebar = { width = 30 },
   notify = { enabled = true, opts = {} },
   contexts = {
     ["@this"] = require("opencode.context.builtins").this,
@@ -32,7 +30,7 @@ local defaults = {
         backdrop = false,
         border = "rounded",
         width = 60,
-        height = 3,
+        height = 1,
         bo = { filetype = "opencode_ask" },
       },
     },
@@ -66,7 +64,7 @@ local function validate(value)
     return failure("root", "type")
   end
   for key in pairs(value) do
-    if key ~= "runtime" and key ~= "sidebar" and key ~= "contexts" and key ~= "ask" and key ~= "notify" then
+    if key ~= "runtime" and key ~= "contexts" and key ~= "ask" and key ~= "notify" then
       return failure("" .. key, "unsupported_key")
     end
   end
@@ -123,20 +121,6 @@ local function validate(value)
           return ok, err
         end
       end
-    end
-  end
-  if value.sidebar then
-    if type(value.sidebar) ~= "table" then
-      return failure("sidebar", "type")
-    end
-    for key in pairs(value.sidebar) do
-      if key ~= "width" then
-        return failure("sidebar." .. key, "unsupported_key")
-      end
-    end
-    local ok, err = check_number(value.sidebar.width or defaults.sidebar.width, "sidebar.width", 5, 95, true)
-    if not ok then
-      return ok, err
     end
   end
   if value.contexts then

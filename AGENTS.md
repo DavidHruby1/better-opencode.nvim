@@ -59,11 +59,11 @@ stylua .
 ## Architecture notes
 
 - **Async**: custom Promise implementation in `lua/opencode/promise/init.lua` (fork of `promise.nvim`)
-- **Runtime ownership**: one isolated Server and TUI are started per canonical project root; foreign processes are never attached or stopped.
+- **Runtime ownership**: one isolated Server is started per canonical project root; foreign processes are never attached or stopped. Legacy TUI identities are cleaned only from old manifests.
 - **Context system** (`lua/opencode/context/init.lua`): captures buffer, window, cursor, and selection before UI opens and renders configured context placeholders.
 - **Events**: each Runtime owns one authenticated SSE stream and routes events by exact Session, message, request, Job, and root identity.
 - **Edit review**: Build proposals use Base/Ours/Theirs merge and change only the live buffer. Agent conflicts use four scratch buffers; external conflicts compare buffer and disk in a scratch tab.
-- **Safety**: Plan is read-only, tool permissions fail closed, dirty files are saved before Build dispatch, and stale generations or disk changes block apply.
+- **Safety**: Build is the only prompt workflow, tool permissions fail closed, dirty files are saved before dispatch, and stale generations or disk changes block apply.
 
 ## Project vision
 

@@ -10,8 +10,19 @@ local function restore_focus(context)
   end
 end
 
+---Counts content rows after display-width wrapping while preserving every explicit newline.
+---Each physical line occupies at least one row, so an empty prompt stays editable and long input can grow the float.
+local function display_rows(text, width)
+  local rows = 0
+  for _, line in ipairs(vim.split(text or "", "\n", { plain = true })) do
+    rows = rows + math.max(1, math.ceil(vim.fn.strdisplaywidth(line) / width))
+  end
+  return math.max(1, rows)
+end
+
 ---Returns a bounded editor-relative size and position above the captured cursor.
----Width grows with the longest prompt line from a 60-column minimum, while height follows multiline input within the usable editor.
+---The width stays within the configured and available limits, while height follows display-width wrapping and explicit
+---newlines. Keeping the float clamped leaves the prompt usable when the cursor is near an editor edge.
 local function geometry(context, snacks, text)
   local columns = math.max(vim.o.columns, 1)
   local lines = math.max(vim.o.lines - vim.o.cmdheight, 1)
@@ -30,17 +41,11 @@ local function geometry(context, snacks, text)
   max_width = math.max(1, max_width)
   min_width = math.max(1, math.min(math.floor(min_width), max_width))
 
-  local text_width = 0
-  for _, line in ipairs(vim.split(text, "\n", { plain = true })) do
-    text_width = math.max(text_width, vim.api.nvim_strwidth(line))
-  end
-  local width = math.max(min_width, text_width + 5)
-  width = math.max(1, math.min(math.floor(width), max_width))
+  local width = math.max(min_width, math.min(math.floor(configured_width), max_width))
 
   local max_height = math.max(1, math.min(12, lines - 2))
-  local min_height = math.min(3, max_height)
-  local line_count = #vim.split(text, "\n", { plain = true })
-  local height = math.max(min_height, math.min(line_count, max_height))
+  local content_width = math.max(1, width - 5)
+  local height = math.max(1, math.min(display_rows(text, content_width), max_height))
   local screen = { row = 1, col = 1 }
   if vim.api.nvim_win_is_valid(context.win) and vim.api.nvim_win_get_buf(context.win) == context.buf then
     screen = vim.fn.screenpos(context.win, context.cursor[1], context.cursor[2] + 1)
@@ -78,34 +83,33 @@ local function update_highlights(buf, context)
   end
 end
 
----Opens a multiline Build or Plan editor and resolves with its text after a successful submit.
+---Opens a Build editor with one content row initially and resolves with its text after a successful submit.
+---Visual wrapping and explicit newlines grow the editor; <CR> submits or accepts completion, while <S-CR> and <C-j>
+---insert newlines.
 ---An optional readiness Promise may settle while the editor is open; Enter queues one submit until it is ready, and an
 ---optional submit callback may return a Promise. Failed readiness or submit work leaves the editor intact for retry.
 ---@param default? string
 ---@param context table
----@param mode? "plan"|"build"
+---@param _mode? "build" Compatibility argument for existing callers; the editor always uses Build.
 ---@param workflow_opts? table
 ---@param readiness? Promise<any>
 ---@param submit? fun(text: string): Promise<any>|any
 ---@return Promise<string>
-function M.ask(default, context, mode, workflow_opts, readiness, submit)
+function M.ask(default, context, _mode, workflow_opts, readiness, submit)
   local Promise = require("opencode.promise")
   local config = require("opencode.config")
-  mode = mode or "build"
-  local scope_kind = mode == "build" and "unsupported" or "read-only"
+  local scope_kind = "unsupported"
 
-  if mode == "build" then
-    local text = table.concat(vim.api.nvim_buf_get_lines(context.buf, 0, -1, false), "\n")
-    local scope = require("opencode.scope").resolve(context, { text = text }, workflow_opts and workflow_opts.scope)
-    if scope then
-      scope_kind = scope.kind
-      context.displayed_scope = {
-        sha256 = vim.fn.sha256(text),
-        kind = scope.kind,
-        start_byte = scope.start_byte,
-        end_byte = scope.end_byte,
-      }
-    end
+  local text = table.concat(vim.api.nvim_buf_get_lines(context.buf, 0, -1, false), "\n")
+  local scope = require("opencode.scope").resolve(context, { text = text }, workflow_opts and workflow_opts.scope)
+  if scope then
+    scope_kind = scope.kind
+    context.displayed_scope = {
+      sha256 = vim.fn.sha256(text),
+      kind = scope.kind,
+      start_byte = scope.start_byte,
+      end_byte = scope.end_byte,
+    }
   end
 
   local result, resolve, reject = Promise.with_resolvers()
@@ -183,8 +187,8 @@ function M.ask(default, context, mode, workflow_opts, readiness, submit)
     reject({ error_class = "cancelled" })
   end
 
-  ---Inserts one line break at the prompt cursor without relying on terminal keycode translation.
-  ---Ctrl-j calls this operation so multiline input remains available without a submit key conflict.
+  ---Inserts one real line break at the prompt cursor without relying on terminal keycode translation.
+  ---<S-CR> calls this operation and <C-j> remains its fallback, so neither newline key submits the prompt.
   local function insert_newline()
     if not win or not win:valid() then
       return
@@ -204,12 +208,27 @@ function M.ask(default, context, mode, workflow_opts, readiness, submit)
     min_width = snacks.min_width,
     max_width = snacks.max_width,
   }
-  local dim = geometry(context, geometry_opts, initial)
+  local dim = geometry(context, geometry_opts, "")
+  ---Recomputes the float bounds from current prompt text and applies the same edge clamps used at open.
+  ---Text changes can add wrapped rows or explicit newlines, so the prompt grows without allowing its window to leave the editor.
+  local function update_geometry(opened)
+    if not opened:valid() then
+      return
+    end
+    local next_dim = geometry(context, geometry_opts, opened:text())
+    opened.opts.width = next_dim.width
+    opened.opts.min_width = next_dim.min_width
+    opened.opts.max_width = next_dim.max_width
+    opened.opts.height = next_dim.height
+    opened.opts.row = next_dim.row
+    opened.opts.col = next_dim.col
+    opened:update()
+  end
   snacks.buf = nil
   snacks.file = nil
   snacks.text = initial
   local root_name = vim.fs.basename(context.root)
-  snacks.title = string.format(" %s | %s | %s ", mode == "build" and "Build" or "Plan", root_name, scope_kind)
+  snacks.title = string.format(" Build | %s | %s ", root_name, scope_kind)
   snacks.footer = nil
   snacks.relative = "editor"
   snacks.position = "float"
@@ -259,6 +278,7 @@ function M.ask(default, context, mode, workflow_opts, readiness, submit)
       desc = "Submit",
     },
     submit_normal = { "<CR>", dispatch, mode = "n", desc = "Submit" },
+    newline_shift = { "<S-CR>", insert_newline, mode = "i", desc = "New line" },
     newline = { "<C-j>", insert_newline, mode = "i", desc = "New line" },
     cancel = { "<Esc>", cancel, mode = { "i", "n" }, desc = "Cancel" },
   })
@@ -269,14 +289,7 @@ function M.ask(default, context, mode, workflow_opts, readiness, submit)
       buffer = opened.buf,
       callback = function()
         update_highlights(opened.buf, context)
-        local next_dim = geometry(context, geometry_opts, opened:text())
-        opened.opts.width = next_dim.width
-        opened.opts.min_width = next_dim.min_width
-        opened.opts.max_width = next_dim.max_width
-        opened.opts.height = next_dim.height
-        opened.opts.row = next_dim.row
-        opened.opts.col = next_dim.col
-        opened:update()
+        update_geometry(opened)
       end,
     })
     update_highlights(opened.buf, context)
@@ -284,6 +297,7 @@ function M.ask(default, context, mode, workflow_opts, readiness, submit)
     if user_on_buf then
       pcall(user_on_buf, opened)
     end
+    update_geometry(opened)
   end
   snacks.on_win = function(opened)
     local lines = vim.api.nvim_buf_get_lines(opened.buf, 0, -1, false)

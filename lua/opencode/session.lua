@@ -82,7 +82,8 @@ end
 
 ---Derives Session availability from the local Job pointer before remote status.
 ---A local nonterminal Job remains active through apply and dialogs even if OpenCode reports idle.
----Remote busy without such a Job closes the prompt gate instead of inventing local work.
+---A pending or live Session claim is also active, while remote busy without local work closes the prompt gate instead of
+---inventing local work. Terminal claims are discarded when this check observes them.
 ---@param runtime table
 ---@param session table
 ---@param remote_status? string
@@ -91,6 +92,17 @@ function M.availability(runtime, session, remote_status)
   local job = session.active_job_key and runtime.jobs[session.active_job_key]
   if job and not require("opencode.job").terminal(job.state) and job.session_id == session.id then
     return "active", job.key
+  end
+  local claim = runtime.session_claims and runtime.session_claims[session.id]
+  if claim then
+    if type(claim) ~= "table" or claim.pending then
+      return "active", "session_claimed"
+    end
+    local claimed_job = claim.job_key and runtime.jobs[claim.job_key]
+    if claimed_job and not require("opencode.job").terminal(claimed_job.state) then
+      return "active", claimed_job.key
+    end
+    runtime.session_claims[session.id] = nil
   end
   if remote_status == "busy" or remote_status == "running" then
     runtime.prompt_locked, runtime.reconciliation_required = true, true
@@ -103,6 +115,79 @@ end
 local function activity(session)
   local time = session.time or {}
   return time.updated or time.created or session.updatedAt or session.createdAt or 0
+end
+
+---Finds a nonterminal local Job even when its Session registry entry is missing from a transient inventory response.
+---The result protects that Job and its selected pointer from cleanup based only on list omission.
+---@param runtime table
+---@param session_id string
+---@return boolean
+local function has_active_job(runtime, session_id)
+  for _, job in pairs(runtime.jobs or {}) do
+    if job.session_id == session_id and not require("opencode.job").terminal(job.state) then
+      return true
+    end
+  end
+  return false
+end
+
+---Claims one Session for the short interval between selecting it and registering its Job.
+---A pending claim or a live claimed Job rejects another claimant; terminal Job claims are discarded when observed.
+---This keeps the existing Runtime table as the single race guard without changing remote Session state.
+---@param runtime table
+---@param session_id string
+---@return table?, string?
+function M.claim(runtime, session_id)
+  runtime.session_claims = runtime.session_claims or {}
+  local session = runtime.sessions and runtime.sessions[session_id]
+  local job = session and session.active_job_key and runtime.jobs[session.active_job_key]
+  if job and not require("opencode.job").terminal(job.state) then
+    return nil, "session_active"
+  end
+  if has_active_job(runtime, session_id) then
+    return nil, "session_active"
+  end
+  local current = runtime.session_claims[session_id]
+  if current then
+    if type(current) ~= "table" or current.pending then
+      return nil, "session_busy"
+    end
+    local job = current.job_key and runtime.jobs[current.job_key]
+    if job and not require("opencode.job").terminal(job.state) then
+      return nil, "session_active"
+    end
+    runtime.session_claims[session_id] = nil
+  end
+  local claim = { pending = true, session_id = session_id }
+  runtime.session_claims[session_id] = claim
+  return claim
+end
+
+---Binds a successful prompt claim to its Job so later availability checks can identify its owner.
+---The identity check prevents an older failed dispatch from mutating a newer claimant's table entry.
+---@param runtime table
+---@param session_id string
+---@param claim table
+---@param job_key string
+---@return boolean
+function M.bind_claim(runtime, session_id, claim, job_key)
+  if runtime.session_claims and runtime.session_claims[session_id] == claim then
+    claim.pending = false
+    claim.job_key = job_key
+    return true
+  end
+  return false
+end
+
+---Releases a claim only when it still belongs to the caller.
+---Failed dispatches and delete attempts use this identity check so a late cleanup cannot clear another Session's claim.
+---@param runtime table
+---@param session_id string
+---@param claim table
+function M.release_claim(runtime, session_id, claim)
+  if runtime.session_claims and runtime.session_claims[session_id] == claim then
+    runtime.session_claims[session_id] = nil
+  end
 end
 
 ---Assigns the shortest collision-free suffix IDs for one picker dataset.
@@ -128,9 +213,10 @@ function M.assign_short_ids(sessions)
 end
 
 ---Loads and verifies the Runtime-local managed Session inventory.
----It checks every metadata candidate through detail GET, then derives availability and activity ordering.
----Only verified details enter the local registry or picker dataset. A supplied status snapshot avoids
----requesting /session/status again when startup passes the response on to reconciliation.
+---It checks every metadata candidate through detail GET, reconciles missing inactive entries, and derives availability and
+---activity ordering while normalizing legacy mode metadata for status. Active or blocked local work stays registered when a
+---fresh list is incomplete, but confirmed remote absence clears its reusable registry entry and selected pointer.
+---A supplied status snapshot avoids requesting /session/status again when startup passes the response to reconciliation.
 ---@param runtime table
 ---@param statuses? table
 ---@return Promise<table[]>
@@ -139,32 +225,86 @@ function M.inventory(runtime, statuses)
   return Promise.all({ runtime.client:list_sessions(), statuses or runtime.client:session_status() })
     :next(function(results)
       local listed, statuses = results[1], results[2]
+      local listed_ids = {}
       local checks = {}
       for _, candidate in ipairs(listed or {}) do
-        if M.managed(candidate, runtime, false) then
+        if type(candidate) == "table" and type(candidate.id) == "string" then
+          listed_ids[candidate.id] = true
+        end
+        if type(candidate) == "table" and M.managed(candidate, runtime, false) then
           table.insert(
             checks,
-            runtime.client:get_session(candidate.id):catch(function()
-              return nil
-            end)
+            runtime.client
+              :get_session(candidate.id)
+              :next(function(detail)
+                return { id = candidate.id, detail = detail }
+              end)
+              :catch(function(err)
+                return { id = candidate.id, error = err }
+              end)
           )
         end
       end
       return Promise.all(checks):next(function(details)
         local sessions = {}
-        for _, detail in ipairs(details) do
+        local verified_ids = {}
+        local confirmed_absence = {}
+        local uncertain_details = {}
+        for _, checked in ipairs(details) do
+          local detail = checked.detail
+          local session_id = checked.id
           if detail and M.managed(detail, runtime, true) then
+            verified_ids[detail.id] = true
             local local_session = runtime.sessions[detail.id] or { id = detail.id, root = runtime.root }
             local_session.title = detail.title
-            local_session.metadata = vim.deepcopy(detail.metadata)
+            local_session.metadata = vim.deepcopy(detail.metadata or {})
+            local_session.metadata.last_mode = "build"
+            local_session.directory = detail.directory
+            local_session.parent_id = detail.parentID or detail.parent_id
+            local_session.summary = vim.deepcopy(detail.summary)
+            local_session.time = vim.deepcopy(detail.time)
             local_session.remote_status = status_value(statuses, detail.id) or "idle"
-            local_session.last_mode = detail.metadata and detail.metadata.last_mode or local_session.last_mode
+            local_session.last_mode = "build"
             local_session.activity = activity(detail)
+            local_session.updated = local_session.activity
             local_session.availability, local_session.availability_reason =
               M.availability(runtime, local_session, local_session.remote_status)
             runtime.sessions[detail.id] = local_session
             table.insert(sessions, local_session)
+          elseif checked.error and checked.error.status == 404 then
+            confirmed_absence[session_id] = true
+          elseif checked.error then
+            uncertain_details[session_id] = true
           end
+        end
+
+        for session_id, local_session in pairs(runtime.sessions) do
+          if not verified_ids[session_id] then
+            local_session.activity = local_session.activity or 0
+            local_session.updated = local_session.updated or local_session.activity
+            local_session.availability, local_session.availability_reason =
+              M.availability(runtime, local_session, local_session.remote_status)
+            local protected = local_session.availability == "active" or local_session.availability == "blocked"
+            local remote_absent = not listed_ids[session_id] or confirmed_absence[session_id]
+            if remote_absent and not protected and not uncertain_details[session_id] then
+              runtime.sessions[session_id] = nil
+              if runtime.selected_session_id == session_id then
+                runtime.selected_session_id = nil
+              end
+            elseif protected then
+              table.insert(sessions, local_session)
+            end
+          end
+        end
+        local selected_id = runtime.selected_session_id
+        if
+          selected_id
+          and (not listed_ids[selected_id] or confirmed_absence[selected_id])
+          and not runtime.sessions[selected_id]
+          and not (runtime.session_claims and runtime.session_claims[selected_id])
+          and not has_active_job(runtime, selected_id)
+        then
+          runtime.selected_session_id = nil
         end
         M.assign_short_ids(sessions)
         table.sort(sessions, function(a, b)
@@ -178,48 +318,42 @@ function M.inventory(runtime, statuses)
     end)
 end
 
----Verifies a Session before reuse, appending the exact permission suffix when it was not supplied by creation.
+---Verifies a Session before Build reuse, appending the exact permission suffix when it was not supplied by creation.
 ---The detail GET proves ownership, canonical root, and that no later rule can override the profile. Fresh Sessions
----already received the same metadata and permissions in POST, so they skip only the duplicate PATCH.
+---already received the same Build metadata and permissions in POST, so they skip only the duplicate PATCH.
+---The optional boolean skips that duplicate PATCH; an older leading mode value is accepted only for call compatibility
+---and ignored.
+---Verifies a Session's current ownership, root, and permission suffix without changing remote state.
 ---@param runtime table
 ---@param session_id string
----@param mode "plan"|"build"
----@param skip_update? boolean
 ---@return Promise<table>
-function M.revalidate(runtime, session_id, mode, skip_update)
-  local metadata = M.metadata(runtime.root_hash)
-  metadata.last_mode = mode
-  local update = skip_update and require("opencode.promise").resolve(nil)
-    or runtime.client:update_session(session_id, { metadata = metadata, permission = M.permissions })
-  return update
-    :next(function()
-      return runtime.client:get_session(session_id)
-    end)
-    :next(function(detail)
-      if not M.managed(detail, runtime, true) or not M.verify_permissions(detail.permission or {}) then
-        return require("opencode.promise").reject({ error_class = "session_verification" })
-      end
-      return detail
-    end)
+function M.verify(runtime, session_id)
+  return runtime.client:get_session(session_id):next(function(detail)
+    if not M.managed(detail, runtime, true) or not M.verify_permissions(detail.permission or {}) then
+      return require("opencode.promise").reject({ error_class = "session_verification" })
+    end
+    return detail
+  end)
 end
 
----Selects one verified local Session and lazily shows its tmux TUI.
----The remote TUI selection is sent only after the pane is confirmed live; the local field remains transcript and follow-up UI state.
+---Verifies a Session before Build reuse, appending the exact required metadata and permission suffix when needed.
+---The detail GET proves ownership, canonical root, and that no later rule can override the profile. Fresh Sessions
+---already received the same Build metadata and permissions in POST, so they skip only the duplicate PATCH.
+---The optional boolean skips that duplicate PATCH; an older leading mode value is accepted only for call compatibility
+---and ignored.
 ---@param runtime table
 ---@param session_id string
+---@param skip_update_or_legacy? boolean|string
+---@param legacy_skip_update? boolean
 ---@return Promise<table>
-function M.select(runtime, session_id)
-  local session = runtime.sessions[session_id]
-  if not session then
-    return require("opencode.promise").reject({ error_class = "unknown_session" })
-  end
-  local shown, err = runtime.sidebar:show()
-  if not shown or not runtime.sidebar:is_visible() then
-    return require("opencode.promise").reject({ error_class = err or "tui_unavailable" })
-  end
-  return runtime.sidebar:select_session(session_id):next(function()
-    runtime.selected_session_id = session_id
-    return session
+function M.revalidate(runtime, session_id, skip_update_or_legacy, legacy_skip_update)
+  local skip_update = type(skip_update_or_legacy) == "boolean" and skip_update_or_legacy or legacy_skip_update
+  local metadata = M.metadata(runtime.root_hash)
+  metadata.last_mode = "build"
+  local update = skip_update and require("opencode.promise").resolve(nil)
+    or runtime.client:update_session(session_id, { metadata = metadata, permission = M.permissions })
+  return update:next(function()
+    return M.verify(runtime, session_id)
   end)
 end
 

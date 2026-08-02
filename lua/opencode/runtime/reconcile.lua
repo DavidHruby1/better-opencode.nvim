@@ -119,8 +119,8 @@ function M.has_parent_response(job, messages)
   return #matching_assistants(job, messages) > 0
 end
 
----Completes one Job from an exact Session message snapshot.
----Build responses require one structured assistant message and pass through the existing proposal validator; Plan responses only prove the exact parent identity. State guards make repeated reconnect snapshots completion-once.
+---Completes one Build Job from an exact Session message snapshot.
+---Exactly one structured assistant message must pass the existing proposal validator before the Job can enter apply; state guards make repeated reconnect snapshots completion-once.
 ---@param runtime table
 ---@param session table
 ---@param job table
@@ -137,12 +137,6 @@ function M.complete_job(runtime, session, job, messages)
     return false
   end
   session.remote_status = "idle"
-  if job.mode == "plan" then
-    -- Tool calls can produce several assistant messages in one Plan turn; the exact parent identity is the gate.
-    job.completion_count = (job.completion_count or 0) + 1
-    require("opencode.job").finish(job, session, "completed")
-    return true
-  end
   local structured = {}
   for _, info in ipairs(matches) do
     if type(info.structured) == "table" then

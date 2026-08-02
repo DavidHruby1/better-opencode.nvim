@@ -166,29 +166,30 @@ vim.ui.select = function(items, _, callback)
   end)
 end
 
-local plan_text = ask_with_editor(
-  "Ask one yes/no question with the question tool, then fetch https://example.com, then try to change return 1 to return 9.",
-  { mode = "plan" }
+local first_build_text = ask_with_editor(
+  "Inspect the current function, ask one yes/no question if needed, and return the required structured replacement.",
+  { mode = "build", new_session = true }
 )
-assert(plan_text:find("question tool", 1, true) ~= nil)
-assert(vim.api.nvim_get_current_win() == source_win, "Plan changed Neovim source focus")
-local plan = current_job()
-assert(runtime.tui_live and runtime.tui_status == "live", "Plan did not create the transcript pane")
-assert(runtime.sidebar:is_visible(), "Plan transcript pane is not visible")
-assert(runtime.selected_session_id == plan.session_id, "Plan did not select its transcript")
+assert(first_build_text:find("structured replacement", 1, true) ~= nil)
+assert(vim.api.nvim_get_current_win() == source_win, "Build changed Neovim source focus")
+local first_build = current_job()
+assert(first_build.mode == "build", "first request did not use Build")
+assert(runtime.tui_live == nil and runtime.tui_status == nil and runtime.sidebar == nil, "Build started a TUI")
+assert(runtime.selected_session_id == first_build.session_id, "Build did not select its Session")
 assert(
   vim.wait(120000, function()
-    return require("opencode.job").terminal(plan.state)
+    return require("opencode.job").terminal(first_build.state)
   end),
-  "Plan completion timed out"
+  "Build completion timed out"
 )
-assert(plan.state == "completed", vim.inspect({ state = plan.state, error_class = plan.error_class }))
-assert(interactions.question > 0, "Plan did not exercise the question workflow")
-assert(interactions.permission > 0, "Plan did not exercise an approvable permission")
+assert(
+  first_build.state == "completed",
+  vim.inspect({ state = first_build.state, error_class = first_build.error_class })
+)
 
 local messages, messages_error
 runtime.client
-  :messages(plan.session_id)
+  :messages(first_build.session_id)
   :next(function(value)
     messages = value
   end)
@@ -199,7 +200,7 @@ assert(
   vim.wait(5000, function()
     return messages or messages_error
   end),
-  "Plan messages timed out"
+  "Build messages timed out"
 )
 assert(messages, vim.inspect(messages_error))
 local prohibited_tool_call = false
@@ -219,24 +220,25 @@ for _, message in ipairs(messages) do
     end
   end
 end
-assert(not prohibited_tool_call, "Plan exposed a prohibited source-write tool: " .. vim.inspect(tool_states))
+assert(not prohibited_tool_call, "Build exposed a prohibited source-write tool: " .. vim.inspect(tool_states))
 
-local plan_session_id, plan_state = plan.session_id, plan.state
-local plan_reuse_text = ask_with_editor("Give one concise follow-up plan.", { mode = "plan" })
-assert(plan_reuse_text:find("follow-up", 1, true) ~= nil)
-assert(vim.api.nvim_get_current_win() == source_win, "reused Plan changed Neovim source focus")
-local reused_plan = current_job()
-assert(reused_plan.session_id == plan_session_id, "Plan did not reuse its Session")
-assert(runtime.sidebar:is_visible(), "reused Plan transcript pane is not visible")
-assert(reused_plan.user_message_id ~= plan.user_message_id, "reused Plan reused the message identity")
-local reused_plan_finished = vim.wait(120000, function()
-  return require("opencode.job").terminal(reused_plan.state)
+local first_session_id, first_state = first_build.session_id, first_build.state
+local build_reuse_text =
+  ask_with_editor("Inspect this Build result and return a concise follow-up.", { mode = "build" })
+assert(build_reuse_text:find("follow-up", 1, true) ~= nil)
+assert(vim.api.nvim_get_current_win() == source_win, "reused Build changed Neovim source focus")
+local reused_build = current_job()
+assert(reused_build.session_id == first_session_id, "Build did not reuse its Session")
+assert(runtime.sidebar == nil, "reused Build created a TUI")
+assert(reused_build.user_message_id ~= first_build.user_message_id, "Build reused the message identity")
+local reused_build_finished = vim.wait(120000, function()
+  return require("opencode.job").terminal(reused_build.state)
 end)
 assert(
-  reused_plan_finished and reused_plan.state == "completed",
+  reused_build_finished and reused_build.state == "completed",
   vim.inspect({
-    state = reused_plan.state,
-    error_class = reused_plan.error_class,
+    state = reused_build.state,
+    error_class = reused_build.error_class,
   })
 )
 
@@ -250,9 +252,9 @@ local build_text = ask_with_editor(
 assert(build_text:find("structured replacement", 1, true) ~= nil)
 assert(vim.api.nvim_get_current_win() == source_win, "Build changed Neovim source focus")
 local build = current_job()
-assert(build.session_id ~= plan_session_id, "new Build mapping reused the Plan Session")
-assert(build.user_message_id ~= plan.user_message_id, "Build reused the Plan message identity")
-assert(plan.state == plan_state, "Build mutated Plan history")
+assert(build.session_id ~= first_session_id, "new Build mapping reused the selected Session")
+assert(build.user_message_id ~= first_build.user_message_id, "Build reused the previous message identity")
+assert(first_build.state == first_state, "new Build mapping mutated the previous history")
 local build_finished = vim.wait(120000, function()
   return require("opencode.job").terminal(build.state)
 end)
@@ -310,7 +312,7 @@ assert(
 )
 
 local after = vim.fn.sha256(table.concat(vim.fn.readfile(target, "b"), "\n"))
-assert(after == before, "Plan or Build changed the source fixture on disk")
+assert(after == before, "Build changed the source fixture on disk")
 vim.ui.select = old_select
 runtime:stop()
 vim.cmd("qa!")

@@ -79,22 +79,31 @@ local function terminate(expected)
   end, 20)
 end
 
----Removes a manifest only after all recorded process identities are gone or verified.
+---Verifies and removes the process recorded by an older manifest.tui field.
+---This compatibility cleanup is used only during stale-manifest recovery; new Runtime state never creates or stores it.
+local function cleanup_legacy_tui(manifest)
+  if not manifest.tui then
+    return true
+  end
+  local verified, running = M.verified(manifest.tui)
+  if not verified then
+    return false
+  end
+  return not running or terminate(manifest.tui)
+end
+
+---Removes a manifest only after the current Server process identity is gone or verified.
 ---@param path string
 ---@param manifest table
 ---@return boolean
 function M.cleanup(path, manifest)
-  for _, key in ipairs({ "tui", "server" }) do
-    if manifest[key] then
-      local verified, running = M.verified(manifest[key])
-      if not verified then
-        return false
-      end
-      if running then
-        if not terminate(manifest[key]) then
-          return false
-        end
-      end
+  if manifest.server then
+    local verified, running = M.verified(manifest.server)
+    if not verified then
+      return false
+    end
+    if running and not terminate(manifest.server) then
+      return false
     end
   end
   if exists(path) then
@@ -113,7 +122,7 @@ function M.shutdown(path, manifest)
 end
 
 ---Verifies and removes a stale Runtime using process identity, credentials, health, and routed root.
----Any uncertainty leaves both processes and manifest untouched for manual diagnosis.
+---Legacy TUI identities are cleaned here once, while uncertainty leaves both processes and manifest untouched.
 ---@param path string
 ---@param root? string
 ---@return boolean
@@ -146,13 +155,11 @@ function M.cleanup_stale(path, root)
   if not root or vim.fn.sha256(root) ~= manifest.root_hash then
     return false
   end
-  for _, key in ipairs({ "server", "tui" }) do
-    local expected = manifest[key]
-    if expected then
-      local verified = M.verified(expected)
-      if not verified then
-        return false
-      end
+  local expected = manifest.server
+  if expected then
+    local verified = M.verified(expected)
+    if not verified then
+      return false
     end
   end
   local base = "http://127.0.0.1:" .. tostring(manifest.port)
@@ -175,14 +182,8 @@ function M.cleanup_stale(path, root)
     if manifest.server and M.identity(manifest.server.pid) then
       return false
     end
-    if manifest.tui then
-      local verified, running = M.verified(manifest.tui)
-      if not verified then
-        return false
-      end
-      if running and not terminate(manifest.tui) then
-        return false
-      end
+    if not cleanup_legacy_tui(manifest) then
+      return false
     end
     if exists(path) then
       vim.uv.fs_unlink(path)
@@ -201,14 +202,8 @@ function M.cleanup_stale(path, root)
   if require("opencode.runtime.root").realpath(routed.directory or routed.worktree or "") ~= root then
     return false
   end
-  if manifest.tui then
-    local verified, running = M.verified(manifest.tui)
-    if not verified then
-      return false
-    end
-    if running and not terminate(manifest.tui) then
-      return false
-    end
+  if not cleanup_legacy_tui(manifest) then
+    return false
   end
   if manifest.server then
     local verified, running = M.verified(manifest.server)

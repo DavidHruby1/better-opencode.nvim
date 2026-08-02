@@ -6,12 +6,12 @@ local eq = MiniTest.expect.equality
 local request_status = require("opencode.ui.request_status")
 local scope = require("opencode.scope")
 
-T["Plan Jobs do not create the transient Build request status"] = function()
-  local job = require("opencode.job").new("ses_plan", {
+T["Build Jobs without scope marks do not create transient request status"] = function()
+  local job = require("opencode.job").new("ses_build", {
     root = "/request-status",
     buf = vim.api.nvim_create_buf(true, true),
     path = "/request-status/file.lua",
-    mode = "plan",
+    mode = "build",
   })
   eq(job.request_status, nil)
   vim.api.nvim_buf_delete(job.buffer, { force = true })

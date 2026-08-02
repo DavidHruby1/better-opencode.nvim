@@ -140,6 +140,7 @@ end
 
 ---Creates a stopped Runtime containing all process, Session, Job, and recovery state for one canonical root.
 ---The object is the only routing boundary; module state stores only the root registry and active UI selection.
+---Its process state covers the owned Server and SSE stream; Sessions and Jobs remain root-local.
 ---@param root string
 ---@return table
 function Runtime.new(root)
@@ -151,6 +152,7 @@ function Runtime.new(root)
     host = "127.0.0.1",
     sessions = {},
     jobs = {},
+    session_claims = {},
     assistant_jobs = {},
     correlation = { exact = 0, late = 0, unknown = 0 },
     generation = 0,
@@ -158,8 +160,6 @@ function Runtime.new(root)
     stream_generation = 0,
     reconciling = false,
     sse_live = false,
-    tui_live = false,
-    tui_status = "stopped",
     prompt_locked = false,
     reconciliation_required = false,
     interaction_locked = false,
@@ -244,7 +244,8 @@ local function config_valid(runtime, config)
   return true
 end
 
----Builds the private ownership record from the current Server and TUI identities.
+---Builds the private ownership record from the current Server identity.
+---Legacy TUI records are handled only while stale manifests are cleaned; new Runtime manifests never track them.
 local function manifest(runtime)
   return {
     schema_version = 1,
@@ -255,7 +256,6 @@ local function manifest(runtime)
     password = runtime.password,
     nonce = runtime.owner_nonce,
     server = runtime.server_identity,
-    tui = runtime.tui_identity,
   }
 end
 
@@ -470,27 +470,27 @@ local function startup_step(runtime, lifecycle, deadline, promise)
   return Promise.race({ guarded, timeout })
 end
 
----Validates the /agent payload and requires both plugin prompt modes to be primary agents.
+---Validates the /agent payload and requires the plugin's Build agent to be primary.
 ---Failing closed here prevents a seemingly ready Runtime from sending prompts to a missing or secondary agent.
 local function validate_agents(agents)
   if type(agents) ~= "table" or not vim.islist(agents) then
     return nil
   end
-  local required = { build = false, plan = false }
+  local build = false
   for _, agent in ipairs(agents) do
     if type(agent) ~= "table" or type(agent.name) ~= "string" then
       return nil
     end
-    if required[agent.name] ~= nil and agent.mode == "primary" then
-      required[agent.name] = true
+    if agent.name == "build" and agent.mode == "primary" then
+      build = true
     end
   end
-  return required.build and required.plan and agents or nil
+  return build and agents or nil
 end
 
 ---Starts or restarts the owned Server, performs compatibility preflight, and opens prompts after reconciliation.
 ---A disconnected Runtime is restarted in place so local Job snapshots and edit marks survive until fail-closed reconciliation decides them.
----The tmux TUI remains lazy and is not part of Runtime readiness, but tmux is required so later Plan and manual UI actions have a safe host.
+---Only the owned Server and its SSE stream determine readiness, so startup works outside tmux.
 ---@return Promise<table>
 function Runtime:start()
   local Promise = require("opencode.promise")
@@ -502,10 +502,6 @@ function Runtime:start()
   end
   if self.state == "stopping" then
     return Promise.reject({ error_class = "runtime_stopping" })
-  end
-  if not require("opencode.ui.sidebar").available() then
-    vim.notify("opencode.nvim requires Neovim to run inside tmux with $TMUX_PANE set", vim.log.levels.ERROR)
-    return Promise.reject({ error_class = "cancelled" })
   end
   self.lifecycle_generation = self.lifecycle_generation + 1
   local lifecycle = self.lifecycle_generation
@@ -529,7 +525,6 @@ function Runtime:start()
     self:stop()
     return Promise.reject(spawn_error)
   end
-  self.sidebar = self.sidebar or require("opencode.ui.sidebar").new(self)
   local timeout = require("opencode.config").opts.runtime.startup_timeout
   local deadline = vim.uv.now() + timeout
   self.startup_deadline = deadline
@@ -596,6 +591,8 @@ function Runtime:start()
   return start_promise
 end
 
+---Marks an unexpected Server exit as disconnected and invalidates its SSE and request generations.
+---Jobs remain available for reconciliation, while no terminal UI process is started or recovered.
 function Runtime:on_server_exit(generation)
   if generation ~= self.server_generation or self.state == "stopping" or self.state == "stopped" then
     return
@@ -606,15 +603,10 @@ function Runtime:on_server_exit(generation)
   self.prompt_locked = true
   self.reconciling = true
   self.sse_live = false
-  self.tui_live = false
-  self.tui_status = "dead"
   self.stream_generation = self.stream_generation + 1
   if self.sse then
     vim.fn.jobstop(self.sse)
     self.sse = nil
-  end
-  if self.sidebar then
-    self.sidebar:dead()
   end
   if self.client then
     self.client:cancel_requests()
@@ -634,26 +626,6 @@ function Runtime:restart()
     return require("opencode.promise").reject({ error_class = "runtime_not_disconnected" })
   end
   return self:start()
-end
-
----Lazily attaches a TUI without changing Server, SSE, Session, or Job state.
----A dead pane can be retried while the Runtime remains ready because TUI health is independent from prompt readiness.
----@return Promise<table>
-function Runtime:retry_tui()
-  local Promise = require("opencode.promise")
-  if not self.sidebar or self.state == "stopping" or self.state == "stopped" then
-    return require("opencode.promise").reject({ error_class = "tui_unavailable" })
-  end
-  local shown, err = self.sidebar:show_root(self)
-  if not shown then
-    return Promise.reject({ error_class = err or "tui_unavailable" })
-  end
-  if not self.selected_session_id then
-    return Promise.resolve(self)
-  end
-  return self.sidebar:select_session(self.selected_session_id):next(function()
-    return self
-  end)
 end
 
 ---Routes events through the owning Runtime and exact Session/Job identities.
@@ -707,7 +679,7 @@ function Runtime:route_event(event)
     local message_id = properties.messageID or info.parentID or info.messageID
     local job = message_id and self.jobs[session_id .. ":" .. message_id]
     local session = job and self.sessions[job.session_id]
-    if job and job.mode == "build" and job.state == "running" then
+    if job and job.state == "running" then
       job.error_class = "file_edited"
       require("opencode.job").transition(job, "error", { session = session })
     else
@@ -792,8 +764,8 @@ function Runtime:begin_reconciliation()
   promise:catch(function() end)
 end
 
----Stops every owned process and local Job callback with a bounded, ownership-verified shutdown.
----Abort failures do not prevent other Runtime cleanup, and a manifest remains when process ownership cannot be proven.
+---Stops the owned Server and local Job callbacks with bounded, ownership-verified shutdown.
+---Abort failures do not prevent other cleanup, and a manifest remains when Server ownership cannot be proven.
 function Runtime:stop()
   if self.state == "stopped" or self.state == "stopping" then
     return
@@ -803,8 +775,6 @@ function Runtime:stop()
   self.server_generation = self.server_generation + 1
   self.prompt_locked = true
   self.reconciling = false
-  self.tui_live = false
-  self.tui_status = "stopped"
   self:_invalidate_stream()
   if self.reconnect_timer then
     pcall(function()
@@ -826,9 +796,6 @@ function Runtime:stop()
   if self.client then
     self.client:cancel_requests()
   end
-  if self.sidebar then
-    self.sidebar:stop()
-  end
   if self.server_job then
     local verified, running = require("opencode.runtime.ownership").verified(self.server_identity)
     if verified and running then
@@ -840,8 +807,7 @@ function Runtime:stop()
   local ownership = require("opencode.runtime.ownership")
   vim.wait(shutdown_timeout, function()
     local server_gone = not self.server_identity or not ownership.identity(self.server_identity.pid)
-    local tui_gone = not self.tui_identity or not ownership.identity(self.tui_identity.pid)
-    return server_gone and tui_gone
+    return server_gone
   end, 20)
   if self.manifest then
     local removed = ownership.shutdown(self.owner_manifest, self.manifest)
@@ -900,7 +866,7 @@ function Runtime.get_or_start(capture)
   return readiness
 end
 
----Returns the Runtime selected for sidebar and command UI, never for event or HTTP routing.
+---Returns the Runtime selected by normal command UI, never for event or HTTP routing.
 ---@return table?
 function Runtime.current()
   return active_root and registry[active_root] or nil
@@ -925,28 +891,6 @@ function Runtime.all()
     return a.root < b.root
   end)
   return result
-end
-
----Makes one Runtime's lazy tmux TUI visible without stopping another root's Server or Jobs.
----@param root string
----@return table?
-function Runtime.show_root(root)
-  root = require("opencode.runtime.root").realpath(root) or root
-  local runtime = registry[root]
-  if not runtime then
-    return nil
-  end
-  active_root = root
-  Runtime.active_root = root
-  if runtime.sidebar then
-    local shown = runtime.sidebar:show_root(runtime)
-    if shown and runtime.selected_session_id then
-      runtime.sidebar:select_session(runtime.selected_session_id):catch(function()
-        require("opencode.ui.notify").error("session_select")
-      end)
-    end
-  end
-  return runtime
 end
 
 ---Cancels a root-keyed snapshot across all Runtime objects and reports only aggregate counts.

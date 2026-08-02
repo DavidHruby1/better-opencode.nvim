@@ -18,10 +18,10 @@ Tento dokument uzavírá implementační rozhodnutí pro verzi 2.0. Neobsahuje v
 
 | ID | Rozhodnutí |
 |---|---|
-| ADR-01 | Každý canonical project root má vlastní plugin-owned headless Server a právě jeden plugin-owned TUI klient. |
+| ADR-01 | Každý canonical project root má vlastní plugin-owned headless Server, SSE stream, Session registry a Job registry. |
 | ADR-02 | Scoped Build je proposal transaction; OpenCode nesmí přímo editovat source workspace. |
 | ADR-03 | Build proposal používá OpenCode JSON-schema structured output, ne parsování volného Markdown diffu. |
-| ADR-04 | Build a Plan Session používají default-deny tool allowlist; custom tools nejsou v Runtime povolené, zatímco pluginy a MCP zůstávají OpenCode-owned. |
+| ADR-04 | Build Session používá default-deny tool allowlist; custom tools nejsou v Runtime povolené, zatímco pluginy a MCP zůstávají OpenCode-owned. |
 | ADR-05 | Build hard scope je vždy visual range, Tree-sitter function nebo celý aktuální soubor. |
 | ADR-06 | Job identita je `sessionID + userMessageID`; plugin registruje každou assistant message přes její `parentID`. |
 | ADR-07 | Session nepoužívají Job queue. Aktivní Session odmítne follow-up a nabídne novou Session. |
@@ -39,7 +39,6 @@ Neovim
   Runtime registry (canonical project root -> Runtime)
     Runtime
       owned OpenCode Server (HTTP + SSE)
-      owned OpenCode TUI client (shared right tmux pane)
       Session registry
         Session -> zero/one active Job
       Job registry (sessionID + userMessageID)
@@ -48,10 +47,10 @@ Neovim
   Structured proposal validator
   Base/Ours/Theirs merge engine
   Buffer applier
-  Prompt float / tmux pane / status UI
+  Prompt float / Session picker / status UI
 ```
 
-Server je headless HTTP proces. Build/Plan prompt je float a nepoužívá TUI keyboard emulaci; používá Session HTTP API. TUI je jeden sdílený pravý tmux pane pro všechny rooty, připojený s auth a canonical root cwd. Pane je input-locked a slouží jako transcript renderer; přepnutí Session přes `/tui/select-session` se používá jen když pane existuje.
+Server je headless HTTP proces. Build prompt je one-line `Snacks.win`, který se podle wrapped obsahu zvětšuje, a používá Session HTTP API bez TUI nebo tmux závislosti. Session picker načítá čerstvý ověřený inventory pro canonical root, podporuje reusable pokračování a bezpečné mazání.
 
 ## Kompatibilita a API baseline
 
@@ -74,13 +73,13 @@ Nejde o semver rozsah ani best-effort legacy fallback. Každý profil má vlastn
 
 Žádný best-effort fallback na neznámý payload nebo endpoint není povolen. Rozdíl mezi dvěma podporovanými profily smí řešit pouze explicitní, contract-testovaný adapter vybraný podle přesné health verze. Upgrade OpenCode vyžaduje nový ověřený baseline a contract fixture.
 
-### Tmux pane
+### Runtime bez TUI
 
-Runtime a health ověřují `$TMUX`, `$TMUX_PANE`, executable tmux a jeho verzi. Mimo tmux nebo bez platného cílového pane startup failuje jasnou chybou, protože Plan a ruční show/focus používají sdílený pane. Plugin tmux konfiguraci nemění. Sdílený TUI pane je input-locked; Plan do něj po ověření živého pane vybere transcript, ale neukradne focus source window.
+Runtime a health nevyžadují `$TMUX`, `$TMUX_PANE` ani executable tmux. Staré `manifest.tui` záznamy se mohou jednorázově uklidit při stale-manifest recovery, ale nový Runtime TUI nevytváří ani nepřipojuje.
 
 ### Prompt float
 
-Build i Plan používají víceřádkový `Snacks.win` s upstream-like ikonou a stylem. Prompt zobrazuje kompaktní režim, jméno project rootu a effective scope bez absolutní cesty; krátké stavové texty jsou pouze dočasné. `<CR>` odešle prompt nebo přijme viditelnou completion, `<C-j>` vloží newline a `<Esc>` prompt zruší. Input history je vypnutá.
+Build používá one-line `Snacks.win` s upstream-like ikonou a stylem. Prompt zobrazuje jméno project rootu a effective scope bez absolutní cesty; krátké stavové texty jsou pouze dočasné. `<CR>` odešle prompt nebo přijme viditelnou completion, `<S-CR>` vloží newline, `<C-j>` je fallback a `<Esc>` prompt zruší. Input history je vypnutá.
 
 ### Použité endpointy
 
@@ -97,11 +96,11 @@ Build i Plan používají víceřádkový `Snacks.win` s upstream-like ikonou a 
 | Session permission/profile metadata | `PATCH /session/:sessionID` |
 | Session statusy | `GET /session/status` |
 | Session detail | `GET /session/:sessionID` |
+| Session delete | `DELETE /session/:sessionID` |
 | Session messages | `GET /session/:sessionID/message` |
 | Konkrétní message | `GET /session/:sessionID/message/:messageID` |
 | Async prompt | `POST /session/:sessionID/prompt_async` |
 | Abort | `POST /session/:sessionID/abort` |
-| Přepnutí TUI transcriptu | `POST /tui/select-session` |
 | Pending permissions | `GET /permission` |
 | Permission reply | `POST /permission/:requestID/reply` |
 | Pending questions | `GET /question` |

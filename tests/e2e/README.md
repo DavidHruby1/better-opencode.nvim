@@ -1,6 +1,6 @@
 # Real profile public ask e2e
 
-`run.sh` uses the selected real OpenCode binary and an existing `opencode auth login` credential. It copies only `auth.json` into disposable config/data directories, drives public multiline Plan and Build prompts through owned serve + attach, applies the Build only to the live buffer, verifies that the source fixture did not change, and removes the temporary credential on exit.
+`run.sh` uses the selected real OpenCode binary and an existing `opencode auth login` credential. It copies only `auth.json` into disposable config/data directories, drives the public one-line Build prompt through the owned Server without a TUI attach, applies the Build only to the live buffer, verifies that the source fixture did not change, and removes the temporary credential on exit.
 
 ```sh
 SNACKS_PATH=/path/to/snacks.nvim OPENCODE_VERSION=1.17.3 sh tests/e2e/run.sh

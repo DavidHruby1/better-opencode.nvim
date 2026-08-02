@@ -25,8 +25,8 @@ function M.message_id()
   return "msg_" .. table.concat(chars) .. random_chars(16)
 end
 
----Creates a running Plan or fully captured Build Job before network dispatch.
----Build Jobs with scope marks also own a transient inline display from this point until conflict or completion.
+---Creates a fully captured Build Job before network dispatch.
+---Build scope marks own a transient inline display from this point until conflict or completion.
 ---@param session_id string
 ---@param target table
 ---@return table
@@ -40,7 +40,7 @@ function M.new(session_id, target)
     assistant_message_ids = {},
     assistant_messages = {},
     root = target.root,
-    mode = target.mode or "plan",
+    mode = "build",
     state = "running",
     buffer = target.buf,
     path = target.path,
@@ -49,7 +49,7 @@ function M.new(session_id, target)
     marks = target.marks,
     auto_apply = target.auto_apply ~= false,
   }
-  if job.mode == "build" and job.marks then
+  if job.marks then
     job.request_status = require("opencode.ui.request_status").new(job)
   end
   return job
@@ -128,12 +128,20 @@ function M.transition(job, state, attrs)
       session.active_job_key = nil
       session.last_job_state = state
     end
+    local runtime = require("opencode.runtime").for_root(job.root)
+    local claim = runtime and runtime.session_claims and runtime.session_claims[job.session_id]
+    if
+      runtime
+      and claim
+      and (claim == job.key or type(claim) ~= "table" or claim.pending or claim.job_key == job.key)
+    then
+      runtime.session_claims[job.session_id] = nil
+    end
     local interaction = package.loaded["opencode.interaction"]
     if interaction then
       interaction.remove_by_job(job.root, job.key)
     end
     if state == "completed" or state == "error" or state == "scope_violation" then
-      local runtime = require("opencode.runtime").for_root(job.root)
       if runtime then
         local notify = require("opencode.ui.notify")
         notify.emit(state, notify.snapshot(runtime, job), runtime)
@@ -228,7 +236,7 @@ function M.cancel_all(runtime)
   end)
 end
 
----Makes a running Plan Job terminal exactly once and releases its Session.
+---Makes a running Build Job terminal exactly once and releases its Session.
 ---@param job table
 ---@param session table
 ---@param state "completed"|"cancelled"|"error"
