@@ -1,3 +1,5 @@
+---@diagnostic disable: duplicate-set-field, need-check-nil
+
 local T = MiniTest.new_set()
 local eq = MiniTest.expect.equality
 
@@ -92,9 +94,12 @@ end
 ---Waits for the apply Promise and Neovim scheduled callbacks to settle on one observable Job state.
 ---The bounded main-loop wait avoids sleeping while still exposing a missing callback as a test failure.
 local function wait_for_state(job, state)
-  eq(vim.wait(1000, function()
-    return job.state == state
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return job.state == state
+    end),
+    true
+  )
 end
 
 T["AC-SCOPE-03 rejects a whole proposal for path or range scope violations"] = function()
@@ -114,9 +119,14 @@ T["AC-SCOPE-03 rejects a whole proposal for path or range scope violations"] = f
   }
 
   local invalid = vim.tbl_extend("force", valid, { path = "other.lua" })
-  eq(require("opencode.runtime.reconcile").complete_job(runtime, session, job, {
-    { info = { id = "assistant_scope_03", role = "assistant", parentID = job.user_message_id, structured = invalid } },
-  }), false)
+  eq(
+    require("opencode.runtime.reconcile").complete_job(runtime, session, job, {
+      {
+        info = { id = "assistant_scope_03", role = "assistant", parentID = job.user_message_id, structured = invalid },
+      },
+    }),
+    false
+  )
   eq({ job.state, job.error_class, job.conflict_kind }, { "scope_violation", "scope_violation", nil })
   local range_invalid = vim.tbl_extend("force", valid, {
     scope = { start_byte = scope.start_byte + 1, end_byte = scope.end_byte },
@@ -219,9 +229,12 @@ T["AC-PROP-02 rejects missing or Markdown structured output without applying"] =
   local scope = fragment_range(fixture.path, base.text, "two")
   local runtime, job, session = new_runtime_job(fixture, "prop_02", scope, base.text, "running")
   local before = logical(fixture.buf)
-  eq(require("opencode.runtime.reconcile").complete_job(runtime, session, job, {
-    { info = { id = "assistant_prop_02", role = "assistant", parentID = job.user_message_id } },
-  }), false)
+  eq(
+    require("opencode.runtime.reconcile").complete_job(runtime, session, job, {
+      { info = { id = "assistant_prop_02", role = "assistant", parentID = job.user_message_id } },
+    }),
+    false
+  )
   eq({ job.state, job.error_class }, { "error", "structured_output_count" })
   local proposal, err = require("opencode.proposal").validate(nil, job)
   eq(proposal, nil)
@@ -389,9 +402,12 @@ T["AC-MERGE-07 exposes manual diff buffers and supports cancel plus confirmed re
   })
   require("opencode.ui.diff").agent({ id = "manual_cancel", state = "shown" }, runtime, cancelled)
   local result_name = "opencode://manual_cancel/Result"
-  eq(vim.wait(1000, function()
-    return vim.fn.bufnr(result_name) ~= -1
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return vim.fn.bufnr(result_name) ~= -1
+    end),
+    true
+  )
   local cancel_result = vim.fn.bufnr(result_name)
   for name, editable in pairs({ Base = false, Ours = false, Theirs = false, Result = true }) do
     local buf = vim.fn.bufnr("opencode://manual_cancel/" .. name)
@@ -399,9 +415,12 @@ T["AC-MERGE-07 exposes manual diff buffers and supports cancel plus confirmed re
   end
   eq(runtime.sessions[cancelled.session_id].active_job_key, cancelled.key)
   vim.api.nvim_buf_delete(cancel_result, { force = true })
-  eq(vim.wait(1000, function()
-    return cancelled.state == "cancelled"
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return cancelled.state == "cancelled"
+    end),
+    true
+  )
   eq(logical(fixture.buf), base.text)
 
   local runtime_confirmed, confirmed = new_runtime_job(fixture, "merge_07_confirm", scope, "one\nTWO\nthree", nil, base)
@@ -412,21 +431,35 @@ T["AC-MERGE-07 exposes manual diff buffers and supports cancel plus confirmed re
   })
   require("opencode.ui.diff").agent({ id = "manual_confirm", state = "shown" }, runtime_confirmed, confirmed)
   local confirm_name = "opencode://manual_confirm/Result"
-  eq(vim.wait(1000, function()
-    return vim.fn.bufnr(confirm_name) ~= -1
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return vim.fn.bufnr(confirm_name) ~= -1
+    end),
+    true
+  )
   local ok
-  eq(require("opencode.apply").manual(confirmed, runtime_confirmed, "one\nMANUAL\nthree", function(applied)
-    ok = applied
-  end), true)
+  eq(
+    require("opencode.apply").manual(confirmed, runtime_confirmed, "one\nMANUAL\nthree", function(applied)
+      ok = applied
+    end),
+    true
+  )
   wait_for_state(confirmed, "completed")
-  eq(vim.wait(1000, function()
-    return ok ~= nil
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return ok ~= nil
+    end),
+    true
+  )
   eq(ok, true)
   eq(logical(fixture.buf), "one\nMANUAL\nthree")
   eq(select(1, require("opencode.snapshot").read_raw(fixture.path)), base.text)
-  for _, prefix in ipairs({ "manual_confirm/Base", "manual_confirm/Ours", "manual_confirm/Theirs", "manual_confirm/Result" }) do
+  for _, prefix in ipairs({
+    "manual_confirm/Base",
+    "manual_confirm/Ours",
+    "manual_confirm/Theirs",
+    "manual_confirm/Result",
+  }) do
     local buf = vim.fn.bufnr("opencode://" .. prefix)
     if buf ~= -1 and vim.api.nvim_buf_is_valid(buf) then
       vim.api.nvim_buf_delete(buf, { force = true })
@@ -481,13 +514,19 @@ T["AC-MERGE-09 reports external disk change and blocks retry until reconciliatio
   eq(logical(fixture.buf), before)
   eq(select(1, require("opencode.snapshot").read_raw(fixture.path)), "external\ndisk\n")
   local retry_error
-  eq(require("opencode.apply").retry(job, runtime, function(_, err)
-    retry_error = err
-  end), false)
+  eq(
+    require("opencode.apply").retry(job, runtime, function(_, err)
+      retry_error = err
+    end),
+    false
+  )
   eq(retry_error, "external_change")
-  eq(vim.wait(1000, function()
-    return choices ~= nil
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return choices ~= nil
+    end),
+    true
+  )
   vim.ui.select = old_select
   eq(choices, { "open external diff", "retry apply", "cancel" })
   eq(logical(fixture.buf), before)
@@ -535,9 +574,12 @@ T["AC-MERGE-11 rechecks disk after merge and rejects a stale result"] = function
     assert(vim.uv.fs_write(handle, "race\ndisk\n", 0))
     vim.uv.fs_close(handle)
   end)
-  eq(vim.wait(1000, function()
-    return job.state == "conflict" and dialog_shown
-  end), true)
+  eq(
+    vim.wait(1000, function()
+      return job.state == "conflict" and dialog_shown
+    end),
+    true
+  )
   package.loaded["opencode.merge"] = real_merge
   vim.ui.select = old_select
   eq(job.conflict_kind, "external_change")
@@ -567,8 +609,11 @@ T["AC-MERGE-12 preserves EOL metadata and distinguishes empty trailing lines"] =
     require("opencode.apply").start(job, runtime)
     wait_for_state(job, "completed")
     eq(logical(fixture.buf), case.replacement, "case " .. index)
-    eq({ vim.bo[fixture.buf].fileformat, vim.bo[fixture.buf].endofline, vim.bo[fixture.buf].fixendofline },
-      { options.fileformat, options.endofline, options.fixendofline }, "case " .. index)
+    eq(
+      { vim.bo[fixture.buf].fileformat, vim.bo[fixture.buf].endofline, vim.bo[fixture.buf].fixendofline },
+      { options.fileformat, options.endofline, options.fixendofline },
+      "case " .. index
+    )
     eq(select(1, snapshot.read_raw(fixture.path)), case.raw, "case " .. index)
     close_fixture(fixture, runtime, { job = job })
   end

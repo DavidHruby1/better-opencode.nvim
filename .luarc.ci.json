@@ -13,5 +13,8 @@
       "/opt/snacks.nvim/lua",
       "/opt/blink.cmp/lua"
     ]
+  },
+  "diagnostics": {
+    "globals": ["MiniTest"]
   }
 }

@@ -3,7 +3,7 @@ local M = {}
 ---Builds a programmable fake response table consumed by client runner tests.
 ---It records argv so tests assert real auth and root headers without bypassing the client.
 ---@param responses table[]
----@return function, table
+---@return function, table, table
 function M.runner(responses)
   local calls, options = {}, {}
   local index = 0

@@ -132,9 +132,12 @@ T["Session reuse and cancellation use canonical endpoints"] = function()
   client:update_session("ses_1", { permission = { { permission = "*", pattern = "*", action = "deny" } } })
   client:abort("ses_1")
   client:select_session("ses_1")
-  eq(vim.wait(100, function()
-    return #calls == 5
-  end), true)
+  eq(
+    vim.wait(100, function()
+      return #calls == 5
+    end),
+    true
+  )
   eq(table.concat(calls[1], "\0"):find("/session", 1, true) ~= nil, true)
   eq(table.concat(calls[2], "\0"):find("/session/status", 1, true) ~= nil, true)
   eq(table.concat(calls[3], "\0"):find("/session/ses_1", 1, true) ~= nil, true)

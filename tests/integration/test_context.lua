@@ -1,3 +1,5 @@
+---@diagnostic disable: duplicate-set-field, need-check-nil
+
 local T = MiniTest.new_set()
 local eq = MiniTest.expect.equality
 

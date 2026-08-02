@@ -421,7 +421,12 @@ function M.retry(job, runtime, callback)
       if result.kind == "conflict" then
         job.conflict_kind = "agent"
         job.conflict_payload = vim.deepcopy({ base = job.base, ours = ours, theirs = job.theirs })
-        require("opencode.interaction").replace_current_conflict(job.root, job.key, "agent_conflict", job.conflict_payload)
+        require("opencode.interaction").replace_current_conflict(
+          job.root,
+          job.key,
+          "agent_conflict",
+          job.conflict_payload
+        )
         if callback then
           callback(false, "agent_conflict")
         end
