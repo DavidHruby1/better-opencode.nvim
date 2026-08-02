@@ -1,5 +1,7 @@
 # Low-level plan F05-F06: konflikty, reconciliation a autoritativní dialogy
 
+> Historical implementation plan. The tmux/TUI sidebar was later removed; this is not an active contract.
+
 ## Mandát
 
 | Položka | Hodnota |

@@ -30,14 +30,16 @@ lua-language-server --configpath .luarc.ci.json --check=.
 MINI_TEST_PATH=/path/to/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run()"
 OPENCODE_VERSION=1.17.3 MINI_TEST_PATH=/path/to/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run({ collect = { find_files = function() return vim.fn.globpath('tests/contract', 'test_*.lua', false, true) end } })"
 OPENCODE_VERSION=1.18.9 MINI_TEST_PATH=/path/to/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run({ collect = { find_files = function() return vim.fn.globpath('tests/contract', 'test_*.lua', false, true) end } })"
-OPENCODE_VERSION=1.17.3 sh tests/e2e/run.sh
-PATH=/path/to/opencode-1.18.9/bin:$PATH OPENCODE_VERSION=1.18.9 sh tests/e2e/run.sh
-PATH=/path/to/exact-opencode/bin:$PATH OPENCODE_VERSION=1.17.3 MINI_TEST_PATH=/path/to/mini.nvim tests/release/run.sh
-PATH=/path/to/exact-opencode/bin:$PATH OPENCODE_VERSION=1.18.9 MINI_TEST_PATH=/path/to/mini.nvim tests/release/run.sh
+SNACKS_PATH=/path/to/snacks.nvim OPENCODE_VERSION=1.17.3 sh tests/e2e/run.sh
+SNACKS_PATH=/path/to/snacks.nvim PATH=/path/to/opencode-1.18.9/bin:$PATH OPENCODE_VERSION=1.18.9 sh tests/e2e/run.sh
+SNACKS_PATH=/path/to/snacks.nvim PATH=/path/to/exact-opencode/bin:$PATH OPENCODE_VERSION=1.17.3 MINI_TEST_PATH=/path/to/mini.nvim tests/release/run.sh
+SNACKS_PATH=/path/to/snacks.nvim PATH=/path/to/exact-opencode/bin:$PATH OPENCODE_VERSION=1.18.9 MINI_TEST_PATH=/path/to/mini.nvim tests/release/run.sh
 nvim --headless -u NONE -c "luafile tests/release/validate.lua" -c 'qa!'
 ```
 
-Run `tests/release/privacy.lua` with the unit suite and generate evidence only after every result artifact has an exit code and repository-relative artifact/checksum. The evidence generator must fail on missing results, skipped P0/P1, missing profile runs, or an incomplete P2 protocol.
+Each successful release runner writes a separate metadata-only artifact and checksum for every scenario in its exact
+profile. Generate evidence only after both official profiles run on the same candidate commit. The generator fails on
+missing, stale, skipped, mismatched, checksum-invalid, or incomplete manual evidence.
 
 ## Upgrade checklist
 
@@ -45,4 +47,4 @@ Run `tests/release/privacy.lua` with the unit suite and generate evidence only a
 - Re-audit permission surface filtering, execution-time hard deny, Session PATCH append order, structured output, root headers, SSE event shape, and fresh approval behavior.
 - Add profile-specific contract fixtures and run all P0/P1 tests against both exact versions.
 - Capture failure injection for source disk writes, stale apply, cross-Job/root events, unauthorized execution, foreign process termination, Ours loss, reload/whole-buffer mutation, and one-undo behavior.
-- Run the privacy scan, validate the 63-ID acceptance manifest, generate evidence, and review the report before release approval.
+- Run the privacy scan, validate the 65-ID acceptance manifest, generate evidence, and review the report before release approval.

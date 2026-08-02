@@ -1,5 +1,7 @@
 # Low-level plan F09-F10: recovery, multi-root lifecycle a shutdown
 
+> Historical implementation plan. The tmux/TUI sidebar was later removed; this is not an active contract.
+
 ## Mandát
 
 | Položka | Hodnota |

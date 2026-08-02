@@ -1,28 +1,22 @@
 ## Contributing to opencode.nvim
 
-Thank you for wanting to contribute!
+Keep changes focused, safe, and easy to review. Open an issue or discussion first when product behavior or the exact
+OpenCode compatibility matrix would change.
 
-I maintain this in my free time — please allow for variable response times and lengths 🙂
+## Project Direction
 
-<sup>or sponsor me so I can sustainably spend more time on it 😄</sup>
+- Keep the workflow Neovim-native and Build-only.
+- Do not add Plan mode, a TUI/sidebar, tmux dependence, or foreign Server attach.
+- Preserve proposal-only source changes, hard scope, Base/Ours/Theirs merge, and unchanged disk after apply.
+- Prefer small robust changes over convenience features or new abstractions.
+- Add tests at the lowest useful level and a real vertical check when compatibility risk requires it.
+- Never replace official-binary release evidence with a fake or patched OpenCode success.
 
-## Guidelines
+## Checks
 
-### Align with project vision
+Run the relevant commands from `README.md` and `docs/MAINTAINERS.md`. Pull requests must pass formatting, LuaLS, unit,
+integration, contract, privacy, and required release-acceptance CI checks.
 
-If unsure, propose changes in an issue or discussion first!
+## Conduct
 
-- Integrate Neovim and OpenCode to maintain familiar flow.
-- Prioritize focused pairing with a single OpenCode instance.
-- Provide novel functionality first, and convenience second.
-- Simple and intuitive UX.
-
-### Minimize maintenance burden
-
-- Prefer simple, robust, general solutions.
-- Prefer functionality unique from OpenCode's TUI.
-- Prefer examples over plugin code for integrations.
-
-## Code of Conduct
-
-Please be respectful and constructive. See the [Code of Conduct](./CODE_OF_CONDUCT.md) for details.
+Be respectful and constructive. See [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).

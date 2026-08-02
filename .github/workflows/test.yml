@@ -29,7 +29,7 @@ jobs:
           version: v0.11.0
           neovim: true
       - run: nvim --headless -u NONE --cmd 'set runtimepath^=.' -c 'luafile tests/release/privacy.lua' -c 'qa!'
-  e2e:
+  release-acceptance:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -45,13 +45,19 @@ jobs:
         with:
           repository: folke/snacks.nvim
           path: .deps/snacks.nvim
+      - uses: actions/checkout@v4
+        with:
+          repository: echasnovski/mini.nvim
+          ref: v0.16.0
+          path: .deps/mini.nvim
       - run: npm install --global opencode-ai@${{ matrix.opencode }}
       - run: test "$(opencode --version)" = "${{ matrix.opencode }}"
       - run: mkdir -p "$HOME/.local/share/opencode" && install -m 600 /dev/stdin "$HOME/.local/share/opencode/auth.json" <<<"$OPENCODE_E2E_AUTH_JSON"
         shell: bash
         env:
           OPENCODE_E2E_AUTH_JSON: ${{ secrets.OPENCODE_E2E_AUTH_JSON }}
-      - run: tests/e2e/run.sh
+      - run: tests/release/run.sh
         env:
           OPENCODE_VERSION: ${{ matrix.opencode }}
           SNACKS_PATH: ${{ github.workspace }}/.deps/snacks.nvim
+          MINI_TEST_PATH: ${{ github.workspace }}/.deps/mini.nvim

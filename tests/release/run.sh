@@ -34,3 +34,8 @@ RELEASE_GIT_COMMIT=$(git rev-parse HEAD) \
   nvim --headless -u NONE \
   -c "lua dofile('tests/release/record.lua').record('.', '$OPENCODE_VERSION')" \
   -c 'qa!'
+
+RELEASE_GIT_COMMIT=$(git rev-parse HEAD) \
+  nvim --headless -u NONE \
+  -c "lua local ok, errors = dofile('tests/release/evidence.lua').validate_profile('.', 'tests/release/results/index.lua', '$OPENCODE_VERSION'); if not ok then error(table.concat(errors, '\n')) end" \
+  -c 'qa!'

@@ -1,5 +1,7 @@
 # Low-level plan F01-F02: vlastněný Runtime a read-only Plan
 
+> Historical implementation plan. Plan and the tmux/TUI sidebar were later removed; this is not an active contract.
+
 ## Mandát
 
 | Položka | Hodnota |

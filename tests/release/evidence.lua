@@ -37,14 +37,25 @@ local function result_map(results)
   return map, duplicates
 end
 
-local function result_status(root, result, scenario, duplicate)
+local function metadata(artifact)
+  local values = {}
+  for key, value in artifact:gmatch("([%w_]+)=([^\n]+)") do
+    values[key] = value
+  end
+  return values
+end
+
+local function result_status(root, result, scenario, profile, duplicate, commit)
   if duplicate then
-    return "FAIL duplicate result"
+    return "FAIL mismatch: duplicate result"
   end
   if not result then
-    return "FAIL missing result artifact"
+    return "FAIL missing"
   end
-  if result.exit_code ~= 0 then
+  if result.status == "skipped" or result.exit_code == 77 then
+    return "FAIL skipped"
+  end
+  if result.status ~= "passed" or result.exit_code ~= 0 then
     return "FAIL exit code " .. tostring(result.exit_code)
   end
   if not safe_reference(result.artifact) or not safe_reference(result.checksum) then
@@ -53,16 +64,59 @@ local function result_status(root, result, scenario, duplicate)
   local artifact = read(rooted(root, result.artifact))
   local checksum = read(rooted(root, result.checksum))
   if not artifact or not checksum then
-    return "FAIL missing artifact/checksum file"
+    return "FAIL missing: artifact/checksum file"
   end
   local expected = checksum:match("^([0-9a-fA-F]+)%s*$")
   if not expected or #expected ~= 64 or expected:lower() ~= vim.fn.sha256(artifact) then
     return "FAIL checksum mismatch"
   end
+  local fields = metadata(artifact)
+  if
+    result.id ~= scenario.id
+    or result.profile ~= profile
+    or fields.scenario ~= scenario.id
+    or fields.profile ~= profile
+    or fields.result ~= "passed"
+    or result.git_commit ~= fields.git_commit
+  then
+    return "FAIL mismatch: scenario/profile metadata"
+  end
+  if commit and (result.git_commit ~= commit or fields.git_commit ~= commit) then
+    return "FAIL stale: expected " .. commit:sub(1, 12)
+  end
   if scenario.protocol and (result.manual ~= true or result.protocol_complete ~= true) then
     return "FAIL incomplete manual protocol"
   end
   return "PASS"
+end
+
+local function current_commit(root)
+  if vim.env.RELEASE_GIT_COMMIT and vim.env.RELEASE_GIT_COMMIT ~= "" then
+    return vim.env.RELEASE_GIT_COMMIT
+  end
+  local result = vim.system({ "git", "-C", root, "rev-parse", "HEAD" }, { text = true }):wait()
+  return result.code == 0 and vim.trim(result.stdout or "") or nil
+end
+
+---Validates every acceptance scenario for one exact profile and current commit.
+---@param root string
+---@param results_path string
+---@param profile string
+---@return boolean, string[]
+function M.validate_profile(root, results_path, profile)
+  local manifest = dofile(root .. "/tests/acceptance.lua")
+  local results = dofile(rooted(root, results_path))
+  local by_key, duplicates = result_map(results)
+  local commit = current_commit(root)
+  local errors = {}
+  for _, scenario in ipairs(manifest.scenarios) do
+    local key = scenario.id .. ":" .. profile
+    local status = result_status(root, by_key[key], scenario, profile, duplicates[key], commit)
+    if status ~= "PASS" then
+      table.insert(errors, scenario.id .. ": " .. status)
+    end
+  end
+  return #errors == 0, errors
 end
 
 ---Generates a release report from explicit result artifacts and refuses to claim PASS for missing evidence.
@@ -75,6 +129,7 @@ function M.generate(root, results_path, output_path)
   local manifest = dofile(root .. "/tests/acceptance.lua")
   local results = dofile(rooted(root, results_path))
   local by_key, duplicates = result_map(results)
+  local commit = current_commit(root)
   local lines = {
     "# v2.0 Acceptance Evidence",
     "",
@@ -90,7 +145,7 @@ function M.generate(root, results_path, output_path)
     local statuses = {}
     for _, profile in ipairs(manifest.profiles) do
       local key = scenario.id .. ":" .. profile
-      statuses[profile] = result_status(root, by_key[key], scenario, duplicates[key])
+      statuses[profile] = result_status(root, by_key[key], scenario, profile, duplicates[key], commit)
       overall = overall and statuses[profile] == "PASS"
     end
     local evidence = scenario.protocol or scenario.test

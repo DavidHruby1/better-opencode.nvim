@@ -86,10 +86,15 @@ lua-language-server --configpath .luarc.ci.json --check=.
 MINI_TEST_PATH=/path/to/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run()"
 OPENCODE_VERSION=1.17.3 MINI_TEST_PATH=/path/to/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run({ collect = { find_files = function() return vim.fn.globpath('tests/contract', 'test_*.lua', false, true) end } })"
 OPENCODE_VERSION=1.18.9 MINI_TEST_PATH=/path/to/mini.nvim nvim --headless -u tests/minimal_init.lua -c "lua MiniTest.run({ collect = { find_files = function() return vim.fn.globpath('tests/contract', 'test_*.lua', false, true) end } })"
-OPENCODE_VERSION=1.17.3 sh tests/e2e/run.sh
-PATH=/path/to/opencode-1.18.9/bin:$PATH OPENCODE_VERSION=1.18.9 sh tests/e2e/run.sh
+SNACKS_PATH=/path/to/snacks.nvim OPENCODE_VERSION=1.17.3 sh tests/e2e/run.sh
+SNACKS_PATH=/path/to/snacks.nvim PATH=/path/to/opencode-1.18.9/bin:$PATH OPENCODE_VERSION=1.18.9 sh tests/e2e/run.sh
+SNACKS_PATH=/path/to/snacks.nvim MINI_TEST_PATH=/path/to/mini.nvim OPENCODE_VERSION=1.17.3 tests/release/run.sh
+SNACKS_PATH=/path/to/snacks.nvim MINI_TEST_PATH=/path/to/mini.nvim PATH=/path/to/opencode-1.18.9/bin:$PATH OPENCODE_VERSION=1.18.9 tests/release/run.sh
 nvim --headless -u NONE -c "luafile tests/release/validate.lua" -c 'qa!'
 nvim --headless -u NONE -c "lua assert(dofile('tests/release/evidence.lua').generate('.', 'tests/release/results/index.lua', 'docs/release/v2.0-evidence.md'))" -c 'qa!'
 ```
 
-CI runs the same unit, integration and per-profile contract commands with Neovim 0.11.0, then verifies installation of both exact OpenCode binaries. Release evidence is FAIL until every result artifact and manual protocol is captured for both profiles.
+CI runs unit, integration, contract, privacy, and the complete release acceptance runner with Neovim 0.11.0. The release
+acceptance job uses both exact official binaries and authenticated whole-file Build E2E. Release-please cannot create a
+release until both profiles produce current per-scenario checksummed evidence; missing, stale, skipped, mismatched, or
+checksum-invalid evidence is a failure.
