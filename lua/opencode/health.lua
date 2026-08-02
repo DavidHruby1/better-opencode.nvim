@@ -17,11 +17,24 @@ local function opencode_version(binary)
   return vim.trim(output)
 end
 
+---Reports whether an existing directory is writable without creating or changing it.
+---Health is passive, so missing state paths remain unavailable until normal Runtime startup creates them.
 local function writable_directory(path)
-  if vim.fn.isdirectory(path) == 0 then
-    vim.fn.mkdir(path, "p", "0700")
-  end
   return vim.fn.isdirectory(path) == 1 and vim.fn.filewritable(path) == 2
+end
+
+---Resolves the active project's canonical root using the same LSP, Git, and cwd rules as Runtime startup.
+---File-backed buffers use root resolution directly; unnamed buffers fall back to the canonical cwd because there is no
+---file for the existing resolver to anchor.
+---@return string?
+local function active_project_root()
+  local root = require("opencode.runtime.root")
+  local buf = vim.api.nvim_get_current_buf()
+  local path = vim.api.nvim_buf_get_name(buf)
+  if path ~= "" then
+    return root.resolve({ buf = buf, path = path })
+  end
+  return root.realpath(vim.uv.cwd() or vim.fn.getcwd())
 end
 
 local function parser_capability()
@@ -54,7 +67,7 @@ function M.capabilities()
   local config = require("opencode.config")
   local version = opencode_version(config.opts.runtime.binary)
   local profile = version and require("opencode.compat")[version] or nil
-  local root = require("opencode.runtime.root").realpath(vim.uv.cwd() or vim.fn.getcwd())
+  local root = active_project_root()
   local guard_ok = false
   ---@type string?
   local guard_error = "root_not_found"

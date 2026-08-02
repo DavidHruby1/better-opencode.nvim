@@ -19,14 +19,19 @@ local function argv_key(command)
 end
 
 ---Rejects shell-style, discovery, and terminal-mutating probes at the command boundary.
----Health only performs the fixed Git probe; tmux is not a runtime prerequisite.
+---Health only performs fixed Git capability and active-root probes; tmux is not a runtime prerequisite.
 local function assert_read_only_commands(calls)
   local allowed = {
     ["git\0merge-file\0-p\0--diff3\0/dev/null\0/dev/null\0/dev/null"] = true,
   }
   for _, command in ipairs(calls.system) do
     eq(type(command), "table")
-    eq(allowed[argv_key(command)], true, "unexpected or mutating system command")
+    local root_probe = command[1] == "git"
+      and command[2] == "-C"
+      and command[4] == "rev-parse"
+      and command[5] == "--show-toplevel"
+      and #command == 5
+    eq(allowed[argv_key(command)] == true or root_probe, true, "unexpected or mutating system command")
   end
   for _, command in ipairs(calls.fn_system) do
     eq(type(command), "table")
@@ -36,7 +41,7 @@ local function assert_read_only_commands(calls)
 end
 
 ---Runs the public health check against local capability boundaries without starting OpenCode.
----The returned observations preserve health levels and command probes for privacy assertions.
+---The returned observations preserve health levels, root selection, and command probes for privacy assertions.
 ---@param spec? table
 ---@return table, table
 local function run_health(spec)
@@ -70,7 +75,10 @@ local function run_health(spec)
     vim_system = vim.system,
     fn_system = vim.fn.system,
     cwd = vim.uv.cwd,
+    get_clients = vim.lsp.get_clients,
+    buf_get_name = vim.api.nvim_buf_get_name,
     binary = config.opts.runtime.binary,
+    config_guard = package.loaded["opencode.runtime.config_guard"],
     snacks = package.loaded.snacks,
     snacks_preload = package.preload.snacks,
     env = {
@@ -100,7 +108,10 @@ local function run_health(spec)
     vim.system = old.vim_system
     vim.fn.system = old.fn_system
     vim.uv.cwd = old.cwd
+    vim.lsp.get_clients = old.get_clients
+    vim.api.nvim_buf_get_name = old.buf_get_name
     config.opts.runtime.binary = old.binary
+    package.loaded["opencode.runtime.config_guard"] = old.config_guard
     package.loaded.snacks = old.snacks
     package.preload.snacks = old.snacks_preload
     vim.env.XDG_CONFIG_HOME = old.env.XDG_CONFIG_HOME
@@ -132,6 +143,12 @@ local function run_health(spec)
   config.opts.runtime.binary = binary
   vim.uv.cwd = function()
     return root
+  end
+  vim.api.nvim_buf_get_name = function()
+    return spec.active_file or ""
+  end
+  vim.lsp.get_clients = function()
+    return {}
   end
   vim.env.XDG_CONFIG_HOME = root .. "/config"
   vim.env.OPENCODE_CONFIG = nil
@@ -173,7 +190,7 @@ local function run_health(spec)
     return "/health-fixture/private-state"
   end
   vim.fn.isdirectory = function()
-    return 1
+    return spec.state_exists == false and 0 or 1
   end
   vim.fn.mkdir = function(...)
     table.insert(calls.mkdir, vim.deepcopy({ ... }))
@@ -209,6 +226,15 @@ local function run_health(spec)
   end
   vim.system = function(command)
     table.insert(calls.system, vim.deepcopy(command))
+    if command[1] == "git" and command[2] == "-C" then
+      return {
+        code = 0,
+        stdout = (spec.git_root or root) .. "\n",
+        wait = function(self)
+          return self
+        end,
+      }
+    end
     if command[1] == "tmux" then
       if command[2] == "-V" then
         return {
@@ -231,6 +257,16 @@ local function run_health(spec)
       code = spec.git_probe_code or 0,
       wait = function(self)
         return self
+      end,
+    }
+  end
+
+  if spec.capture_guard_root then
+    local guard = require("opencode.runtime.config_guard")
+    package.loaded["opencode.runtime.config_guard"] = {
+      scan = function(scan_root)
+        calls.guard_root = scan_root
+        return guard.scan(scan_root)
       end,
     }
   end
@@ -300,6 +336,31 @@ T["AC-SEC-02 health works outside tmux without terminal probes"] = function()
     eq(command[1], "git")
   end
   assert_private_health(outside, outside_calls)
+end
+
+T["health scans the canonical active-buffer root without creating state"] = function()
+  local root = vim.fn.tempname()
+  local project = root .. "/project"
+  local file = project .. "/src/main.lua"
+  vim.fn.mkdir(project .. "/src", "p")
+  vim.fn.writefile({ "return true" }, file)
+
+  local observations, calls = run_health({
+    root = root,
+    active_file = file,
+    git_root = project,
+    capture_guard_root = true,
+    state_exists = false,
+  })
+  eq(calls.guard_root, vim.uv.fs_realpath(project))
+  eq(calls.mkdir, {})
+  eq(calls.jobstart, {})
+  eq(
+    contains(observations.error, "private state/temp directories are not writable; fix permissions on stdpath(state)"),
+    true
+  )
+  assert_private_health(observations, calls)
+  vim.fn.delete(root, "rf")
 end
 
 T["AC-SEC-02 health reports actionable local capability failures without discovery"] = function()
