@@ -78,14 +78,33 @@ function M.decode(text)
   return value
 end
 
----Checks a config value for custom tool definitions.
----Plugin and MCP entries are left to OpenCode because they do not extend the proposal tool boundary.
+---Checks singular and plural tool fields against an optional allowed-tool set.
+---Passive scans omit the set and reject every configured tool; effective config checks may pass profile tools so known
+---or disabled entries remain valid. Plugins and MCPs are left to OpenCode because they do not extend the proposal tool
+---boundary.
 ---@param config table
+---@param allowed_tools? table<string, boolean>
 ---@return boolean
 ---@return string?
-function M.validate(config)
-  if next(config.tool or {}) or next(config.tools or {}) then
+function M.validate(config, allowed_tools)
+  if type(config) ~= "table" then
     return false, "custom_tool"
+  end
+  for _, field in ipairs({ "tool", "tools" }) do
+    local tools = config[field]
+    if tools ~= nil then
+      if type(tools) ~= "table" then
+        return false, "custom_tool"
+      end
+      if not allowed_tools and next(tools) then
+        return false, "custom_tool"
+      end
+      for name, enabled in pairs(tools) do
+        if allowed_tools and enabled ~= false and not allowed_tools[name] then
+          return false, "custom_tool"
+        end
+      end
+    end
   end
   return true
 end

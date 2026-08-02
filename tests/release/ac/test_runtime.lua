@@ -640,6 +640,17 @@ T["AC-RUN-09 ignores plugins and MCPs but blocks custom tools"] = function()
   harness.restore()
 end
 
+T["effective config tool validation accepts only profile or disabled tools"] = function()
+  local validate = dofile("lua/opencode/runtime/config_guard.lua").validate
+  local tools = require("opencode.compat")["1.17.3"].tools
+  for _, field in ipairs({ "tool", "tools" }) do
+    eq(select(1, validate({ [field] = { read = true } }, tools)), true, field)
+    eq(select(1, validate({ [field] = { custom = false } }, tools)), true, field)
+    eq({ validate({ [field] = { custom = true } }, tools) }, { false, "custom_tool" }, field)
+    eq({ validate({ [field] = { read = true } }) }, { false, "custom_tool" }, field)
+  end
+end
+
 T["AC-EVT-05 disconnects on Server crash and restarts with fail-closed reconciliation"] = function()
   local harness =
     runtime_harness({ real_reconcile = true, inventory = {}, session_status = { crashed = "idle" }, messages = {} })

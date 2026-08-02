@@ -1,4 +1,4 @@
----@diagnostic disable: duplicate-set-field
+---@diagnostic disable: assign-type-mismatch, duplicate-set-field
 
 local T = MiniTest.new_set()
 local eq = MiniTest.expect.equality
@@ -151,6 +151,53 @@ T["configuration validation exposes only documented source scopes"] = function()
   eq(select(2, config.validate({ runtime = { unknown = true } })).scope, "runtime.unknown")
   eq(select(2, config.validate({ sidebar = { width = 2 } })).reason, "unsupported_key")
   eq(select(2, config.validate({ notify = { opts = "content" } })).scope, "notify.opts")
+end
+
+T["configuration rejects invalid optional values by presence"] = function()
+  local config = require("opencode.config")
+  local cases = {
+    { value = false, scope = "root" },
+    { value = { runtime = false }, scope = "runtime" },
+    { value = { ask = false }, scope = "ask" },
+    { value = { contexts = false }, scope = "contexts" },
+    { value = { runtime = { startup_timeout = false } }, scope = "runtime.startup_timeout" },
+    { value = { runtime = { shutdown_timeout = false } }, scope = "runtime.shutdown_timeout" },
+    { value = { runtime = { reconnect = { max_attempts = false } } }, scope = "runtime.reconnect.max_attempts" },
+    { value = { runtime = { reconnect = { backoff_ms = false } } }, scope = "runtime.reconnect.backoff_ms" },
+    { value = { runtime = { reconnect = { max_backoff_ms = false } } }, scope = "runtime.reconnect.max_backoff_ms" },
+  }
+  for _, case in ipairs(cases) do
+    local ok, err = config.validate(case.value)
+    eq(ok, false, case.scope)
+    eq(assert(err).scope, case.scope)
+  end
+end
+
+T["configuration merges valid overrides while preserving defaults"] = function()
+  local previous_opts = vim.g.opencode_opts
+  local previous_config = package.loaded["opencode.config"]
+
+  local ok, failure = xpcall(function()
+    vim.g.opencode_opts = { runtime = false }
+    package.loaded["opencode.config"] = nil
+    local invalid = require("opencode.config")
+    eq(invalid.validation_error.scope, "runtime")
+    eq(invalid.opts.runtime.startup_timeout, 10000)
+
+    vim.g.opencode_opts = { runtime = { startup_timeout = 25 }, notify = { enabled = false } }
+    package.loaded["opencode.config"] = nil
+    local valid = require("opencode.config")
+    eq(valid.validation_error, nil)
+    eq(valid.opts.runtime.startup_timeout, 25)
+    eq(valid.opts.runtime.binary, "opencode")
+    eq(valid.opts.runtime.reconnect.max_attempts, 5)
+    eq(valid.opts.notify.enabled, false)
+    eq(type(valid.opts.contexts["@this"]), "function")
+  end, debug.traceback)
+
+  vim.g.opencode_opts = previous_opts
+  package.loaded["opencode.config"] = previous_config
+  assert(ok, failure)
 end
 
 T["configuration documentation names every supported option"] = function()
