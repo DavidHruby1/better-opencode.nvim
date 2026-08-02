@@ -34,7 +34,7 @@ vim.g.opencode_opts = {
 }
 ```
 
-`ask.snacks.win` is merged into the multiline prompt's `Snacks.win` options. Width, height, and placement are clamped to the usable editor; the scratch buffer, mode/root/scope title, submit keys, lifecycle callbacks, and no-history behavior remain plugin-owned.
+`ask.snacks.win` is merged into the multiline prompt's `Snacks.win` options. Width, height, and placement are clamped to the usable editor; the scratch buffer, upstream-like prompt icon/style, compact mode/root/scope metadata, submit keys, lifecycle callbacks, short temporary states, and no-history behavior remain plugin-owned. The prompt has no long title. `<CR>` submits or accepts visible completion, `<C-j>` inserts a newline, and `<Esc>` cancels.
 
 `sidebar.width` is passed to `tmux split-window` as a percentage. The plugin lazily creates one detached right pane across all project roots, disables direct input to it, and focuses it only after the explicit Focus sidebar action.
 

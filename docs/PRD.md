@@ -121,7 +121,7 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 |---|---|
 | UI-01 | Prompt MUSÍ používat ohraničený víceřádkový `Snacks.win` poblíž kurzoru; Build po úspěšném odeslání float zavře, vrátí focus do stejného source bufferu a neponechá za sebou žádný sidebar ani tmux pane. |
 | UI-02 | Input MUSÍ ukázat Build/Plan, project root a effective scope před odesláním. |
-| UI-03 | Prompt input history MUSÍ být vypnutá; `<CR>` odesílá nebo přijímá viditelnou completion, `<S-CR>` a `<C-j>` vkládají newline a Session transcript tím není dotčen. |
+| UI-03 | Prompt MUSÍ používat víceřádkový `Snacks.win` s upstream-like ikonou a stylem bez dlouhého title; input history MUSÍ být vypnutá. `<CR>` odesílá nebo přijímá viditelnou completion, `<C-j>` vkládá newline a `<Esc>` prompt zruší. Stavové texty jsou krátké a dočasné a Session transcript tím není dotčen. |
 | UI-04 | Sdílený pravý tmux pane MUSÍ zobrazit aktivní TUI jen pro Plan nebo ruční show/focus, nesmí ukrást focus a Build dispatch jej nesmí otevřít automaticky. |
 | UI-05 | Pravý pane MUSÍ vzniknout jako 70:30 split vůči aktuálnímu `$TMUX_PANE`; další root jen přepne obsah a background Joby zůstávají běžet. |
 | UI-06 | Status UI MUSÍ ukázat Session title, short ID, Job stav a režim; barva nesmí být jediný identifikátor. |
@@ -177,10 +177,10 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 | JOB-03 | Job stavy jsou `running`, `waiting_user`, `pending_apply`, `conflict`, `completed`, `cancelled`, `error`, `scope_violation`; `conflict` MUSÍ nést kind `agent` nebo `external_change`. |
 | JOB-04 | `waiting_user` MUSÍ nést kind `question` nebo `permission`. |
 | JOB-05 | Session s neterminálním Jobem MUSÍ odmítnout follow-up a nabídnout založení nové Session; fronta neexistuje. |
-| JOB-06 | Session picker MUSÍ zobrazit všechny unarchived plugin-managed Session aktivního Runtime, jejich availability, poslední Job stav a stabilní textovou identitu. |
-| JOB-07 | Výběr Session MUSÍ přes `/tui/select-session` přepnout transcript správného plugin-owned TUI. |
-| JOB-08 | Uživatel MUSÍ umět zrušit jeden Job i všechny aktivní Joby. Cancel MUSÍ zahodit pending proposal a zabránit aplikaci pozdních eventů. |
-| JOB-09 | User-message event se smí přiřadit přes `sessionID + userMessageID`. První assistant `message.updated` se MUSÍ bootstrapnout přes `sessionID + parentID`; teprve další assistant/part eventy používají registrované `assistantMessageID`. Request bez message ID se smí přiřadit jedinému aktivnímu Jobu Session. |
+| JOB-06 | Veřejná `select()` akce MUSÍ být pouze recovery cesta pro Runtime/TUI; nesmí sloužit k běžné navigaci mezi Session. Interní inventory MUSÍ filtrovat unarchived plugin-managed Session podle root hash a contract version pro Plan reuse a transcript recovery. |
+| JOB-07 | Plan nebo TUI recovery MUSÍ po ověření živého pane použít interní `/tui/select-session` k přepnutí transcriptu správného plugin-owned TUI; endpoint není veřejná Session-selection API. |
+| JOB-08 | Uživatel MUSÍ umět v cancel akci vybrat jeden aktivní Job i zrušit všechny aktivní Joby. Cancel MUSÍ zahodit pending proposal a zabránit aplikaci pozdních eventů. |
+| JOB-09 | User-message event se smí přiřadit přes `sessionID + userMessageID`. První assistant `message.updated` se MUSÍ bootstrapnout přes `sessionID + parentID`; teprve další assistant/part eventy používají registrované `assistantMessageID`. Request bez message ID se smí přiřadit jedinému aktivnímu Jobu Session; live a reconciliation requesty se MUSÍ deduplikovat podle root, Session, Jobu a `requestID` a na jeden requestID se smí odeslat nejvýše jedna odpověď. |
 | JOB-10 | Po reconnectu MUSÍ plugin rekoncilovat Session status, messages, pending questions a permissions před přijetím dalších promptů. |
 | JOB-11 | Každá vytvořená Session MUSÍ mít plugin ownership/version metadata; cizí nebo archived Session se nesmí automaticky reuse a plugin-managed Session se nesmí automaticky mazat. |
 | JOB-12 | Plugin-owned TUI NESMÍ odeslat user message ani control reply; TermEnter/startinsert a pluginové TUI input akce musí být zablokované, zatímco Terminal-Normal scroll/navigace zůstává dostupná. |
@@ -234,7 +234,7 @@ Primární uživatel je vývojář pracující v Neovimu, který chce delegovat 
 | RUN-09 | Logy MUSÍ obsahovat pouze metadata jako root ID, short Session/Job ID, state transition a error class. Prompt, reasoning preview, replacement a source jsou defaultně zakázané. |
 | RUN-10 | Passive pre-spawn config guard a následný effective-config preflight MUSÍ ignorovat custom plugins a enabled MCP servery, odmítnout custom tools a nesmí při kontrole plugin/tool kód importovat ani MCP inicializovat. |
 | RUN-11 | TUI MUSÍ použít `attach --dir <canonical-root>` a každý HTTP/SSE request MUSÍ nést `x-opencode-directory` se stejným rootem. |
-| RUN-12 | Health a diagnostics MUSÍ ověřit `$TMUX`, verzi tmux, `extended-keys` a `client_termfeatures` s `extkeys`; mimo tmux startup failuje jasnou chybou. WezTerm musí mít `enable_kitty_keyboard=true`, tmux terminal-features se vážou na skutečný `client_termname` a plugin nesmí mutovat tmux global config. `<C-j>` zůstává terminal-safe fallback a keymap confidence se dokládá reprodukovatelným manuálním protokolem WezTerm→WSL→tmux→Neovim. |
+| RUN-12 | Health a diagnostics MUSÍ ověřit `$TMUX`, `$TMUX_PANE`, executable tmux a jeho verzi; mimo tmux nebo bez cílového pane startup failuje jasnou chybou, protože Plan a ruční show/focus používají sdílený pane. Plugin nesmí mutovat tmux konfiguraci. |
 
 ## Job state model
 
@@ -269,8 +269,8 @@ nonterminal -> error
 1. Uživatel zvolí Plan; UI jasně ukáže read-only režim.
 2. Dirty-context preflight nabídne `save and continue` nebo `cancel`, aby Plan četl aktuální diskový obsah.
 3. Plan může číst projekt, ale nemůže použít write-capable nástroj.
-4. Odpověď se zobrazí ve sdíleném pravém tmux pane; pane se otevře jen pro Plan nebo ruční show/focus.
-5. Po dokončení může uživatel v téže reusable Session odeslat nový Build Job.
+4. Plan vytvoří novou managed Session nebo znovu použije ověřenou reusable Session, zobrazí její transcript ve sdíleném pravém tmux pane přes interní `/tui/select-session` a pane zůstane input-locked.
+5. Pane se otevře lazily bez focus steal; explicitní Focus akce jej může zaostřit. Po dokončení může uživatel v téže reusable Session odeslat nový Build Job.
 6. Build převezme transcript context, ale vytvoří nové `userMessageID`, Base a scope.
 
 ### Paralelní změny stejného bufferu
@@ -299,7 +299,7 @@ Zachovat, pokud splňuje kontrakty:
 - statusline/event základ,
 - health checks,
 - sdílený tmux pane,
-- session selector a TUI select-session transport,
+- Session registry a interní TUI select-session transport,
 - diff UI jako základ manual conflict workflow.
 
 Nahradit nebo odstranit:
@@ -328,7 +328,7 @@ Question, permission, cancel, conflict dialog, manual diff, changedtick race a d
 
 ### Slice 4: Session reuse a paralelní ranges
 
-Session picker, Plan-to-Build follow-up, nová paralelní Session, dva nepřekrývající se Joby ve stejném bufferu, overlap rejection, cancel-one/all a background status fungují bez event mixu.
+Session reuse, Plan-to-Build follow-up, nová paralelní Session, dva nepřekrývající se Joby ve stejném bufferu, overlap rejection, cancel-one/all a background status fungují bez event mixu.
 
 ### Slice 5: Multi-root lifecycle a recovery
 

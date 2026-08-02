@@ -165,9 +165,11 @@ Kde scénář používá Base/Ours/Theirs, platí:
 
 **Given** kurzor je uvnitř rozpoznané funkce  
 **When** uživatel otevře výchozí prompt  
-**Then** víceřádkový `Snacks.win` zobrazí Build, canonical root a function scope<br>
+**Then** víceřádkový `Snacks.win` zobrazí Build, jméno project rootu a function scope v kompaktním metadata řádku<br>
 **And** zobrazí se ještě během startu OpenCode a zachová text při startup nebo dispatch chybě<br>
-**And** `<CR>` odešle nebo přijme viditelnou completion, zatímco `<S-CR>` a `<C-j>` vloží skutečný newline<br>
+**And** prompt používá víceřádkový `Snacks.win` s upstream-like ikonou a stylem bez dlouhého title<br>
+**And** `<CR>` odešle nebo přijme viditelnou completion, `<C-j>` vloží skutečný newline a `<Esc>` prompt zruší<br>
+**And** startup, submit a retry/error zobrazují jen krátké dočasné stavové texty<br>
 **And** po odeslání se focus vrátí do původního source window  
 **And** po úspěšném odeslání se Build float zavře a neotevře žádný sidebar ani tmux pane
 **And** předchozí prompt se nenabídne jako input historie.
@@ -180,9 +182,11 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Given** sdílený pane je zavřený
 **When** uživatel otevře Plan nebo ruční show/focus
 **Then** pravý tmux pane zobrazí TUI aktivního rootu jako 70:30 split
+**And** Plan vytvoří managed Session nebo znovu použije ověřenou reusable Session a po ověření živého pane nastaví její transcript přes interní `/tui/select-session`
+**And** TUI pane zůstane input-locked a Plan ani jeho dispatch neukradou focus source window
 **And** source window zůstane current  
 **And** Build dispatch pane neotevře
-**And** pane lze samostatně focusovat, skrýt a znovu zobrazit
+**And** pane lze samostatně focusovat, skrýt a znovu zobrazit; pouze explicitní Focus akce jej zaostří
 **And** změna rootu neukončí background Joby.
 
 ### AC-UI-03: Čitelná identita bez barvy
@@ -191,7 +195,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Požadavky:** UI-06, UI-07, JOB-06
 
 **Given** dvě Session používají stejnou barvu nebo barvy nejsou viditelné  
-**When** uživatel otevře status nebo picker  
+**When** uživatel otevře status nebo recovery actions
 **Then** rozliší Session podle title, short ID, rootu a textového Job stavu  
 **And** background notifikace obsahuje stejnou identitu.
 
@@ -583,10 +587,11 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Priorita:** P1  
 **Požadavky:** JOB-06, JOB-07
 
-**Given** Runtime má dvě Session s odlišnými transcripts  
-**When** uživatel vybere druhou Session v pickeru  
-**Then** plugin zavolá `/tui/select-session` pro správný Runtime  
+**Given** Runtime má dvě ověřené Session s odlišnými transcripts
+**When** Plan reuse nebo TUI recovery potřebuje druhou Session
+**Then** plugin zavolá interní `/tui/select-session` pro správný Runtime
 **And** pane zobrazí transcript druhé Session
+**And** TUI zůstane input-locked a běžný prompt ani recovery nemusí nabídnout veřejné procházení Session
 **And** background event první Session se do něj nevloží.
 
 ### AC-JOB-03: Dva nepřekrývající se Joby ve stejném bufferu
@@ -607,7 +612,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Požadavky:** JOB-08
 
 **Given** běží dva Joby v různých Session  
-**When** uživatel zruší Job A  
+**When** cancel action zobrazí aktivní Joby a uživatel vybere Job A
 **Then** plugin abortuje Session A, zahodí její proposal, extmarky, temp files a dialogy  
 **And** Job A skončí `cancelled`  
 **And** Job B pokračuje.
@@ -628,9 +633,9 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Požadavky:** JOB-06, JOB-11, INT-01
 
 **Given** Server vrací jednu plugin-managed reusable Session, jednu foreign Session bez markeru a jednu archived managed Session  
-**When** uživatel otevře plugin session picker  
-**Then** picker nabídne pouze unarchived plugin-managed Session se shodným root hash a contract version  
-**When** uživatel managed Session zvolí pro follow-up  
+**When** Plan nebo TUI recovery načte interní Session inventory
+**Then** inventory obsahuje pouze unarchived plugin-managed Session se shodným root hash a contract version
+**When** Plan znovu použije managed Session pro follow-up
 **Then** plugin před dispatchí znovu nastaví a ověří hard permission profile  
 **And** foreign ani archived Session se automaticky nereuse  
 **And** žádná Session se automaticky nesmaže.
@@ -643,7 +648,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Given** uživatel focusuje plugin-owned TUI pane
 **When** použije `i`, `a`, `startinsert`, terminal-mode mapping nebo pluginovou input akci  
 **Then** buffer zůstane v Terminal-Normal a žádný input se neodešle TUI channelu  
-**And** transcript lze scrollovat a přepínat přes plugin Session picker  
+**And** transcript lze scrollovat a přepínat pouze přes Plan nebo interní TUI recovery endpoint
 **And** user message může vzniknout pouze registrovanou HTTP cestou s plugin Jobem.
 
 ## Event routing a recovery
@@ -669,6 +674,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **Given** Session má právě jeden aktivní Job  
 **When** přijde question nebo permission event s requestID a sessionID bez messageID  
 **Then** request se přiřadí tomuto Jobu  
+**And** opakovaný live event nebo stejný request z pending-list snapshotu se deduplikuje podle root, Session, Jobu a requestID a vytvoří právě jeden dialog
 **When** Session aktivní Job nemá  
 **Then** request se neukáže jako dialog jiného Jobu a reconciliation jej vyřeší fail-closed.
 
@@ -769,6 +775,7 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **And** podporovaný workflow nemůže odeslat odpověď přes TUI  
 **When** canonical API reply/reject potvrdí matching event  
 **Then** plugin visibility lock zruší a obnoví předchozí visibility jen pokud byl pane předtím viditelný, bez focus steal, ale permanentní input lock zachová
+**And** stejný live/pending request nepřidá druhý dialog ani druhou odpověď
 **And** na requestID existuje právě jedna uživatelská odpověď.
 
 ## Stavový model
@@ -818,9 +825,8 @@ Kde scénář používá Base/Ours/Theirs, platí:
 **When** uživatel spustí health check  
 **Then** hard dependencies jsou errors s konkrétní nápravou  
 **And** chybějící Tree-sitter parser je warning s file-scope fallbackem  
-**And** health check jasně pojmenuje `$TMUX`, verzi tmux, `extended-keys` a `client_termfeatures` s `extkeys`, pokud nejsou splněné
-**And** health check nevyžaduje `pgrep` ani `lsof` a nemění tmux global config
-**And** manuální WezTerm→WSL→tmux→Neovim protokol je reprodukovatelný a `<C-j>` zůstává fallback.
+**And** health check jasně pojmenuje `$TMUX`, `$TMUX_PANE`, executable tmux a jeho verzi, pokud nejsou splněné
+**And** health check nevyžaduje `pgrep` ani `lsof` a nemění tmux konfiguraci.
 
 ## Traceability matrix
 

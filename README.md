@@ -11,7 +11,7 @@ This fork owns one loopback OpenCode Server and one input-locked TUI client per 
 - `curl`
 - `git` with `git merge-file -p --diff3`
 - `snacks.nvim` with input and picker enabled
-- `tmux` with extended keyboard support enabled
+- `tmux` (required for the Plan transcript pane)
 
 OpenCode support is an exact compatibility matrix, not a semver range. Other versions fail the preflight.
 
@@ -21,12 +21,12 @@ OpenCode support is an exact compatibility matrix, not a semver range. Other ver
 vim.g.opencode_opts = {
   runtime = { binary = "opencode", startup_timeout = 10000 },
   notify = { enabled = true },
-  sidebar = { width = 0.30 },
+  sidebar = { width = 30 },
 }
 
--- Primary Build
+-- Recommended Build: start a new Session and use the default scope resolution
 vim.keymap.set({ "n", "x" }, "<C-a>", function()
-  require("opencode").ask()
+  require("opencode").ask(nil, { mode = "build", new_session = true })
 end)
 
 -- Explicit read-only Plan
@@ -34,7 +34,7 @@ vim.keymap.set({ "n", "x" }, "<leader>op", function()
   require("opencode").ask(nil, { mode = "plan" })
 end)
 
--- Session actions, cancel one/all, sidebar, and diagnostics
+-- Recovery actions, cancel one/all, sidebar, and diagnostics
 vim.keymap.set("n", "<leader>os", function()
   require("opencode").select()
 end)
@@ -54,29 +54,9 @@ vim.keymap.set("n", "<leader>of", function()
 end)
 ```
 
-The multiline prompt opens while OpenCode starts. `<CR>` submits or accepts visible completion, `<S-CR>` inserts a newline, `<C-j>` is the terminal-safe newline fallback, and `<Esc>` cancels. Failed startup or dispatch keeps the text available for retry.
+The recommended Build mapping captures an active visual selection. In normal mode it uses the function under the cursor and falls back to the full file when no supported function is found; this uses the existing `ask()` API and adds no public function. The multiline prompt uses an upstream-like `Snacks.win` icon and style, keeps metadata compact instead of using a long title, and shows only short temporary states while it starts, submits, or waits for retry. `<CR>` submits or accepts visible completion, `<C-j>` inserts a newline, and `<Esc>` cancels. Failed startup or dispatch keeps the text available for retry.
 
-### Terminal transport setup
-
-Modified Enter keys must survive every layer between the terminal and Neovim. For WezTerm, enable the Kitty keyboard protocol:
-
-```lua
-config.enable_kitty_keyboard = true
-```
-
-In tmux, enable extended keys and attach the `extkeys` feature to the actual client terminal name, not an assumed `$TERM` value:
-
-```sh
-tmux set -g extended-keys on
-tmux display-message -p '#{client_termname}'
-tmux set -as terminal-features ',<actual-client_termname>:extkeys'
-```
-
-Put the equivalent `set` lines in `~/.tmux.conf` for future sessions, replacing `<actual-client_termname>` with the exact output from `display-message`. Restart the tmux client after changing terminal transport settings, then run `:checkhealth opencode` inside tmux. If `<S-CR>` is unavailable, use `<C-j>` for a newline.
-
-To reproduce the full path, start WezTerm with Kitty keyboard support, enter WSL, attach tmux, start Neovim, and try `<S-CR>` in the multiline prompt. This verifies the raw WezTerm -> WSL -> tmux -> Neovim input transport. A direct Lua call to the prompt's newline callback checks only the callback and does not verify that raw key input reaches it.
-
-The select menu provides Session selection, cancel current Job, cancel all Jobs, TUI attach retry, sidebar toggle/focus, runtime restart, and metadata-only diagnostics. Run `:checkhealth opencode` for dependencies and the selected compatibility profile.
+`select()` is a recovery-only action menu for runtime and TUI problems, not a routine Session-navigation action. `cancel()` opens the active-Job picker when one Job must be chosen, while `cancel_all()` cancels every active Job. Plan creates a managed Session or reuses a selected reusable one, selects its transcript through the internal `/tui/select-session` request, and shows the shared input-locked pane without stealing source focus; the explicit Focus sidebar action is the only action that focuses the pane.
 
 ## Safety model
 

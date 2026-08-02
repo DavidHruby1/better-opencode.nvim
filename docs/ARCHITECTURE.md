@@ -74,9 +74,13 @@ Nejde o semver rozsah ani best-effort legacy fallback. Každý profil má vlastn
 
 Žádný best-effort fallback na neznámý payload nebo endpoint není povolen. Rozdíl mezi dvěma podporovanými profily smí řešit pouze explicitní, contract-testovaný adapter vybraný podle přesné health verze. Upgrade OpenCode vyžaduje nový ověřený baseline a contract fixture.
 
-### Terminal stack a tmux
+### Tmux pane
 
-Runtime a health ověřují i terminální prostředí. Když plugin běží uvnitř tmux, musí být dostupný `$TMUX`, verze tmux, `extended-keys` a `client_termfeatures` s `extkeys`; mimo tmux startup failuje jasnou chybou. WezTerm musí mít `enable_kitty_keyboard=true`; tmux `terminal-features` se vážou na skutečný `client_termname`. Plugin global tmux config nemění. `<C-j>` zůstává terminal-safe fallback pro víceřádkový prompt a keymap confidence se dokládá reprodukovatelným manuálním protokolem WezTerm→WSL→tmux→Neovim.
+Runtime a health ověřují `$TMUX`, `$TMUX_PANE`, executable tmux a jeho verzi. Mimo tmux nebo bez platného cílového pane startup failuje jasnou chybou, protože Plan a ruční show/focus používají sdílený pane. Plugin tmux konfiguraci nemění. Sdílený TUI pane je input-locked; Plan do něj po ověření živého pane vybere transcript, ale neukradne focus source window.
+
+### Prompt float
+
+Build i Plan používají víceřádkový `Snacks.win` s upstream-like ikonou a stylem. Prompt zobrazuje kompaktní režim, jméno project rootu a effective scope bez absolutní cesty; krátké stavové texty jsou pouze dočasné. `<CR>` odešle prompt nebo přijme viditelnou completion, `<C-j>` vloží newline a `<Esc>` prompt zruší. Input history je vypnutá.
 
 ### Použité endpointy
 
@@ -618,9 +622,9 @@ Až po dokončení reconciliation Runtime opět přijímá prompty.
 
 ## Questions, permissions a dialog queue
 
-Question, permission request, agentní conflict a external-change conflict se převedou na interní `DialogRequest` obsahující kind, Runtime root, Session title/short ID, Job key a případný OpenCode request ID. Jedna globální FIFO fronta serializuje modální UI napříč Runtime.
+Question, permission request, agentní conflict a external-change conflict se převedou na interní `DialogRequest` obsahující kind, Runtime root, Session title/short ID, Job key a případný OpenCode request ID. Jedna globální FIFO fronta serializuje modální UI napříč Runtime. Remote question/permission request má deduplicační klíč `root + sessionID + jobKey + requestID`; live event a reconciliation pending list tak vytvoří nejvýše jeden dialog a jeden reply.
 
-Question nebo permission dialog nastaví Job `waiting_user`; conflict dialog ponechá Job v `conflict`. Odeslání reply/reject vrátí interaktivní agentní Job do `running`, pokud request Job neukončil. Zavření dialogu se mapuje na explicitní reject nebo cancel podle kind. Cancel Jobu odstraní jeho nezobrazené dialogy z fronty a odmítne právě zobrazený request, pokud patří tomuto Jobu.
+Question nebo permission dialog nastaví Job `waiting_user`; conflict dialog ponechá Job v `conflict`. Odeslání reply/reject vrátí interaktivní agentní Job do `running`, pokud request Job neukončil. Zavření dialogu se mapuje na explicitní reject nebo cancel podle kind. Stejný request se při opakovaném live eventu, pending-list snapshotu nebo reconnectu pouze znovu použije; nesmí vzniknout druhý dialog ani druhá odpověď. Cancel Jobu odstraní jeho nezobrazené dialogy z fronty a odmítne právě zobrazený request, pokud patří tomuto Jobu.
 
 ### Permanentní TUI input lock a managed visibility lock
 
@@ -638,16 +642,13 @@ Při managed `question.asked` nebo `permission.asked` plugin navíc ve stejném 
 
 TUI proces během visibility locku dál přijímá Server eventy, ale nemůže přijmout uživatelský input. Proto nemůže vzniknout druhá odpověď na stejný request ID. Pokud TUI proces během locku spadne, request zůstává ve Snacks queue a použije se TUI-only recovery; Server ani Job se nerestartují.
 
-## Session picker a identita
+## Session identity and recovery
 
-Picker filtruje pouze unarchived plugin-managed Session aktuálního Runtime a řadí:
+Runtime inventory filtruje pouze unarchived plugin-managed Session aktuálního Runtime se shodným root hash a contract version. Každá interní položka obsahuje project basename, Session title, short ID, mode posledního Jobu a stav; short ID je stabilní suffix/prefix OpenCode Session ID a barva je pouze doplněk.
 
-1. aktivní Session podle poslední aktivity,
-2. reusable Session podle poslední aktivity.
+Veřejná `select()` akce je recovery-only pro Runtime/TUI: slouží k retry attach, restartu, diagnostice a ovládání již vybraného pane, nikoli k běžné navigaci mezi Session. Plan vytvoří novou Session, pokud je to vyžádáno, jinak znovu ověří vybranou reusable Session; aktivní Session follow-up odmítne a nenabízí queue.
 
-Každá položka obsahuje project basename, Session title, short ID, mode posledního Jobu a stav. Short ID je stabilní suffix/prefix OpenCode Session ID; barva je pouze doplněk.
-
-Výběr reusable Session přepne TUI transcript a nastaví ji pro follow-up. Výběr active Session pouze přepne transcript; nový prompt nabídne `create new session`, nikoli queue. Dedikovaná new-session akce vždy vytvoří nezávislou Session.
+Po vytvoření nebo reuse Plan nejprve lazily zobrazí sdílený pane, potom přes `/tui/select-session` nastaví transcript. Pane zůstává input-locked a source window nepřijde o focus; explicitní Focus akce může pane zaostřit. Dedikovaná new-session akce vždy vytvoří nezávislou Session.
 
 ## Cancel semantics
 
@@ -659,7 +660,7 @@ Cancel-one:
 4. přejde do `cancelled`,
 5. uvolní Session.
 
-Cancel-all provede stejné kroky pro snapshot všech aktivních Jobů; selhání jednoho abort requestu nesmí zabránit lokálnímu fail-closed zrušení ostatních. Žádný pozdní event nesmí aplikovat cancelled proposal.
+Cancel action nabízí pouze aktivní Joby a po výběru provede stejné kroky pro jeden Job. Cancel-all provede stejné kroky pro snapshot všech aktivních Jobů; selhání jednoho abort requestu nesmí zabránit lokálnímu fail-closed zrušení ostatních. Žádný pozdní event nesmí aplikovat cancelled proposal.
 
 ## Logging a diagnostika
 
@@ -680,7 +681,7 @@ Health check ověří:
 - executable `git` a `git merge-file` capability,
 - Tree-sitter parser availability jako informaci, ne hard failure,
 - možnost bindnout loopback port,
-- tmux stack: `$TMUX`, `$TMUX_PANE`, verzi tmux, `extended-keys` a `client_termfeatures` s `extkeys`.
+- tmux stack: `$TMUX`, `$TMUX_PANE`, executable tmux a jeho verzi pro Plan a ruční TUI pane.
 
 ## Implementační hranice komponent
 
@@ -690,7 +691,7 @@ Konkrétní názvy Lua modulů se mohou přizpůsobit upstream struktuře, ale o
 |---|---|
 | Runtime manager | procesy, root registry, ownership manifest, auth, health, recovery, shutdown, tmux pane lifecycle |
 | OpenCode client | pinované HTTP payloady, root header, endpointy, error mapping |
-| Session registry | picker data, availability, TUI selection |
+| Session registry | verified inventory, availability, Plan reuse, internal TUI selection |
 | Job registry | state transitions, correlation, cancellation, late-event guard |
 | Context/preflight | placeholders, dirty buffers, Base capture |
 | Scope resolver | visual/function/file, Tree-sitter adapters, extmarks, overlap |
