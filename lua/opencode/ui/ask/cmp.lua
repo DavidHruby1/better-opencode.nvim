@@ -65,7 +65,7 @@ handlers[ms.completionItem_resolve] = function(params, callback)
   local item = vim.deepcopy(params)
   local context = require("opencode.ui.ask").contexts[vim.api.nvim_get_current_buf()]
   if not item.documentation and context then
-    local rendered = context:render(item.label)
+    local rendered = context:preview(item.label)
     -- Highlights won't match other locations, but there's no general way to control them.
     -- Would have to support each completion plugin separately.
     -- Markdown code blocks to preserve formatting.

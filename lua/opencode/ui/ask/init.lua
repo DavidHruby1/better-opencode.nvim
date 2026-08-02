@@ -100,6 +100,11 @@ function M.ask(default, context, _mode, workflow_opts, readiness, submit)
   local config = require("opencode.config")
   local scope_kind = "unsupported"
 
+  local prepared, prepare_error = require("opencode.context.preflight").prepare_scope(context)
+  if not prepared then
+    return Promise.reject({ error_class = prepare_error })
+  end
+
   local text = table.concat(vim.api.nvim_buf_get_lines(context.buf, 0, -1, false), "\n")
   local scope = require("opencode.scope").resolve(context, { text = text }, workflow_opts and workflow_opts.scope)
   if scope then

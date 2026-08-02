@@ -54,6 +54,35 @@ T["extmark scope tracks insertion with configured gravity"] = function()
   vim.api.nvim_buf_delete(buf, { force = true })
 end
 
+T["visual scope rejects formatting that collapses its tracked range"] = function()
+  local path = vim.fn.tempname() .. ".lua"
+  vim.fn.writefile({ "local function alpha()", "  return 1", "end" }, path)
+  vim.cmd.edit(path)
+  local buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(buf, 1, 2, false, { "  return 10" })
+  local capture = assert(require("opencode.context").capture({
+    from = { 2, 2 },
+    to = { 2, 10 },
+    kind = "char",
+  }))
+  local context = require("opencode.context").new(capture, { root = vim.fs.dirname(path) })
+  vim.api.nvim_create_autocmd("BufWritePre", {
+    buffer = buf,
+    once = true,
+    callback = function()
+      vim.api.nvim_buf_set_text(buf, 1, 2, 1, 11, {})
+    end,
+  })
+
+  local ok, err = pcall(context.render, context, "change it")
+  eq(ok, false)
+  eq(type(err) == "table" and err.error_class, "scope_changed")
+  eq(vim.bo[buf].modified, false)
+
+  vim.cmd.bwipeout({ bang = true })
+  vim.uv.fs_unlink(path)
+end
+
 T["non-modifiable source terminates apply without throwing"] = function()
   local path = vim.fn.tempname()
   vim.fn.writefile({ "one" }, path)

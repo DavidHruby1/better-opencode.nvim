@@ -670,6 +670,122 @@ T["AC-CTX-03 dirty Build saves through write hooks before capturing Base and cre
   vim.fn.delete(path)
 end
 
+T["format-on-save rebases file, function, and visual scopes onto the final Base"] = function()
+  local cases = {
+    { name = "file", opts = { mode = "build", scope = "file" } },
+    { name = "function", cursor = { 2, 2 }, opts = { mode = "build" } },
+    {
+      name = "visual",
+      range = { from = { 2, 2 }, to = { 2, 9 }, kind = "char" },
+      opts = { mode = "build" },
+    },
+  }
+  for index, case in ipairs(cases) do
+    local path, buf, win = source_buffer({ "local function alpha()", "  return 1", "end" }, "lua")
+    if case.cursor then
+      vim.api.nvim_win_set_cursor(win, case.cursor)
+    end
+    vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "-- dirty" })
+    local capture = assert(require("opencode.context").capture(case.range))
+    vim.api.nvim_create_autocmd("BufWritePre", {
+      buffer = buf,
+      once = true,
+      callback = function()
+        vim.api.nvim_buf_set_lines(buf, 0, 0, false, { "-- formatted" })
+      end,
+    })
+    local call_log = calls()
+    local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_format_" .. index)
+    local context = require("opencode.context").new(capture, runtime)
+
+    local job, err = await(require("opencode.api.prompt").prompt("change it", context, case.opts))
+    eq(err, nil, case.name)
+    eq(job.base.text, "-- formatted\nlocal function alpha()\n  return 1\nend\n-- dirty", case.name)
+    eq(vim.bo[buf].modified, false, case.name)
+    eq(table.concat(vim.fn.readfile(path), "\n"), job.base.text, case.name)
+    if case.name == "file" then
+      eq({ job.scope.kind, job.scope.start_byte, job.scope.end_byte }, { "file", 0, #job.base.text }, case.name)
+    elseif case.name == "function" then
+      local selected = job.base.text:sub(job.scope.start_byte + 1, job.scope.end_byte)
+      eq(job.scope.kind, "function", case.name)
+      eq(selected, "local function alpha()\n  return 1\nend", case.name)
+    else
+      local selected = job.base.text:sub(job.scope.start_byte + 1, job.scope.end_byte)
+      eq(job.scope.kind, "range", case.name)
+      eq(selected, "return 1", case.name)
+    end
+    require("opencode.job").finish(job, runtime.sessions[job.session_id], "completed")
+    vim.api.nvim_buf_delete(buf, { force = true })
+    vim.fn.delete(path)
+  end
+end
+
+T["reference providers rerender and save dirty buffers discovered by write hooks"] = function()
+  local path, buf = source_buffer({ "target" }, "text")
+  local first_path = vim.fn.tempname() .. ".txt"
+  local second_path = vim.fn.tempname() .. ".txt"
+  vim.fn.writefile({ "first" }, first_path)
+  vim.fn.writefile({ "second" }, second_path)
+  local first_buf, second_buf = vim.fn.bufadd(first_path), vim.fn.bufadd(second_path)
+  vim.fn.bufload(first_buf)
+  vim.fn.bufload(second_buf)
+  vim.api.nvim_buf_set_lines(first_buf, 0, -1, false, { "first dirty" })
+  vim.api.nvim_buf_set_lines(second_buf, 0, -1, false, { "second dirty" })
+
+  local expose_second = false
+  local order = {}
+  vim.api.nvim_create_autocmd("BufWritePre", {
+    buffer = first_buf,
+    once = true,
+    callback = function()
+      table.insert(order, "first hook")
+      expose_second = true
+    end,
+  })
+  vim.api.nvim_create_autocmd("BufWritePre", {
+    buffer = second_buf,
+    once = true,
+    callback = function()
+      table.insert(order, "second hook")
+    end,
+  })
+
+  local config = require("opencode.config")
+  local old_provider = config.opts.contexts["@dynamic"]
+  config.opts.contexts["@dynamic"] = function(context)
+    table.insert(order, "provider")
+    context.referenced_buffers[first_buf] = true
+    local values = { assert(context.format({ buf = first_buf, rel = context.root })) }
+    if expose_second then
+      context.referenced_buffers[second_buf] = true
+      table.insert(values, assert(context.format({ buf = second_buf, rel = context.root })))
+    end
+    return table.concat(values, ", ")
+  end
+
+  local call_log = calls()
+  local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_dynamic_refs")
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), runtime)
+  local job, err = await(require("opencode.api.prompt").prompt("inspect @dynamic", context, { mode = "build" }))
+  config.opts.contexts["@dynamic"] = old_provider
+
+  eq(err, nil)
+  eq(order, { "provider", "first hook", "provider", "second hook", "provider" })
+  eq(table.concat(vim.fn.readfile(first_path), "\n"), "first dirty")
+  eq(table.concat(vim.fn.readfile(second_path), "\n"), "second dirty")
+  eq(vim.bo[first_buf].modified, false)
+  eq(vim.bo[second_buf].modified, false)
+  eq(call_log.prompts[1].parts[1].text:find(vim.fs.basename(second_path), 1, true) ~= nil, true)
+
+  require("opencode.job").finish(job, runtime.sessions.ses_dynamic_refs, "completed")
+  vim.api.nvim_buf_delete(first_buf, { force = true })
+  vim.api.nvim_buf_delete(second_buf, { force = true })
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(first_path)
+  vim.fn.delete(second_path)
+  vim.fn.delete(path)
+end
+
 T["AC-CTX-04 Build dirty buffers save automatically without a confirmation dialog"] = function()
   local path, buf = source_buffer({ "target" }, "text")
   local other_path = vim.fn.tempname() .. ".txt"

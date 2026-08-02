@@ -1,6 +1,7 @@
 local M = {}
 
 M.namespace = vim.api.nvim_create_namespace("opencode-build-scope")
+local preflight_namespace = vim.api.nvim_create_namespace("opencode-context-preflight")
 
 local function range_offsets(buf, text, range)
   if range.kind == "block" then
@@ -52,6 +53,115 @@ function M.resolve(context, base, override)
     start_byte, end_byte = resolved_start, resolved_end
   end
   return { kind = kind, path = context.path, start_byte = start_byte, end_byte = end_byte }
+end
+
+local function set_point(buf, row, col, right_gravity)
+  local ok, id = pcall(vim.api.nvim_buf_set_extmark, buf, preflight_namespace, row, col, {
+    right_gravity = right_gravity,
+    strict = true,
+  })
+  return ok and id or nil
+end
+
+---Marks the captured cursor and explicit visual boundaries while normal writes run their hooks.
+---The marks are created only in the target buffer and use UTF-8-safe offsets from the current text. Invalid or blockwise
+---captures fail before any file is written because their final scope cannot be recovered safely.
+---@param context table
+---@return table?
+---@return string?
+function M.track_context(context)
+  local text = table.concat(vim.api.nvim_buf_get_lines(context.buf, 0, -1, false), "\n")
+  local cursor_offset, cursor_error =
+    require("opencode.snapshot").position_to_offset(text, context.cursor[1] - 1, context.cursor[2])
+  if not cursor_offset then
+    return nil, cursor_error
+  end
+  local cursor_id = set_point(context.buf, context.cursor[1] - 1, context.cursor[2], false)
+  if not cursor_id then
+    return nil, "scope_changed"
+  end
+  local tracker = { cursor_id = cursor_id }
+  if not context.range then
+    return tracker
+  end
+  local scope, err = M.resolve(context, { text = text })
+  if not scope then
+    M.discard_context_tracker(context, tracker)
+    return nil, err
+  end
+  local start_row, start_col = require("opencode.snapshot").offset_to_position(text, scope.start_byte)
+  local end_row, end_col = require("opencode.snapshot").offset_to_position(text, scope.end_byte)
+  if start_row == nil or end_row == nil then
+    M.discard_context_tracker(context, tracker)
+    return nil, "scope_changed"
+  end
+  tracker.range_nonempty = scope.start_byte < scope.end_byte
+  tracker.start_id = set_point(context.buf, start_row, start_col, false)
+  tracker.end_id = set_point(context.buf, end_row, end_col, true)
+  if not tracker.start_id or not tracker.end_id then
+    M.discard_context_tracker(context, tracker)
+    return nil, "scope_changed"
+  end
+  return tracker
+end
+
+---Deletes temporary preflight marks without changing the captured positions.
+---@param context table
+---@param tracker table
+function M.discard_context_tracker(context, tracker)
+  if not vim.api.nvim_buf_is_valid(context.buf) then
+    return
+  end
+  for _, key in ipairs({ "cursor_id", "start_id", "end_id" }) do
+    local id = tracker[key]
+    if id then
+      pcall(vim.api.nvim_buf_del_extmark, context.buf, preflight_namespace, id)
+    end
+  end
+end
+
+local function tracked_position(buf, id)
+  local position = vim.api.nvim_buf_get_extmark_by_id(buf, preflight_namespace, id, {})
+  if #position == 0 then
+    return nil
+  end
+  return { position[1], position[2] }
+end
+
+---Recaptures cursor and visual positions from the final post-write target text.
+---Explicit selections become an exact half-open byte range, which avoids guessing inclusive UTF-8 endpoints after formatting.
+---Missing, reversed, collapsed, or mid-codepoint marks reject the dispatch instead of authorizing a different scope.
+---@param context table
+---@param tracker table
+---@return boolean?
+---@return string?
+function M.restore_context(context, tracker)
+  local cursor = tracked_position(context.buf, tracker.cursor_id)
+  local start = tracker.start_id and tracked_position(context.buf, tracker.start_id) or nil
+  local finish = tracker.end_id and tracked_position(context.buf, tracker.end_id) or nil
+  M.discard_context_tracker(context, tracker)
+  if not cursor then
+    return nil, "scope_changed"
+  end
+  context.cursor = { cursor[1] + 1, cursor[2] }
+  if not tracker.start_id then
+    return true
+  end
+  if not start or not finish then
+    return nil, "scope_changed"
+  end
+  local text = table.concat(vim.api.nvim_buf_get_lines(context.buf, 0, -1, false), "\n")
+  local start_byte = require("opencode.snapshot").position_to_offset(text, start[1], start[2])
+  local end_byte = require("opencode.snapshot").position_to_offset(text, finish[1], finish[2])
+  if not start_byte or not end_byte or start_byte > end_byte or (tracker.range_nonempty and start_byte == end_byte) then
+    return nil, "scope_changed"
+  end
+  context.range = {
+    from = { start[1] + 1, start[2] },
+    to = { finish[1] + 1, finish[2] },
+    kind = "bytes",
+  }
+  return true
 end
 
 ---Creates the two gravity-aware marks that track a Build scope in current buffer text.
