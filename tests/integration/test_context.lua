@@ -302,7 +302,9 @@ T["disk races block every automatic and conflict apply path"] = function()
   package.loaded["opencode.merge"] = real_merge
 end
 
-T["two non-overlapping Jobs apply in either completion order"] = function()
+---Starts both merges before resolving either one, then proves the stale loser retries without saving the file.
+---The queued merge boundary makes both process completion orders deterministic and counts each terminal notification.
+T["two non-overlapping Jobs apply concurrently in either completion order"] = function()
   local orders = { { "a", "b" }, { "b", "a" } }
   for _, order in ipairs(orders) do
     local path = vim.fn.tempname()
@@ -317,7 +319,7 @@ T["two non-overlapping Jobs apply in either completion order"] = function()
       a = { kind = "range", path = path, start_byte = alpha, end_byte = alpha + 1 },
       b = { kind = "range", path = path, start_byte = beta, end_byte = beta + 1 },
     }
-    local runtime = { root = vim.fs.dirname(path), sessions = {}, jobs = {} }
+    local runtime = { root = vim.fs.dirname(path), generation = 1, sessions = {}, jobs = {} }
     local jobs = {}
     for name, replacement in pairs({ a = "10", b = "20" }) do
       local session_id = "ses_" .. name
@@ -338,31 +340,69 @@ T["two non-overlapping Jobs apply in either completion order"] = function()
         marks = require("opencode.scope").create_marks(buf, scope),
         theirs = theirs,
       }
+      job.runtime = runtime
       runtime.sessions[session_id], runtime.jobs[job.key], jobs[name] = session, job, job
     end
+    local Promise = require("opencode.promise")
+    local pending_merges = {}
+    local real_merge = package.loaded["opencode.merge"] or require("opencode.merge")
+    package.loaded["opencode.merge"] = {
+      run = function(_, _, theirs)
+        local promise = Promise.new(function(resolve)
+          table.insert(pending_merges, { resolve = resolve, theirs = theirs, resolved = false })
+        end)
+        return promise
+      end,
+      cleanup = function() end,
+    }
+    local notify = require("opencode.ui.notify")
+    local real_emit = notify.emit
+    local completed_notifications = {}
+    notify.emit = function(kind, metadata, current_runtime)
+      if kind == "completed" then
+        table.insert(completed_notifications, metadata.job_key)
+      end
+      return real_emit(kind, metadata, current_runtime)
+    end
+    local function resolve_merge(name)
+      local theirs = jobs[name].theirs
+      for _, merge in ipairs(pending_merges) do
+        if not merge.resolved and merge.theirs == theirs then
+          merge.resolved = true
+          merge.resolve({ kind = "clean", text = theirs })
+          return
+        end
+      end
+      error("missing pending merge for " .. name)
+    end
+    local function wait_for_state(job, state)
+      eq(vim.wait(1000, function()
+        return job.state == state
+      end), true)
+    end
+
     require("opencode.apply").start(jobs[order[1]], runtime)
-    eq(
-      vim.wait(1000, function()
-        return jobs[order[1]].state == "completed"
-      end),
-      true
-    )
-    local remaining = assert(require("opencode.scope").current_range(jobs[order[2]]))
-    local current = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-    local expected = order[2] == "a" and "1" or "2"
-    eq(current:sub(remaining.start_byte + 1, remaining.end_byte), expected)
     require("opencode.apply").start(jobs[order[2]], runtime)
-    eq(
-      vim.wait(1000, function()
-        return jobs[order[2]].state == "completed"
-      end),
-      true
-    )
+    eq(#pending_merges, 2)
+
+    resolve_merge(order[1])
+    resolve_merge(order[2])
+    wait_for_state(jobs[order[1]], "completed")
+    eq(vim.wait(1000, function()
+      return #pending_merges == 3
+    end), true)
+    resolve_merge(order[2])
+    wait_for_state(jobs[order[2]], "completed")
+
     eq(
       table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"),
       original:gsub("1", "10", 1):gsub("2", "20", 1)
     )
     eq(table.concat(vim.fn.readfile(path), "\n"), original)
+    eq(#completed_notifications, 2)
+    eq(completed_notifications[1] ~= completed_notifications[2], true)
+    notify.emit = real_emit
+    package.loaded["opencode.merge"] = real_merge
     vim.cmd.undo()
     vim.cmd.undo()
     eq(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"), original)

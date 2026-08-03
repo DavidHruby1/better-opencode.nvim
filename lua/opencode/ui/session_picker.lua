@@ -58,8 +58,8 @@ local function availability(runtime, session)
 end
 
 ---Converts one verified Session into the searchable row and detail preview shown by Snacks picker.
----The first line carries stable identity, status, title, directory, and update time; the preview repeats those facts with
----the parent relationship so same-titled Sessions remain distinguishable.
+---The row leads with the generated title and keeps the short ID as a secondary disambiguator; the preview repeats those
+---facts with status, directory, update time, and the parent relationship.
 local function session_item(runtime, session)
   local state = availability(runtime, session)
   local id = session_short_id(session)
@@ -71,7 +71,7 @@ local function session_item(runtime, session)
     parent = parent:sub(-8)
   end
   local remote_status = clean_text(session.remote_status, "idle")
-  local text = string.format("[%s] %s  %s  %s  %s  parent: %s", state, id, title, directory, updated, parent)
+  local text = string.format("[%s] %s  (%s)  %s  %s  parent: %s", state, title, id, directory, updated, parent)
   return {
     text = text,
     session = session,
@@ -84,9 +84,9 @@ local function session_item(runtime, session)
     parent = parent,
     preview = {
       text = table.concat({
-        "Session: " .. id,
-        "Status: " .. state .. " (remote: " .. remote_status .. ")",
         "Title: " .. title,
+        "ID: " .. id,
+        "Status: " .. state .. " (remote: " .. remote_status .. ")",
         "Updated: " .. updated,
         "Directory: " .. directory,
         "Parent: " .. parent,
@@ -97,7 +97,8 @@ local function session_item(runtime, session)
   }
 end
 
----Renders a Session row with an explicit status color while leaving all identity fields searchable by Snacks.
+---Renders a Session row with an explicit status color while putting the generated title before the short ID.
+---All identity fields remain searchable by Snacks, so the ID still distinguishes sessions with the same title.
 ---@param item table
 ---@return table[]
 local function format_session(item)
@@ -107,9 +108,9 @@ local function format_session(item)
   return {
     { "[" .. item.availability .. "]", status_hl, field = "availability" },
     { " " },
-    { item.short_id, "SnacksPickerLabel", field = "short_id" },
-    { "  " },
     { item.title, "SnacksPickerFile", field = "title" },
+    { "  " },
+    { "(" .. item.short_id .. ")", "SnacksPickerLabel", field = "short_id" },
     { "  " },
     { item.directory, "SnacksPickerDir", field = "directory" },
     { "  " },

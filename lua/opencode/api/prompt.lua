@@ -6,7 +6,9 @@ local function prompt_blocker(runtime)
   if runtime.prompt_blocker then
     return runtime:prompt_blocker()
   end
-  return runtime:accepts_prompts() and nil or "runtime_not_ready"
+  if not runtime:accepts_prompts() then
+    return "runtime_not_ready"
+  end
 end
 
 local function relative_path(root, path)
@@ -54,10 +56,13 @@ end
 ---Creates a verified Build Session or revalidates the explicitly requested or selected reusable Session.
 ---An active selection is rejected instead of queued; new-session requests always create a fresh Session.
 ---The Session claim is taken immediately before revalidation so concurrent prompts cannot register the same Session.
-local function prepare_session(runtime, path, opts)
+local function prepare_session(runtime, opts)
   local Promise = require("opencode.promise")
   local sessions = require("opencode.session")
-  local selected_id = opts.new_session and nil or opts.session_id or runtime.selected_session_id
+  local selected_id
+  if not opts.new_session then
+    selected_id = opts.session_id or runtime.selected_session_id
+  end
 
   ---Claims one reusable Session before its detail verification and releases it if verification fails.
   ---Fresh Sessions use the same claim after POST so registration cannot race a second prompt.
@@ -96,7 +101,6 @@ local function prepare_session(runtime, path, opts)
   metadata.last_mode = "build"
   return runtime.client
     :create_session({
-      title = "Build " .. vim.fs.basename(path),
       metadata = metadata,
       permission = sessions.permissions,
     })
@@ -236,7 +240,7 @@ function M.prompt(text, context, opts)
           return Promise.reject(err)
         end)
     end
-    return prepare_session(runtime, context.path, opts)
+    return prepare_session(runtime, opts)
       :next(function(remote)
         claimed_session_id = remote.id
         claim = runtime.session_claims and runtime.session_claims[claimed_session_id]

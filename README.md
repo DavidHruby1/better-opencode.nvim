@@ -26,7 +26,7 @@ vim.g.opencode_opts = {
 
 -- Build prompt (local example)
 vim.keymap.set({ "n", "x" }, "<C-a>", function()
-  require("opencode").ask(nil, { mode = "build" })
+  require("opencode").ask(nil, { mode = "build", new_session = true })
 end)
 
 -- Reuse a verified Session

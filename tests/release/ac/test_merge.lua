@@ -750,6 +750,74 @@ T["AC-MERGE-12 completes partial private writes and removes every operand"] = fu
   vim.fn.delete(directory, "rf")
 end
 
+T["AC-JOB-03 keeps an insertion before a similarly indented adjacent scope"] = function()
+  local original = table.concat({
+    "    def clear_completed(self) -> list[Task]:",
+    '        """Remove all completed tasks and return the removed tasks."""',
+    "",
+    "    def count(self, done: bool | None = None) -> int:",
+    '        """Count all tasks, or count tasks matching a completion status."""',
+  }, "\n")
+  local fixture = open_fixture(original)
+  local base = assert(require("opencode.snapshot").capture(fixture.buf))
+  local clear_scope = fragment_range(
+    fixture.path,
+    base.text,
+    '    def clear_completed(self) -> list[Task]:\n        """Remove all completed tasks and return the removed tasks."""\n'
+  )
+  local count_scope = fragment_range(
+    fixture.path,
+    base.text,
+    '    def count(self, done: bool | None = None) -> int:\n        """Count all tasks, or count tasks matching a completion status."""'
+  )
+  local clear_replacement = table.concat({
+    "    def clear_completed(self) -> list[Task]:",
+    '        """Remove all completed tasks and return the removed tasks."""',
+    "",
+    "        completed = [task for task in self._tasks if task.done]",
+    "        self._tasks[:] = [task for task in self._tasks if not task.done]",
+    "        return completed",
+    "",
+  }, "\n")
+  local count_replacement = table.concat({
+    "    def count(self, done: bool | None = None) -> int:",
+    '        """Count all tasks, or count tasks matching a completion status."""',
+    "        if done is None:",
+    "            return len(self._tasks)",
+    "        return sum(task.done == done for task in self._tasks)",
+  }, "\n")
+  local clear_theirs = base.text:sub(1, clear_scope.start_byte)
+    .. clear_replacement
+    .. base.text:sub(clear_scope.end_byte + 1)
+  local count_theirs = base.text:sub(1, count_scope.start_byte)
+    .. count_replacement
+    .. base.text:sub(count_scope.end_byte + 1)
+  local runtime, clear_job = new_runtime_job(fixture, "adjacent_clear", clear_scope, clear_theirs, nil, base)
+  local count_job = {
+    key = "adjacent_count",
+    root = fixture.root,
+    session_id = "session_adjacent_count",
+    mode = "build",
+    state = "pending_apply",
+    buffer = fixture.buf,
+    path = fixture.path,
+    base = base,
+    scope = count_scope,
+    marks = require("opencode.scope").create_marks(fixture.buf, count_scope),
+    theirs = count_theirs,
+  }
+  runtime.sessions[count_job.session_id] = { id = count_job.session_id, active_job_key = count_job.key }
+  runtime.jobs[count_job.key] = count_job
+
+  require("opencode.apply").start(clear_job, runtime)
+  wait_for_state(clear_job, "completed")
+  require("opencode.apply").start(count_job, runtime)
+  wait_for_state(count_job, "completed")
+  eq(logical(fixture.buf), clear_replacement .. "\n" .. count_replacement)
+  eq(select(1, require("opencode.snapshot").read_raw(fixture.path)), original)
+  close_fixture(fixture, runtime, { clear_job = clear_job, count_job = count_job })
+end
+
 T["AC-JOB-03 applies two non-overlapping Jobs in either order without disk or worktree changes"] = function()
   local orders = { { "alpha", "beta" }, { "beta", "alpha" } }
   for index, order in ipairs(orders) do

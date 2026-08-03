@@ -213,6 +213,9 @@ local function with_public_runtime(runtime, callback)
     acquire = function()
       return runtime, Promise.resolve(runtime)
     end,
+    current = function()
+      return runtime
+    end,
   }
   vim.notify = function() end
   local ok, err = xpcall(function()
@@ -1158,6 +1161,11 @@ T["session picker reuses the chosen Session through the Build prompt boundary"] 
   end
   eq(error, nil)
   eq(picker_options.title, "OpenCode Sessions")
+  eq(
+    picker_options.items[1].text:find("Reusable", 1, true) < picker_options.items[1].text:find("ses_pick", 1, true),
+    true
+  )
+  eq(picker_options.items[1].preview.text:sub(1, 15), "Title: Reusable")
   eq(ask_options.context, context)
   eq(ask_options.mode, "build")
   eq(ask_options.opts.session_id, "ses_picker")
@@ -1248,7 +1256,7 @@ T["AC-MODE-03 Build follow-up reuses the Session with a new Job identity and Bas
   vim.fn.delete(path)
 end
 
-T["Build requests always use Build titles and structured payload profiles"] = function()
+T["Build requests let OpenCode auto-title sessions and use structured payload profiles"] = function()
   local path, buf = source_buffer({ "local value = 1" }, "lua")
   local call_log = calls()
   local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_mode_titles")
@@ -1257,8 +1265,8 @@ T["Build requests always use Build titles and structured payload profiles"] = fu
   require("opencode.job").finish(first, runtime.sessions.ses_mode_titles, "completed")
   local second = await(require("opencode.api.prompt").prompt("change", context, { mode = "build", new_session = true }))
 
-  eq(call_log.create_payloads[1].title, "Build " .. vim.fs.basename(path))
-  eq(call_log.create_payloads[2].title, "Build " .. vim.fs.basename(path))
+  eq(call_log.create_payloads[1].title, nil)
+  eq(call_log.create_payloads[2].title, nil)
   eq({ call_log.prompts[1].agent, call_log.prompts[1].format.type }, { "build", "json_schema" })
   eq(call_log.prompts[2].agent, "build")
   eq(call_log.prompts[2].format.type, "json_schema")

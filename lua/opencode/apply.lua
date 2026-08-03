@@ -37,7 +37,33 @@ function M.changed_span(ours, result)
   end
   ours_suffix = boundary_after(ours, ours_suffix)
   result_suffix = boundary_after(result, result_suffix)
-  return { start_byte = prefix, ours_end = ours_suffix, replacement = result:sub(prefix + 1, result_suffix) }
+  return {
+    start_byte = prefix,
+    ours_end = ours_suffix,
+    replacement = result:sub(prefix + 1, result_suffix),
+  }
+end
+
+---Computes the minimal replacement inside one Job's current range.
+---Matching bytes outside the range stay fixed, preventing indentation in a neighboring scope from shifting an insertion.
+local function scoped_changed_span(ours, result, range)
+  local result_end = range.end_byte + #result - #ours
+  if
+    range.start_byte < 0
+    or range.end_byte < range.start_byte
+    or range.end_byte > #ours
+    or result_end < range.start_byte
+    or result_end > #result
+    or ours:sub(1, range.start_byte) ~= result:sub(1, range.start_byte)
+    or ours:sub(range.end_byte + 1) ~= result:sub(result_end + 1)
+  then
+    return nil
+  end
+  local span =
+    M.changed_span(ours:sub(range.start_byte + 1, range.end_byte), result:sub(range.start_byte + 1, result_end))
+  span.start_byte = span.start_byte + range.start_byte
+  span.ours_end = span.ours_end + range.start_byte
+  return span
 end
 
 local function current_disk(job, ours)
@@ -108,7 +134,7 @@ local function source_state(job, runtime)
   if disk_error then
     return nil, disk_error, disk_sha
   end
-  return { ours = ours, tick = vim.api.nvim_buf_get_changedtick(job.buffer), disk_sha = disk_sha }
+  return { ours = ours, tick = vim.api.nvim_buf_get_changedtick(job.buffer), disk_sha = disk_sha, range = range }
 end
 
 local function terminate(job, runtime, state, conflict_kind, conflict_payload)
@@ -218,18 +244,9 @@ local function apply_result(
       end
       return
     end
-    local span = M.changed_span(ours, result)
+    local span = scoped_changed_span(ours, result, current.range)
     local final_ranges = require("opencode.scope").active_ranges(runtime, job.buffer)
-    local own_range = hard_scope and require("opencode.scope").current_range(job) or nil
-    if
-      not final_ranges
-      or require("opencode.scope").mutation_overlaps(runtime, job, span)
-      or (
-        hard_scope
-        and result ~= ours
-        and (not own_range or span.start_byte < own_range.start_byte or span.ours_end > own_range.end_byte)
-      )
-    then
+    if not span or not final_ranges or require("opencode.scope").mutation_overlaps(runtime, job, span) then
       if expected_state == "pending_apply" then
         terminate(job, runtime, "scope_violation")
       elseif callback then
