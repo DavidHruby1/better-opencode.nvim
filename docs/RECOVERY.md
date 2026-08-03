@@ -7,13 +7,13 @@ Run `:checkhealth opencode` first. Health passively scans OpenCode config, reads
 - Install Neovim `0.11.0` or newer, `curl`, and Git with `git merge-file -p --diff3`.
 - Install OpenCode `1.17.3` or `1.18.9`, or set `runtime.binary` to the exact executable.
 - Enable `snacks.input` and `snacks.picker`.
-- Install the Tree-sitter parser for the active language if function scope is needed. Without it, file scope remains available.
+- Install the Tree-sitter parser for the active language if function scope is needed. Lua, Python, JavaScript, JSX, TypeScript, and TSX have built-in scope adapters; without a matching adapter or parser, file scope remains available.
 - Fix write permission for Neovim `stdpath("state")`; private Runtime manifests and temporary merge inputs live below `opencode.nvim/`.
 - For an unsupported option, use the source scope and type reported by health, then consult `docs/CONFIGURATION.md`.
 
 ## OpenCode config
 
-Custom plugins and MCPs are ignored by this plugin, so they do not block health or startup. Custom tools and malformed config remain blocking errors. `:checkhealth opencode` reads local config sources and extension directories without loading or running them, and startup repeats the tool/config guard before starting OpenCode.
+Custom plugins and MCPs are ignored by this plugin, so they do not block health or startup. Custom tools and invalid config remain blocking errors. `:checkhealth opencode` reads local config sources and extension directories without loading or running them, and startup repeats the tool/config guard before starting OpenCode.
 
 Health and startup report only the blocking category; they never print config contents or paths. OpenCode remains responsible for loading its own plugins and MCPs.
 

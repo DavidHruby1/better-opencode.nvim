@@ -143,13 +143,11 @@ local function report_config(report)
     vim.health.ok("documented plugin configuration shape")
   end
   local messages = {
-    config_parse = "OpenCode config could not be parsed; fix it or use a clean config",
+    config_parse = "OpenCode config is invalid; fix it or use a clean config",
     custom_tool = "custom OpenCode tools are blocked; use a clean config for this plugin",
   }
   if report.root_error then
-    vim.health.warn(
-      "local OpenCode config scan not applicable; project root unavailable (" .. report.root_error .. ")"
-    )
+    vim.health.warn("local OpenCode config scan not applicable; project root unavailable (" .. report.root_error .. ")")
   elseif report.config_guard_ok then
     vim.health.ok("local OpenCode config parsed; plugins and MCPs are ignored; custom tools remain blocked")
   else

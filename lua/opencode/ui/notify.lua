@@ -73,13 +73,14 @@ local safe_classes = {
 
 local actionable_messages = {
   agent_unavailable = "agent_unavailable: OpenCode must provide the primary build agent",
-  config_parse = "config_parse: OpenCode config could not be parsed; fix it or use a clean config (see docs/RECOVERY.md)",
+  config_parse = "config_parse: OpenCode config is invalid; fix it or use a clean config (see docs/RECOVERY.md)",
   custom_tool = "custom_tool: custom OpenCode tools are blocked; use a clean config (see docs/RECOVERY.md)",
   decode = "decode: OpenCode returned an invalid response; restart the owned runtime (see docs/RECOVERY.md)",
   disk_read = "disk_read: the source file could not be read; check its permissions and try again",
   disconnected = "disconnected: the owned OpenCode runtime is disconnected; restart it and retry",
   reconciliation_failed = "reconciliation_failed: OpenCode state could not be verified; retry reconciliation or restart the runtime",
   http = "http: OpenCode request failed; retry or run :checkhealth opencode (see docs/RECOVERY.md)",
+  server_exit = "server_exit: owned OpenCode server exited during startup; run :checkhealth opencode (see docs/RECOVERY.md)",
   server_spawn = "server_spawn: owned OpenCode startup failed; check runtime.binary and run :checkhealth opencode (see docs/RECOVERY.md)",
   startup_timeout = "startup_timeout: owned OpenCode startup timed out; run :checkhealth opencode (see docs/RECOVERY.md)",
   timeout = "timeout: OpenCode request timed out; retry or run :checkhealth opencode (see docs/RECOVERY.md)",

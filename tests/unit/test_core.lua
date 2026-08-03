@@ -221,7 +221,323 @@ T["prompt scope claims atomically reject overlap and release by identity"] = fun
   prompt.release_scope(runtime, adjacent)
 end
 
-T["proposal schema and identity construct exact Theirs"] = function()
+T["function scope supports Python JavaScript and TypeScript parser aliases"] = function()
+  local buf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "function body() {}" })
+  local old_get_parser = vim.treesitter.get_parser
+  local seen_languages = {}
+  local node_types = {
+    python = "function_definition",
+    javascript = "function_declaration",
+    javascriptreact = "function_declaration",
+    typescript = "function_declaration",
+    typescriptreact = "function_declaration",
+  }
+  vim.treesitter.get_parser = function(_, language)
+    table.insert(seen_languages, language)
+    local node = {
+      type = function()
+        return node_types[vim.bo[buf].filetype]
+      end,
+      named_child_count = function()
+        return 0
+      end,
+      parent = function()
+        return nil
+      end,
+      range = function()
+        return 0, 0, 0, 18
+      end,
+    }
+    return {
+      parse = function()
+        return {
+          {
+            root = function()
+              return {
+                descendant_for_range = function()
+                  return node
+                end,
+              }
+            end,
+          },
+        }
+      end,
+    }
+  end
+
+  for _, filetype in ipairs({ "python", "javascript", "javascriptreact", "typescript", "typescriptreact" }) do
+    vim.bo[buf].filetype = filetype
+    local range = assert(require("opencode.scope.treesitter").function_range(buf, { 1, 0 }))
+    eq(range.kind, "bytes")
+  end
+
+  vim.treesitter.get_parser = old_get_parser
+  eq(seen_languages, { "python", "javascript", "javascript", "typescript", "tsx" })
+  vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["separate common-language function scopes can be claimed in parallel"] = function()
+  local buf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "function alpha() {}", "function beta() {}" })
+  local old_get_parser = vim.treesitter.get_parser
+  local node_types = {
+    python = "function_definition",
+    javascript = "function_declaration",
+    javascriptreact = "function_declaration",
+    typescript = "function_declaration",
+    typescriptreact = "function_declaration",
+  }
+  vim.treesitter.get_parser = function()
+    return {
+      parse = function()
+        return {
+          {
+            root = function()
+              return {
+                descendant_for_range = function(_, row)
+                  local start_row = row == 0 and 0 or 1
+                  return {
+                    type = function()
+                      return node_types[vim.bo[buf].filetype]
+                    end,
+                    named_child_count = function()
+                      return 0
+                    end,
+                    parent = function()
+                      return nil
+                    end,
+                    range = function()
+                      return start_row, 0, start_row, start_row == 0 and 19 or 18
+                    end,
+                  }
+                end,
+              }
+            end,
+          },
+        }
+      end,
+    }
+  end
+  local base = { text = "function alpha() {}\nfunction beta() {}" }
+  local prompt = require("opencode.api.prompt")
+  for _, filetype in ipairs({ "python", "javascript", "javascriptreact", "typescript", "typescriptreact" }) do
+    vim.bo[buf].filetype = filetype
+    local context = { buf = buf, path = "/r/a", cursor = { 1, 0 } }
+    local first = assert(require("opencode.scope").resolve(context, base))
+    context.cursor = { 2, 0 }
+    local second = assert(require("opencode.scope").resolve(context, base))
+    local runtime = { scope_claims = {} }
+    local first_claim = assert(prompt.claim_scope(runtime, buf, first))
+    local second_claim = assert(prompt.claim_scope(runtime, buf, second))
+
+    prompt.release_scope(runtime, first_claim)
+    prompt.release_scope(runtime, second_claim)
+  end
+  vim.treesitter.get_parser = old_get_parser
+  vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+---Builds a small parent-linked TSNode fake for adapter behavior without requiring installed parsers.
+---Only the methods used by scope adapters are present, keeping these tests focused on declaration normalization.
+local function scope_node(kind, range, child_nodes)
+  local node = { kind = kind, node_range = range, child_nodes = child_nodes or {} }
+  for _, child in ipairs(node.child_nodes) do
+    child.parent_node = node
+  end
+  function node:type()
+    return self.kind
+  end
+  function node:range()
+    return unpack(self.node_range)
+  end
+  function node:parent()
+    return self.parent_node
+  end
+  function node:named_child_count()
+    return #self.child_nodes
+  end
+  function node:named_child(index)
+    return self.child_nodes[index + 1]
+  end
+  return node
+end
+
+---Runs the production cursor-to-scope walk with a chosen fake syntax node and returns its range.
+---It temporarily supplies a parser whose cursor node is fixed, then restores the parser after the walk. This keeps
+---parent traversal under test without requiring a JavaScript, TypeScript, or Lua parser for adapter cases.
+---@param buf integer
+---@param filetype string
+---@param node table
+---@return table?
+local function function_range_for_node(buf, filetype, node)
+  vim.bo[buf].filetype = filetype
+  local old_get_parser = vim.treesitter.get_parser
+  vim.treesitter.get_parser = function()
+    return {
+      parse = function()
+        return {
+          {
+            root = function()
+              return {
+                descendant_for_range = function()
+                  return node
+                end,
+              }
+            end,
+          },
+        }
+      end,
+    }
+  end
+  local ok, result = xpcall(function()
+    return require("opencode.scope.treesitter").function_range(buf, { 1, 0 })
+  end, debug.traceback)
+  vim.treesitter.get_parser = old_get_parser
+  if not ok then
+    error(result)
+  end
+  return result
+end
+
+T["callable declarations keep one scope from decorator or arrow name through body"] = function()
+  local python_function = scope_node("function_definition", { 1, 0, 2, 12 })
+  local decorated = scope_node("decorated_definition", { 0, 0, 2, 12 }, {
+    scope_node("decorator", { 0, 0, 0, 10 }),
+    python_function,
+  })
+  local arrow = scope_node("arrow_function", { 0, 14, 2, 1 })
+  local declarator = scope_node("variable_declarator", { 0, 6, 2, 1 }, {
+    scope_node("identifier", { 0, 6, 0, 11 }),
+    arrow,
+  })
+  local declaration = scope_node("lexical_declaration", { 0, 0, 2, 1 }, { declarator })
+
+  eq(require("opencode.scope.adapters.python").scope_node(decorated):range(), 0)
+  eq({ require("opencode.scope.adapters.python").scope_node(python_function):range() }, { 0, 0, 2, 12 })
+  eq({ require("opencode.scope.adapters.typescript").scope_node(declarator):range() }, { 0, 0, 2, 1 })
+  eq({ require("opencode.scope.adapters.typescript").scope_node(arrow):range() }, { 0, 0, 2, 1 })
+  eq(declaration:type(), "lexical_declaration")
+end
+
+T["JavaScript and TypeScript multi-declarator arrows stop at their variable"] = function()
+  local name = scope_node("identifier", { 0, 6, 0, 8 })
+  local body = scope_node("statement_block", { 0, 17, 0, 19 })
+  local arrow = scope_node("arrow_function", { 0, 11, 0, 19 }, { body })
+  local first = scope_node("variable_declarator", { 0, 6, 0, 19 }, { name, arrow })
+  local sibling_name = scope_node("identifier", { 0, 21, 0, 26 })
+  local sibling = scope_node("variable_declarator", { 0, 21, 0, 30 }, {
+    sibling_name,
+    scope_node("number", { 0, 29, 0, 30 }),
+  })
+  scope_node("lexical_declaration", { 0, 0, 0, 30 }, { first, sibling })
+  local buf = vim.api.nvim_create_buf(true, false)
+  for _, filetype in ipairs({ "javascript", "typescript" }) do
+    for _, node in ipairs({ name, body }) do
+      eq(function_range_for_node(buf, filetype, node), { from = { 1, 6 }, to = { 1, 19 }, kind = "bytes" })
+    end
+    eq(function_range_for_node(buf, filetype, sibling_name), nil)
+  end
+
+  local exported_function = scope_node("function_declaration", { 0, 7, 0, 20 })
+  scope_node("export_statement", { 0, 0, 0, 20 }, { exported_function })
+  eq(function_range_for_node(buf, "javascript", exported_function), { from = { 1, 0 }, to = { 1, 20 }, kind = "bytes" })
+  vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["parenthesized JavaScript and TypeScript arrows resolve one declaration"] = function()
+  local name = scope_node("identifier", { 0, 6, 0, 8 })
+  local body = scope_node("statement_block", { 0, 18, 0, 20 })
+  local arrow = scope_node("arrow_function", { 0, 12, 0, 20 }, { body })
+  local parenthesized = scope_node("parenthesized_expression", { 0, 11, 0, 21 }, { arrow })
+  local declarator = scope_node("variable_declarator", { 0, 6, 0, 21 }, { name, parenthesized })
+  scope_node("lexical_declaration", { 0, 0, 0, 21 }, { declarator })
+  local buf = vim.api.nvim_create_buf(true, false)
+  for _, filetype in ipairs({ "javascript", "typescript" }) do
+    for _, node in ipairs({ name, body }) do
+      eq(function_range_for_node(buf, filetype, node), { from = { 1, 0 }, to = { 1, 21 }, kind = "bytes" })
+    end
+  end
+  vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["Lua local function assignment resolves from name and body"] = function()
+  local name = scope_node("identifier", { 0, 6, 0, 8 })
+  local targets = scope_node("variable_list", { 0, 6, 0, 8 }, { name })
+  local body = scope_node("block", { 1, 0, 1, 10 })
+  local function_node = scope_node("function_definition", { 0, 11, 2, 3 }, { body })
+  local expressions = scope_node("expression_list", { 0, 11, 2, 3 }, { function_node })
+  local assignment = scope_node("assignment_statement", { 0, 6, 2, 3 }, { targets, expressions })
+  scope_node("variable_declaration", { 0, 0, 2, 3 }, { assignment })
+  local buf = vim.api.nvim_create_buf(true, false)
+  for _, node in ipairs({ name, body }) do
+    eq(function_range_for_node(buf, "lua", node), { from = { 1, 0 }, to = { 3, 3 }, kind = "bytes" })
+  end
+  vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["Lua parser confirms a local function assignment from name and body"] = function()
+  local buf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "local fn = function()", "  return 1", "end" })
+  vim.bo[buf].filetype = "lua"
+  local ok, _parser = pcall(vim.treesitter.get_parser, buf, "lua")
+  if not ok or not _parser then
+    vim.api.nvim_buf_delete(buf, { force = true })
+    MiniTest.skip("Lua parser unavailable")
+  end
+  for _, cursor in ipairs({ { 1, 6 }, { 1, 11 } }) do
+    eq(require("opencode.scope.treesitter").function_range(buf, cursor), {
+      from = { 1, 0 },
+      to = { 3, 3 },
+      kind = "bytes",
+    })
+  end
+  vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["Lua multi-target and multi-expression assignments keep function-body scope narrow"] = function()
+  local multi_target_name = scope_node("identifier", { 0, 6, 0, 8 })
+  local multi_target_sibling = scope_node("identifier", { 0, 10, 0, 15 })
+  local multi_targets = scope_node("variable_list", { 0, 6, 0, 15 }, { multi_target_name, multi_target_sibling })
+  local multi_target_body = scope_node("block", { 1, 0, 2, 3 })
+  local multi_target_function = scope_node("function_definition", { 0, 19, 2, 3 }, { multi_target_body })
+  local one_expression = scope_node("expression_list", { 0, 19, 2, 3 }, { multi_target_function })
+  local multi_target_assignment = scope_node("assignment_statement", { 0, 6, 2, 3 }, {
+    multi_targets,
+    one_expression,
+  })
+  scope_node("variable_declaration", { 0, 0, 2, 3 }, { multi_target_assignment })
+
+  local multi_expression_name = scope_node("identifier", { 0, 6, 0, 8 })
+  local one_target = scope_node("variable_list", { 0, 6, 0, 8 }, { multi_expression_name })
+  local multi_expression_body = scope_node("block", { 1, 0, 2, 3 })
+  local multi_expression_function = scope_node("function_definition", { 0, 11, 2, 3 }, { multi_expression_body })
+  local sibling_expression = scope_node("number", { 2, 5, 2, 10 })
+  local multi_expressions = scope_node("expression_list", { 0, 11, 2, 10 }, {
+    multi_expression_function,
+    sibling_expression,
+  })
+  local multi_expression_assignment = scope_node("assignment_statement", { 0, 6, 2, 10 }, {
+    one_target,
+    multi_expressions,
+  })
+  scope_node("variable_declaration", { 0, 0, 2, 10 }, { multi_expression_assignment })
+
+  local buf = vim.api.nvim_create_buf(true, false)
+  eq(function_range_for_node(buf, "lua", multi_target_body), {
+    from = { 1, 19 },
+    to = { 3, 3 },
+    kind = "bytes",
+  })
+  eq(function_range_for_node(buf, "lua", multi_expression_body), {
+    from = { 1, 11 },
+    to = { 3, 3 },
+    kind = "bytes",
+  })
+  vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["minimal proposal output receives trusted local identity and constructs exact Theirs"] = function()
   local base = "one\ntwo\nthree"
   local job = {
     root = "/root",
@@ -230,19 +546,16 @@ T["proposal schema and identity construct exact Theirs"] = function()
     scope = { start_byte = 4, end_byte = 7 },
   }
   local value = {
-    version = 1,
-    path = "a.lua",
-    base_sha256 = job.base.sha256,
-    scope = { start_byte = 4, end_byte = 7 },
     replacement = "TWO",
     summary = "change",
   }
   local validated = assert(require("opencode.proposal").validate(value, job))
-  eq(require("opencode.proposal").schema.properties.version.type, "integer")
+  eq(require("opencode.proposal").schema.required, { "replacement", "summary" })
+  eq(validated.proposal.path, "a.lua")
+  eq(validated.proposal.base_sha256, job.base.sha256)
+  eq(validated.proposal.scope, job.scope)
   eq(validated.theirs, "one\nTWO\nthree")
-  value.scope.end_byte = 8
-  eq(select(2, require("opencode.proposal").validate(value, job)).error_class, "scope_violation")
-  value.scope.end_byte, value.replacement = 7, "bad\rtext"
+  value.replacement = "bad\rtext"
   eq(select(2, require("opencode.proposal").validate(value, job)).error_class, "invalid_structured_output")
 end
 

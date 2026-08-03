@@ -89,38 +89,28 @@ local function wait_for_state(job, state)
   )
 end
 
-T["AC-SCOPE-03 rejects a whole proposal for path or range scope violations"] = function()
+T["AC-SCOPE-03 rejects a Job whose local path escapes its root"] = function()
   local fixture = open_fixture("local alpha = 1\nlocal beta = 2")
   local snapshot = require("opencode.snapshot")
   local base = assert(snapshot.capture(fixture.buf))
   local scope = fragment_range(fixture.path, base.text, "alpha")
   local runtime, job, session = new_runtime_job(fixture, "scope_03", scope, base.text, "running")
   local before_buffer, before_disk = logical(fixture.buf), assert(snapshot.read_raw(fixture.path))
-  local valid = {
-    version = 1,
-    path = "target.lua",
-    base_sha256 = base.sha256,
-    scope = { start_byte = scope.start_byte, end_byte = scope.end_byte },
-    replacement = "ALPHA",
-    summary = "change",
-  }
-
-  local invalid = vim.tbl_extend("force", valid, { path = "other.lua" })
+  job.path = vim.fn.tempname()
   eq(
     require("opencode.runtime.reconcile").complete_job(runtime, session, job, {
       {
-        info = { id = "assistant_scope_03", role = "assistant", parentID = job.user_message_id, structured = invalid },
+        info = {
+          id = "assistant_scope_03",
+          role = "assistant",
+          parentID = job.user_message_id,
+          structured = { replacement = "ALPHA", summary = "change" },
+        },
       },
     }),
     false
   )
   eq({ job.state, job.error_class, job.conflict_kind }, { "scope_violation", "scope_violation", nil })
-  local range_invalid = vim.tbl_extend("force", valid, {
-    scope = { start_byte = scope.start_byte + 1, end_byte = scope.end_byte },
-  })
-  local proposal, err = require("opencode.proposal").validate(range_invalid, job)
-  eq(proposal, nil)
-  eq(err.error_class, "scope_violation")
   eq(logical(fixture.buf), before_buffer)
   eq(select(1, snapshot.read_raw(fixture.path)), before_disk)
   close_fixture(fixture, runtime, { job = job })
@@ -197,13 +187,12 @@ T["AC-PROP-01 constructs exact Base prefix replacement suffix Theirs"] = functio
   local scope = fragment_range(fixture.path, base.text, "two")
   local runtime, job = new_runtime_job(fixture, "prop_01", scope, base.text)
   local result = assert(require("opencode.proposal").validate({
-    version = 1,
-    path = "target.lua",
-    base_sha256 = base.sha256,
-    scope = { start_byte = scope.start_byte, end_byte = scope.end_byte },
     replacement = "TWO",
     summary = "replace one word",
   }, job))
+  eq(result.proposal.path, "target.lua")
+  eq(result.proposal.base_sha256, base.sha256)
+  eq(result.proposal.scope, { start_byte = scope.start_byte, end_byte = scope.end_byte })
   eq(result.theirs, "one\nTWO\nthree")
   eq(logical(fixture.buf), base.text)
   eq(select(1, require("opencode.snapshot").read_raw(fixture.path)), "one\ntwo\nthree")
@@ -237,28 +226,18 @@ T["AC-PROP-02 rejects missing or Markdown structured output without applying"] =
   close_fixture(fixture, runtime, { job = job })
 end
 
-T["AC-PROP-03 fails closed for another transaction path hash or scope"] = function()
+T["AC-PROP-03 rejects model-authored transaction identity"] = function()
   local fixture = open_fixture("alpha\nbeta")
   local base = assert(require("opencode.snapshot").capture(fixture.buf))
   local scope = fragment_range(fixture.path, base.text, "alpha")
   local runtime, job = new_runtime_job(fixture, "prop_03", scope, base.text)
-  local proposal = {
-    version = 1,
-    path = "target.lua",
-    base_sha256 = base.sha256,
-    scope = { start_byte = scope.start_byte, end_byte = scope.end_byte },
+  local result, err = require("opencode.proposal").validate({
+    path = "other.lua",
     replacement = "ALPHA",
     summary = "change",
-  }
-  for _, invalid in ipairs({
-    vim.tbl_extend("force", proposal, { path = "other.lua" }),
-    vim.tbl_extend("force", proposal, { base_sha256 = vim.fn.sha256("other base") }),
-    vim.tbl_extend("force", proposal, { scope = { start_byte = scope.start_byte + 1, end_byte = scope.end_byte } }),
-  }) do
-    local result, err = require("opencode.proposal").validate(invalid, job)
-    eq(result, nil)
-    eq(err.error_class, "scope_violation")
-  end
+  }, job)
+  eq(result, nil)
+  eq(err.error_class, "invalid_structured_output")
   eq(job.theirs, base.text)
   eq(logical(fixture.buf), base.text)
   close_fixture(fixture, runtime, { job = job })
@@ -723,10 +702,6 @@ T["AC-MERGE-12 preserves EOL metadata and distinguishes empty trailing lines"] =
   local scope = { kind = "file", path = fixture.path, start_byte = 0, end_byte = #base.text }
   local runtime, job = new_runtime_job(fixture, "merge_12_cr", scope, "bad\rtext")
   local proposal, err = require("opencode.proposal").validate({
-    version = 1,
-    path = "target.lua",
-    base_sha256 = base.sha256,
-    scope = { start_byte = 0, end_byte = #base.text },
     replacement = "bad\rtext",
     summary = "invalid EOL",
   }, job)

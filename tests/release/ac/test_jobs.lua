@@ -729,10 +729,6 @@ T["AC-EVT-03 reconnect reconciles one exact completed structured result before p
             sessionID = "ses_reconnect",
             parentID = "msg_reconnect",
             structured = {
-              version = 1,
-              path = "file.lua",
-              base_sha256 = vim.fn.sha256(base_text),
-              scope = { start_byte = 0, end_byte = #base_text },
               replacement = "two",
               summary = "replace",
             },

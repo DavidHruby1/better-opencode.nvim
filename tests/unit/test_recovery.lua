@@ -542,10 +542,6 @@ T["HTTP 400 reconciliation completes from a captured exact-parent structured res
         sessionID = session.id,
         parentID = job.user_message_id,
         structured = {
-          version = 1,
-          path = "file.lua",
-          base_sha256 = base_sha256,
-          scope = { start_byte = 0, end_byte = #base_text },
           replacement = "two",
           summary = "replace",
         },

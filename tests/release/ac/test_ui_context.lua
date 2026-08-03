@@ -203,6 +203,26 @@ local function with_prompt_window(callback)
   assert(ok, err)
 end
 
+---Runs public prompt calls against a ready Runtime fake while keeping capture, scope resolution, and dispatch real.
+---Only Runtime acquisition and notification rendering are replaced, so concurrent jobs still cross the public API boundary.
+---@param runtime table
+---@param callback fun(opencode: table)
+local function with_public_runtime(runtime, callback)
+  local old_runtime, old_notify = package.loaded["opencode.runtime"], vim.notify
+  package.loaded["opencode.runtime"] = {
+    acquire = function()
+      return runtime, Promise.resolve(runtime)
+    end,
+  }
+  vim.notify = function() end
+  local ok, err = xpcall(function()
+    callback(require("opencode"))
+  end, debug.traceback)
+  package.loaded["opencode.runtime"] = old_runtime
+  vim.notify = old_notify
+  assert(ok, err)
+end
+
 T["AC-UI-01 inline Build prompt shows root and scope metadata and restores source focus"] = function()
   local path, buf, source_win = source_buffer({ "local function alpha()", "  return 1", "end" }, "lua")
   vim.api.nvim_win_set_cursor(source_win, { 2, 2 })
@@ -975,6 +995,95 @@ T["Build new_session creates a fresh Session instead of reusing the selected one
   eq(runtime.selected_session_id, "ses_second")
   eq(runtime.sessions.ses_first.active_job_key, nil)
   require("opencode.job").finish(second, runtime.sessions.ses_second, "completed")
+
+  vim.api.nvim_buf_delete(buf, { force = true })
+  vim.fn.delete(path)
+end
+
+T["public Build dispatch uses the active visual range for concurrent scope checks"] = function()
+  local path, buf, win = source_buffer({
+    "local function alpha()",
+    "  return 1",
+    "end",
+    "",
+    "local function beta()",
+    "  return 2",
+    "end",
+  }, "lua")
+  local call_log = calls()
+  call_log.create_ids = { "ses_alpha", "ses_beta" }
+  local runtime = ready_runtime(vim.fs.dirname(path), call_log, "ses_unused")
+  local prompt_resolvers = {}
+  runtime.client.prompt_async = function(_, session_id, payload)
+    table.insert(call_log.order, "prompt")
+    call_log.prompt_sessions = call_log.prompt_sessions or {}
+    table.insert(call_log.prompt_sessions, session_id)
+    table.insert(call_log.prompts, payload)
+    local request, resolve = Promise.with_resolvers()
+    table.insert(prompt_resolvers, resolve)
+    return request
+  end
+
+  with_public_runtime(runtime, function(opencode)
+    vim.api.nvim_win_set_cursor(win, { 2, 2 })
+    local first_flow = opencode.prompt("inspect alpha", { mode = "build", new_session = true })
+    eq(
+      vim.wait(1000, function()
+        return #prompt_resolvers == 1
+      end),
+      true
+    )
+    prompt_resolvers[1]({})
+    local first_job, first_error = await(first_flow)
+    eq(first_error, nil)
+    eq({ first_job.session_id, first_job.state, runtime.selected_session_id }, { "ses_alpha", "running", "ses_alpha" })
+
+    vim.api.nvim_buf_set_mark(buf, "<", 1, 0, {})
+    vim.api.nvim_buf_set_mark(buf, ">", 3, 0, {})
+    vim.api.nvim_win_set_cursor(win, { 5, 0 })
+    vim.cmd("normal! V2j")
+    eq(vim.fn.mode(), "V")
+    eq({ vim.api.nvim_buf_get_mark(buf, "<"), vim.api.nvim_buf_get_mark(buf, ">") }, { { 1, 0 }, { 3, 0 } })
+    local second_flow = opencode.prompt("inspect beta", { mode = "build", new_session = true })
+    eq(
+      vim.wait(1000, function()
+        return #prompt_resolvers == 2
+      end),
+      true
+    )
+    local second_job = assert(runtime.jobs[runtime.sessions.ses_beta.active_job_key])
+    eq({ call_log.creates, #call_log.prompts }, { 2, 2 })
+    eq(call_log.prompt_sessions, { "ses_alpha", "ses_beta" })
+    eq({ first_job.mode, second_job.mode }, { "build", "build" })
+    eq({ first_job.state, second_job.state }, { "running", "running" })
+    eq(first_job.session_id ~= second_job.session_id, true)
+    eq(first_job.user_message_id ~= second_job.user_message_id, true)
+    eq(first_job.scope.kind, "function")
+    eq(second_job.scope.kind, "range")
+    eq(
+      first_job.base.text:sub(first_job.scope.start_byte + 1, first_job.scope.end_byte),
+      "local function alpha()\n  return 1\nend"
+    )
+    eq(
+      second_job.base.text:sub(second_job.scope.start_byte + 1, second_job.scope.end_byte),
+      "local function beta()\n  return 2\nend"
+    )
+    eq(require("opencode.scope").overlaps(first_job.scope, second_job.scope), false)
+
+    vim.cmd("normal! <Esc>")
+    vim.api.nvim_win_set_cursor(win, { 2, 2 })
+    local _, overlap_error = await(opencode.prompt("inspect alpha again", { mode = "build", new_session = true }))
+    eq(overlap_error.error_class, "scope_overlap")
+    eq({ call_log.creates, #call_log.prompts, vim.tbl_count(runtime.jobs) }, { 2, 2, 2 })
+    eq({ first_job.state, second_job.state }, { "running", "running" })
+
+    prompt_resolvers[2]({})
+    local returned_second, second_error = await(second_flow)
+    eq(second_error, nil)
+    eq(returned_second, second_job)
+    require("opencode.job").finish(first_job, runtime.sessions[first_job.session_id], "completed")
+    require("opencode.job").finish(second_job, runtime.sessions[second_job.session_id], "completed")
+  end)
 
   vim.api.nvim_buf_delete(buf, { force = true })
   vim.fn.delete(path)

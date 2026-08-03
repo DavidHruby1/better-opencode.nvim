@@ -16,16 +16,30 @@ end
 ---@field to integer[]
 ---@field kind "char"|"line"|"block"
 
-local function visual_range(buf)
+---Returns the active Visual selection as ordered, zero-based buffer positions.
+---The live endpoints are used because the '< and '> marks still describe the previous selection until Visual mode ends.
+local function visual_range()
   local mode = vim.fn.mode()
   local kind = mode == "v" and "char" or mode == "V" and "line" or mode == "\22" and "block" or nil
   if not kind then
     return nil
   end
-  local from = vim.api.nvim_buf_get_mark(buf, "<")
-  local to = vim.api.nvim_buf_get_mark(buf, ">")
-  if from[1] > to[1] or (from[1] == to[1] and from[2] > to[2]) then
-    from, to = to, from
+
+  local positions = vim.fn.getregionpos(vim.fn.getpos("v"), vim.fn.getpos("."), {
+    type = mode,
+    exclusive = false,
+    eol = false,
+  })
+  if #positions == 0 then
+    return nil
+  end
+
+  local first = positions[1][1]
+  local last = positions[#positions][2]
+  local from = { first[2], math.max(first[3] - 1, 0) }
+  local to = { last[2], math.max(last[3] - 1, 0) }
+  if kind == "line" then
+    from[2], to[2] = 0, 0
   end
   return { from = { from[1], from[2] }, to = { to[1], to[2] }, kind = kind }
 end
@@ -65,7 +79,7 @@ function Context.capture(range)
     buf = buf,
     path = real,
     cursor = vim.api.nvim_win_get_cursor(win),
-    range = range or visual_range(buf),
+    range = range or visual_range(),
   }
 end
 

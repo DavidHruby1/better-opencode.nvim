@@ -421,6 +421,28 @@ T["AC-RUN-04 times out owned startup and stops partial processes"] = function()
   harness.restore()
 end
 
+T["startup reports an owned Server exit without waiting for the deadline"] = function()
+  local cases = {
+    { output = nil, expected = "server_exit" },
+    { output = "Error: Configuration is invalid at /private/config", expected = "config_parse" },
+  }
+  for _, case in ipairs(cases) do
+    local harness = runtime_harness({ startup_timeout = 1000, health_error = { error_class = "transport_closed" } })
+    local readiness = harness.runtime:start()
+    local process = harness.calls.jobs[1]
+    if case.output then
+      process.options.on_stderr(process.job, { case.output })
+    end
+    process.options.on_exit(process.job, 1)
+
+    local runtime, error = await(readiness)
+    eq(runtime, nil)
+    eq(error, { error_class = case.expected })
+    eq(harness.runtime.state, "stopped")
+    harness.restore()
+  end
+end
+
 T["AC-RUN-05 keeps roots, Jobs, and events isolated without a TUI"] = function()
   local first, second = temp_root(), temp_root()
   local calls = {}

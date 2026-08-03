@@ -87,8 +87,16 @@ local function poll_health(runtime, deadline)
         reject({ error_class = "runtime_stopped" })
         return
       end
+      if runtime.state == "disconnected" then
+        reject(runtime.startup_error or { error_class = "server_exit" })
+        return
+      end
       runtime.client:health():next(resolve):catch(function()
-        if vim.uv.now() >= deadline then
+        if runtime.state == "stopping" or runtime.state == "stopped" then
+          reject({ error_class = "runtime_stopped" })
+        elseif runtime.state == "disconnected" then
+          reject(runtime.startup_error or { error_class = "server_exit" })
+        elseif vim.uv.now() >= deadline then
           reject({ error_class = "startup_timeout" })
         else
           vim.defer_fn(attempt, 100)
@@ -392,18 +400,33 @@ function Runtime:connect_sse(deadline)
 end
 
 ---Starts one owned Server generation, writes its manifest, and creates a Runtime-bound client.
+---Startup output is not retained; a fixed OpenCode configuration failure marker is reduced to the safe config_parse class.
 local function spawn_server(runtime)
   runtime.server_generation = runtime.server_generation + 1
   runtime.generation = runtime.generation + 1
   local generation = runtime.server_generation
+  runtime.startup_error = nil
   runtime.port, runtime.username, runtime.password, runtime.owner_nonce =
     free_port(), "opencode", random_hex(32), random_hex(16)
   local binary = require("opencode.config").opts.runtime.binary
+  local function classify_startup_output(_, data)
+    if generation ~= runtime.server_generation or runtime.state ~= "starting" then
+      return
+    end
+    for _, line in ipairs(data or {}) do
+      if type(line) == "string" and line:find("Configuration is invalid", 1, true) then
+        runtime.startup_error = { error_class = "config_parse" }
+        return
+      end
+    end
+  end
   runtime.server_job = vim.fn.jobstart(
     { binary, "serve", "--hostname", runtime.host, "--port", tostring(runtime.port) },
     {
       cwd = runtime.root,
       env = { OPENCODE_SERVER_USERNAME = runtime.username, OPENCODE_SERVER_PASSWORD = runtime.password },
+      on_stdout = classify_startup_output,
+      on_stderr = classify_startup_output,
       on_exit = function()
         if generation == runtime.server_generation and runtime.state ~= "stopping" and runtime.state ~= "stopped" then
           runtime:on_server_exit(generation)
@@ -573,18 +596,23 @@ function Runtime:start()
       return Promise.resolve(self)
     end)
     :catch(function(err)
+      if self.state == "disconnected" then
+        err = self.startup_error or { error_class = "server_exit" }
+      end
       if self.state ~= "stopping" then
         self:stop()
       end
       return Promise.reject(err)
     end)
   self.start_promise = start_promise
-  start_promise:finally(function()
-    if self.start_promise == start_promise then
-      self.start_promise = nil
-      self.startup_deadline = nil
-    end
-  end)
+  start_promise
+    :finally(function()
+      if self.start_promise == start_promise then
+        self.start_promise = nil
+        self.startup_deadline = nil
+      end
+    end)
+    :catch(function() end)
   return start_promise
 end
 
@@ -612,7 +640,7 @@ function Runtime:on_server_exit(generation)
     level = "error",
     root_hash = self.root_hash,
     runtime_state = self.state,
-    error_class = "server_exit",
+    error_class = self.startup_error and self.startup_error.error_class or "server_exit",
   })
 end
 

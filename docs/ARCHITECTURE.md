@@ -58,7 +58,7 @@ Prompt entrypoints accept omitted mode or `mode = "build"`. Other modes return `
 4. Create or verify a managed Session and register the Job before `prompt_async`.
 5. Send a new OpenCode-compatible user message ID, `agent = "build"`, context parts, and the proposal JSON schema.
 6. Correlate SSE events by Runtime, Session, user message, assistant parent, request, and Job generation.
-7. Validate one structured proposal, canonical target, Base hash, UTF-8 replacement, and hard scope.
+7. Validate one structured replacement, attach canonical target/Base/scope identity locally, and enforce UTF-8 and hard scope.
 8. Build Theirs, merge Base/Ours/Theirs with `git merge-file -p --diff3`, and recheck buffer and disk state.
 9. Apply one minimal changed span to the live buffer. Never write or reload the source file.
 

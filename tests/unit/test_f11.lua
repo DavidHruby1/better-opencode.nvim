@@ -83,7 +83,7 @@ T["structured startup notifications keep only safe actionable transport details"
   local ok, failure = xpcall(function()
     local cases = {
       { error_class = "custom_tool", expected = "custom OpenCode tools are blocked" },
-      { error_class = "config_parse", expected = "OpenCode config could not be parsed" },
+      { error_class = "config_parse", expected = "OpenCode config is invalid" },
       {
         error_class = "http",
         endpoint = "https://user:credential@example.test/session/private-id?token=secret",
@@ -112,6 +112,7 @@ T["structured startup notifications keep only safe actionable transport details"
         details = { "endpoint=/doc" },
       },
       { error_class = "server_spawn", expected = "owned OpenCode startup failed" },
+      { error_class = "server_exit", expected = "owned OpenCode server exited during startup" },
       { error_class = "startup_timeout", expected = "owned OpenCode startup timed out" },
       { error_class = "unsupported_version", expected = "unsupported OpenCode version" },
     }

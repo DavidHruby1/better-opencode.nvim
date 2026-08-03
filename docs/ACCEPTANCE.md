@@ -177,7 +177,7 @@ Missing, malformed, duplicate, or invalid structured output terminates without a
 ### AC-PROP-03: Transaction identity mismatch
 **Priorita:** P0
 
-Wrong path, Base hash, Session, parent message, or generation cannot complete another Job.
+Target path, Base hash, and scope come only from the local Job; wrong Session, parent message, or generation cannot complete it.
 
 ### AC-MERGE-01: Clean agent change
 **Priorita:** P0

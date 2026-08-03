@@ -408,10 +408,7 @@ end
 
 T["AC-SEC-02 health distinguishes missing and unwritable private directories"] = function()
   local missing, missing_calls = run_health({ state_exists = false })
-  eq(
-    contains(missing.warn, "private state/temp directories are missing; Runtime creates them on first start"),
-    true
-  )
+  eq(contains(missing.warn, "private state/temp directories are missing; Runtime creates them on first start"), true)
   eq(contains(missing.error, "private state/temp directories are not writable"), false)
   eq(missing_calls.mkdir, {})
   assert_private_health(missing, missing_calls)
@@ -513,7 +510,7 @@ T["health ignores plugins and MCPs without config content or paths"] = function(
     {
       name = "malformed config",
       content = '{"broken":"MALFORMED_SECRET_BODY"',
-      error = "OpenCode config could not be parsed; fix it or use a clean config; see docs/RECOVERY.md",
+      error = "OpenCode config is invalid; fix it or use a clean config; see docs/RECOVERY.md",
       secret = "MALFORMED_SECRET_BODY",
     },
   }

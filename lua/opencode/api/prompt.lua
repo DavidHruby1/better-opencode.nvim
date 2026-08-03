@@ -116,6 +116,7 @@ local function build_instruction(context, rendered, base, scope)
     "Base SHA-256: " .. base.sha256,
     string.format("Scope bytes: [%d,%d)", scope.start_byte, scope.end_byte),
     "replacement must contain the complete new text for that scope only.",
+    "Return only replacement and summary in the structured output; target identity is attached locally.",
   }, "\n")
 end
 
