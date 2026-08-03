@@ -19,7 +19,9 @@ for file in \
   tests/release/ac/test_ui_context.lua \
   tests/release/ac/test_merge.lua \
   tests/release/ac/test_jobs.lua \
-  tests/release/ac/test_security.lua
+  tests/release/ac/test_security.lua \
+  tests/integration/test_request_status.lua \
+  tests/contract/test_reasoning_events.lua
 do
   MINI_TEST_PATH="$MINI_TEST_PATH" nvim --headless -u tests/minimal_init.lua \
     -c "lua MiniTest.run_file('$file')"

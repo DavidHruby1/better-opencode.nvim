@@ -17,15 +17,23 @@ local function opencode_version(binary)
   return vim.trim(output)
 end
 
----Reports whether an existing directory is writable without creating or changing it.
----Health is passive, so missing state paths remain unavailable until normal Runtime startup creates them.
-local function writable_directory(path)
-  return vim.fn.isdirectory(path) == 1 and vim.fn.filewritable(path) == 2
+---Reports whether a directory is writable without creating or changing it.
+---Missing paths remain distinct from existing unwritable paths because normal Runtime startup creates missing paths.
+---@return "missing"|"unwritable"|"writable"
+local function directory_status(path)
+  if not vim.uv.fs_stat(path) then
+    return "missing"
+  end
+  if vim.fn.isdirectory(path) ~= 1 or vim.fn.filewritable(path) ~= 2 then
+    return "unwritable"
+  end
+  return "writable"
 end
 
 ---Resolves the active project's canonical root using the same LSP, Git, and cwd rules as Runtime startup.
----File-backed buffers use root resolution directly; unnamed buffers fall back to the canonical cwd because there is no
----file for the existing resolver to anchor.
+---File-backed buffers use root resolution directly and preserve its failure reason; unnamed buffers fall back to the
+---canonical cwd because there is no file for the existing resolver to anchor.
+---@return string?
 ---@return string?
 local function active_project_root()
   local root = require("opencode.runtime.root")
@@ -34,7 +42,11 @@ local function active_project_root()
   if path ~= "" then
     return root.resolve({ buf = buf, path = path })
   end
-  return root.realpath(vim.uv.cwd() or vim.fn.getcwd())
+  local cwd = root.realpath(vim.uv.cwd() or vim.fn.getcwd())
+  if cwd then
+    return cwd
+  end
+  return nil, "cwd_not_found"
 end
 
 local function parser_capability()
@@ -51,7 +63,7 @@ local function parser_capability()
 end
 
 ---Collects local capability and OpenCode config facts without starting a Server or Runtime state.
----Command probes are read-only; the passive config guard matches startup's root and environment.
+---Command probes are read-only; the passive config guard matches startup's root and environment when a root exists.
 ---@return table
 function M.capabilities()
   local parser_ok, parser_name = parser_capability()
@@ -67,13 +79,17 @@ function M.capabilities()
   local config = require("opencode.config")
   local version = opencode_version(config.opts.runtime.binary)
   local profile = version and require("opencode.compat")[version] or nil
-  local root = active_project_root()
+  local root, root_error = active_project_root()
   local guard_ok = false
-  ---@type string?
-  local guard_error = "root_not_found"
+  local guard_error = root_error
   if type(root) == "string" then
     guard_ok, guard_error = require("opencode.runtime.config_guard").scan(root)
+  else
+    root_error = root_error or "root_not_found"
+    guard_error = root_error
   end
+  local state_dir_status = directory_status(vim.fn.stdpath("state") .. "/opencode.nvim")
+  local temp_dir_status = directory_status(vim.fn.stdpath("state") .. "/opencode.nvim/runtimes")
   return {
     nvim_ok = vim.version.ge(vim.version(), { 0, 11, 0 }),
     opencode_ok = version ~= nil,
@@ -89,11 +105,14 @@ function M.capabilities()
     lua_adapter_ok = pcall(require, "opencode.scope.adapters.lua"),
     terminal_ok = vim.fn.exists("*jobstart") == 1,
     loopback_ok = M.loopback_available(),
-    state_dir_ok = writable_directory(vim.fn.stdpath("state") .. "/opencode.nvim"),
-    temp_dir_ok = writable_directory(vim.fn.stdpath("state") .. "/opencode.nvim/runtimes"),
+    state_dir_ok = state_dir_status == "writable",
+    state_dir_status = state_dir_status,
+    temp_dir_ok = temp_dir_status == "writable",
+    temp_dir_status = temp_dir_status,
     config_error = config.validation_error,
     config_guard_ok = guard_ok,
     config_guard_error = guard_error,
+    root_error = root_error,
   }
 end
 
@@ -109,6 +128,8 @@ function M.loopback_available()
   return bound == 0 or bound == true
 end
 
+---Reports plugin configuration errors and the passive OpenCode config guard result.
+---A missing project root makes the guard not applicable, while a failed scan remains an error.
 local function report_config(report)
   if report.config_error then
     vim.health.error(
@@ -125,7 +146,11 @@ local function report_config(report)
     config_parse = "OpenCode config could not be parsed; fix it or use a clean config",
     custom_tool = "custom OpenCode tools are blocked; use a clean config for this plugin",
   }
-  if report.config_guard_ok then
+  if report.root_error then
+    vim.health.warn(
+      "local OpenCode config scan not applicable; project root unavailable (" .. report.root_error .. ")"
+    )
+  elseif report.config_guard_ok then
     vim.health.ok("local OpenCode config parsed; plugins and MCPs are ignored; custom tools remain blocked")
   else
     vim.health.error(
@@ -192,10 +217,19 @@ function M.check()
   else
     vim.health.error("jobstart process API is required; use Neovim 0.11.0 or newer")
   end
-  if report.state_dir_ok and report.temp_dir_ok then
+  local missing_state_dir = report.state_dir_status == "missing"
+  local missing_temp_dir = report.temp_dir_status == "missing"
+  local unwritable_state_dir = report.state_dir_status == "unwritable"
+  local unwritable_temp_dir = report.temp_dir_status == "unwritable"
+  local directories_missing = missing_state_dir or missing_temp_dir
+  local directories_unwritable = unwritable_state_dir or unwritable_temp_dir
+  if not directories_missing and not directories_unwritable then
     vim.health.ok("private state and runtime temp directories are writable")
-  else
+  elseif directories_unwritable then
     vim.health.error("private state/temp directories are not writable; fix permissions on stdpath(state)")
+  end
+  if directories_missing then
+    vim.health.warn("private state/temp directories are missing; Runtime creates them on first start")
   end
   if report.parser_ok then
     vim.health.ok("Tree-sitter parser available for " .. report.parser_name)

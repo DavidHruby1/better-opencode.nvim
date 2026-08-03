@@ -42,6 +42,7 @@ end
 
 ---Runs the public health check against local capability boundaries without starting OpenCode.
 ---The returned observations preserve health levels, root selection, and command probes for privacy assertions.
+---Optional root and directory fixtures exercise health's non-mutating failure boundaries.
 ---@param spec? table
 ---@return table, table
 local function run_health(spec)
@@ -75,10 +76,12 @@ local function run_health(spec)
     vim_system = vim.system,
     fn_system = vim.fn.system,
     cwd = vim.uv.cwd,
+    fs_stat = vim.uv.fs_stat,
     get_clients = vim.lsp.get_clients,
     buf_get_name = vim.api.nvim_buf_get_name,
     binary = config.opts.runtime.binary,
     config_guard = package.loaded["opencode.runtime.config_guard"],
+    root = package.loaded["opencode.runtime.root"],
     snacks = package.loaded.snacks,
     snacks_preload = package.preload.snacks,
     env = {
@@ -108,10 +111,12 @@ local function run_health(spec)
     vim.system = old.vim_system
     vim.fn.system = old.fn_system
     vim.uv.cwd = old.cwd
+    vim.uv.fs_stat = old.fs_stat
     vim.lsp.get_clients = old.get_clients
     vim.api.nvim_buf_get_name = old.buf_get_name
     config.opts.runtime.binary = old.binary
     package.loaded["opencode.runtime.config_guard"] = old.config_guard
+    package.loaded["opencode.runtime.root"] = old.root
     package.loaded.snacks = old.snacks
     package.preload.snacks = old.snacks_preload
     vim.env.XDG_CONFIG_HOME = old.env.XDG_CONFIG_HOME
@@ -188,6 +193,17 @@ local function run_health(spec)
   end
   vim.fn.stdpath = function()
     return "/health-fixture/private-state"
+  end
+  vim.uv.fs_stat = function(path)
+    local state_dir = "/health-fixture/private-state/opencode.nvim"
+    local temp_dir = state_dir .. "/runtimes"
+    if path == state_dir or path == temp_dir then
+      if spec.state_exists == false then
+        return nil
+      end
+      return {}
+    end
+    return old.fs_stat(path)
   end
   vim.fn.isdirectory = function()
     return spec.state_exists == false and 0 or 1
@@ -271,6 +287,15 @@ local function run_health(spec)
     }
   end
 
+  if spec.root_resolution_error then
+    local root = require("opencode.runtime.root")
+    package.loaded["opencode.runtime.root"] = vim.tbl_extend("force", root, {
+      resolve = function()
+        return nil, spec.root_resolution_error
+      end,
+    })
+  end
+
   if spec.snacks_available == false then
     package.loaded.snacks = nil
     package.preload.snacks = function()
@@ -350,7 +375,8 @@ T["health scans the canonical active-buffer root without creating state"] = func
     active_file = file,
     git_root = project,
     capture_guard_root = true,
-    state_exists = false,
+    state_exists = true,
+    writable = false,
   })
   eq(calls.guard_root, vim.uv.fs_realpath(project))
   eq(calls.mkdir, {})
@@ -361,6 +387,40 @@ T["health scans the canonical active-buffer root without creating state"] = func
   )
   assert_private_health(observations, calls)
   vim.fn.delete(root, "rf")
+end
+
+T["AC-SEC-02 health warns when a named buffer has no project root"] = function()
+  local observations, calls = run_health({
+    active_file = "/health-fixture/named-buffer.lua",
+    root_resolution_error = "no_containing_root",
+  })
+  eq(
+    contains(
+      observations.warn,
+      "local OpenCode config scan not applicable; project root unavailable (no_containing_root)"
+    ),
+    true
+  )
+  eq(contains(observations.error, "local OpenCode config is blocked; see docs/RECOVERY.md"), false)
+  eq(calls.guard_root, nil)
+  assert_private_health(observations, calls)
+end
+
+T["AC-SEC-02 health distinguishes missing and unwritable private directories"] = function()
+  local missing, missing_calls = run_health({ state_exists = false })
+  eq(
+    contains(missing.warn, "private state/temp directories are missing; Runtime creates them on first start"),
+    true
+  )
+  eq(contains(missing.error, "private state/temp directories are not writable"), false)
+  eq(missing_calls.mkdir, {})
+  assert_private_health(missing, missing_calls)
+
+  local unwritable, unwritable_calls = run_health({ state_exists = true, writable = false })
+  eq(contains(unwritable.error, "private state/temp directories are not writable"), true)
+  eq(contains(unwritable.warn, "private state/temp directories are missing"), false)
+  eq(unwritable_calls.mkdir, {})
+  assert_private_health(unwritable, unwritable_calls)
 end
 
 T["AC-SEC-02 health reports actionable local capability failures without discovery"] = function()

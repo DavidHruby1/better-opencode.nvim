@@ -36,7 +36,8 @@ end
 
 ---Saves the current target and referenced files after their providers have run.
 ---Temporary scope marks follow BufWritePre edits in the target; failed writes, stale paths, invalid UTF-8, or lost marks
----stop dispatch before Base capture. The caller rerenders after a write because hooks may change provider results.
+---stop dispatch before Base capture. A buffer wiped by a write hook is rejected before any further buffer reads.
+---The caller rerenders after a write because hooks may change provider results.
 ---@param context table
 ---@return boolean?
 ---@return string?
@@ -68,8 +69,13 @@ function M.save(context)
     local ok = pcall(vim.api.nvim_buf_call, buf, function()
       vim.cmd.write()
     end)
+    local valid = vim.api.nvim_buf_is_valid(buf)
+    if not ok or not valid then
+      require("opencode.scope").discard_context_tracker(context, tracker)
+      return nil, "write_failed"
+    end
     local final_path = require("opencode.runtime.root").realpath(vim.api.nvim_buf_get_name(buf))
-    if not ok or final_path ~= real or vim.bo[buf].modified or logical(buf) ~= disk_logical(buf) then
+    if final_path ~= real or vim.bo[buf].modified or logical(buf) ~= disk_logical(buf) then
       require("opencode.scope").discard_context_tracker(context, tracker)
       return nil, "write_failed"
     end
@@ -96,6 +102,7 @@ end
 
 ---Normalizes the target before a prompt displays its scope.
 ---No prompt providers exist at this point, so only the target and references explicitly attached by the caller are saved.
+---The caller's references are restored before save errors are rethrown.
 ---@param context table
 ---@return boolean?
 ---@return string?
@@ -107,8 +114,11 @@ function M.prepare_scope(context)
       context.referenced_buffers[buf] = true
     end
   end
-  local ok, err = M.save(context)
+  local save_ok, ok, err = pcall(M.save, context)
   context.referenced_buffers = references
+  if not save_ok then
+    error(ok, 0)
+  end
   return ok, err
 end
 

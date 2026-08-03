@@ -191,13 +191,17 @@ function Context:_expand(prompt, explicit)
 end
 
 ---Expands placeholder documentation without saving files or retaining provider references.
+---The original references are restored before expansion errors are rethrown.
 ---Completion previews may call providers for useful text, but they must not turn browsing a completion menu into a write.
 ---@param prompt string
 ---@return { input: table, output: table, plaintext: string }
 function Context:preview(prompt)
   local references = self.referenced_buffers
-  local output = self:_expand(prompt, references)
+  local ok, output = pcall(self._expand, self, prompt, references)
   self.referenced_buffers = references
+  if not ok then
+    error(output, 0)
+  end
   local Rendered = require("opencode.context.rendered")
   return {
     input = self:input(prompt),

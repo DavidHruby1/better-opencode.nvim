@@ -37,6 +37,60 @@ T["context file read failure returns disk_read"] = function()
   vim.uv.fs_unlink(path)
 end
 
+T["preview restores references when a provider throws"] = function()
+  local path = vim.fn.tempname()
+  vim.fn.writefile({ "source" }, path)
+  vim.cmd.edit(path)
+  local buf = vim.api.nvim_get_current_buf()
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), {
+    root = vim.fs.dirname(path),
+  })
+  local references = { [buf] = true }
+  context.referenced_buffers = references
+
+  local config = require("opencode.config")
+  local old_provider = config.opts.contexts["@throws"]
+  config.opts.contexts["@throws"] = function(current)
+    current.referenced_buffers[buf] = false
+    error("provider_failed")
+  end
+  local ok, err = pcall(context.preview, context, "@throws")
+  config.opts.contexts["@throws"] = old_provider
+
+  eq(ok, false)
+  eq(err, "provider_failed")
+  eq(context.referenced_buffers == references, true)
+  eq(context.referenced_buffers[buf], true)
+  vim.cmd.bwipeout({ bang = true })
+  vim.uv.fs_unlink(path)
+end
+
+T["render maps a wiped dirty buffer to write_failed"] = function()
+  local path = vim.fn.tempname()
+  vim.fn.writefile({ "before" }, path)
+  vim.cmd.edit(path)
+  local buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "dirty" })
+  vim.api.nvim_create_autocmd("BufWritePre", {
+    buffer = buf,
+    once = true,
+    callback = function()
+      vim.api.nvim_buf_delete(buf, { force = true, wipe = true })
+    end,
+  })
+  local context = require("opencode.context").new(assert(require("opencode.context").capture()), {
+    root = vim.fs.dirname(path),
+  })
+
+  local ok, err = pcall(context.render, context, "render")
+
+  eq(ok, false)
+  eq(type(err), "table")
+  eq(err.error_class, "write_failed")
+  eq(vim.api.nvim_buf_is_valid(buf), false)
+  vim.uv.fs_unlink(path)
+end
+
 T["extmark scope tracks insertion with configured gravity"] = function()
   local buf = vim.api.nvim_create_buf(true, false)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "alpha", "beta" })
