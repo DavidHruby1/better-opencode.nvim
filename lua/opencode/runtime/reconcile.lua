@@ -401,6 +401,18 @@ function M.run(runtime, generation, statuses)
                 return { job = job, session = session, status = status, messages = messages }
               end)
               :catch(function(err)
+                if type(err) == "table" and err.status == 400 then
+                  local captured = vim.tbl_values(job.assistant_messages or {})
+                  local result = { job = job, session = session, status = status, messages = captured }
+                  if M.has_parent_response(job, captured) then
+                    return result
+                  end
+                  if current() and (job.state == "running" or job.state == "waiting_user") then
+                    job.error_class = "missing_result"
+                    require("opencode.job").finish(job, session, "error")
+                  end
+                  return result
+                end
                 if current() then
                   job.error_class = type(err) == "table" and err.error_class or "message_reconciliation"
                   job.error_endpoint = type(err) == "table" and err.endpoint or nil
@@ -465,6 +477,9 @@ function M.run(runtime, generation, statuses)
   return Promise.race({ snapshot, timeout }):catch(function(err)
     fail_remote_jobs(err)
     finish(runtime, generation, sequence, false, err)
+    if runtime.reconcile_generation == sequence then
+      runtime.reconcile_generation = sequence + 1
+    end
     return Promise.reject(err)
   end)
 end

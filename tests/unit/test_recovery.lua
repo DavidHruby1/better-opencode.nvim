@@ -257,11 +257,12 @@ T["failed reconciliation stays blocked and notifies until a later snapshot succe
   vim.notify = old_notify
 end
 
-T["reconciliation timeout terminalizes remote-dependent Jobs and cleans claims"] = function()
+T["reconciliation timeout terminalizes Jobs, cleans claims, and ignores a late snapshot"] = function()
   local Promise = require("opencode.promise")
   local config = require("opencode.config").opts.runtime
   local saved_timeout = config.startup_timeout
   config.startup_timeout = 20
+  local resolve_status, late_status_resolved = nil, false
   local runtime = require("opencode.runtime").new("/root")
   runtime.state, runtime.sse_live, runtime.generation = "ready", true, 1
   local job =
@@ -271,7 +272,21 @@ T["reconciliation timeout terminalizes remote-dependent Jobs and cleans claims"]
   runtime.session_claims[session.id] = { pending = false, job_key = job.key }
   runtime.client = {
     session_status = function()
-      return Promise.new(function() end)
+      return Promise.new(function(resolve)
+        resolve_status = function(statuses)
+          resolve(statuses)
+          late_status_resolved = true
+        end
+      end)
+    end,
+    messages = function()
+      return Promise.resolve({})
+    end,
+    questions = function()
+      return Promise.resolve({})
+    end,
+    permissions = function()
+      return Promise.resolve({})
     end,
   }
   local error
@@ -287,7 +302,31 @@ T["reconciliation timeout terminalizes remote-dependent Jobs and cleans claims"]
   config.startup_timeout = saved_timeout
   eq({ error.error_class, job.state, job.error_class }, { "reconciliation_timeout", "error", "reconciliation_timeout" })
   eq({ session.active_job_key, session.availability, runtime.session_claims[session.id] }, { nil, "blocked", nil })
-  eq(runtime:prompt_blocker(), "reconciliation_failed")
+  assert(resolve_status)
+  resolve_status({})
+  eq(late_status_resolved, true)
+  eq(
+    vim.wait(500, function()
+      return late_status_resolved
+        and (
+          runtime.reconciliation_failed ~= true
+          or runtime.reconciliation_required ~= true
+          or runtime.prompt_locked ~= true
+          or not runtime.reconcile_error
+          or runtime.reconcile_error.error_class ~= "reconciliation_timeout"
+          or runtime:accepts_prompts()
+        )
+    end),
+    false
+  )
+  eq({
+    runtime.reconciliation_failed,
+    runtime.reconciliation_required,
+    runtime.prompt_locked,
+    runtime.reconcile_error and runtime.reconcile_error.error_class,
+    runtime:prompt_blocker(),
+    runtime:accepts_prompts(),
+  }, { true, true, true, "reconciliation_timeout", "reconciliation_failed", false })
 end
 
 T["stale reconciliation callbacks cannot mutate the current generation"] = function()
@@ -382,6 +421,165 @@ T["cancel all snapshots every Runtime and reports aggregate failures"] = functio
   )
   eq(report, { requested = 2, cancelled = 2, abort_failed = 1 })
   Runtime.registry[first.root], Runtime.registry[second.root] = nil, nil
+end
+
+T["session error without a message ID reconciles an HTTP 400 Build failure"] = function()
+  local Promise = require("opencode.promise")
+  local runtime = require("opencode.runtime").new("/root")
+  runtime.state, runtime.sse_live = "ready", true
+  local job = require("opencode.job").new("ses_missing_result", {
+    root = runtime.root,
+    buf = 1,
+    path = runtime.root .. "/file.lua",
+    auto_apply = false,
+  })
+  local session = { id = job.session_id, active_job_key = job.key }
+  runtime.jobs[job.key], runtime.sessions[session.id] = job, session
+  runtime.client = {
+    session_status = function()
+      return Promise.resolve({ [session.id] = "idle" })
+    end,
+    messages = function()
+      return Promise.reject({ error_class = "http", status = 400, endpoint = "/session/message" })
+    end,
+    questions = function()
+      return Promise.resolve({})
+    end,
+    permissions = function()
+      return Promise.resolve({})
+    end,
+  }
+  local old_notify = vim.notify
+  vim.notify = function() end
+  runtime:route_event({ type = "session.error", properties = { sessionID = session.id } })
+  local settled = vim.wait(500, function()
+    return job.state == "error" and runtime.reconciling == false
+  end)
+  vim.notify = old_notify
+
+  eq(settled, true)
+  eq({ job.state, job.error_class, session.active_job_key }, { "error", "missing_result", nil })
+  eq(
+    { runtime.reconciling, runtime.reconciliation_failed, runtime.reconciliation_required, runtime.prompt_locked },
+    { false, nil, false, false }
+  )
+  eq(runtime:prompt_blocker(), nil)
+end
+
+T["non-400 message reconciliation failure remains a Runtime-wide prompt block"] = function()
+  local Promise = require("opencode.promise")
+  local runtime = require("opencode.runtime").new("/root")
+  runtime.state, runtime.sse_live = "ready", true
+  local job = require("opencode.job").new("ses_message_failure", {
+    root = runtime.root,
+    buf = 1,
+    path = runtime.root .. "/file.lua",
+    auto_apply = false,
+  })
+  local session = { id = job.session_id, active_job_key = job.key }
+  runtime.jobs[job.key], runtime.sessions[session.id] = job, session
+  local message_error = { error_class = "http", status = 500, endpoint = "/session/message" }
+  runtime.client = {
+    session_status = function()
+      return Promise.resolve({ [session.id] = "idle" })
+    end,
+    messages = function()
+      return Promise.reject(message_error)
+    end,
+    questions = function()
+      return Promise.resolve({})
+    end,
+    permissions = function()
+      return Promise.resolve({})
+    end,
+  }
+  local old_notify = vim.notify
+  vim.notify = function() end
+  runtime:route_event({ type = "session.error", properties = { sessionID = session.id } })
+  local settled = vim.wait(500, function()
+    return job.state == "error" and runtime.reconciling == false
+  end)
+  vim.notify = old_notify
+
+  eq(settled, true)
+  eq({ job.state, job.error_class, job.error_status, job.error_endpoint, session.active_job_key }, {
+    "error",
+    "http",
+    500,
+    "/session/message",
+    nil,
+  })
+  eq(
+    { runtime.reconciling, runtime.reconciliation_failed, runtime.reconciliation_required, runtime.prompt_locked },
+    { false, true, true, true }
+  )
+  eq(runtime:prompt_blocker(), "reconciliation_failed")
+end
+
+T["HTTP 400 reconciliation completes from a captured exact-parent structured response"] = function()
+  local Promise = require("opencode.promise")
+  local root = "/root"
+  local base_text = "one"
+  local base_sha256 = vim.fn.sha256(base_text)
+  local runtime = require("opencode.runtime").new(root)
+  runtime.state, runtime.sse_live = "ready", true
+  local job = require("opencode.job").new("ses_captured_result", {
+    root = root,
+    buf = 1,
+    path = root .. "/file.lua",
+    base = { text = base_text, sha256 = base_sha256 },
+    scope = { start_byte = 0, end_byte = #base_text },
+    auto_apply = false,
+  })
+  local session = { id = job.session_id, active_job_key = job.key }
+  runtime.jobs[job.key], runtime.sessions[session.id] = job, session
+  runtime:route_event({
+    type = "message.updated",
+    properties = {
+      info = {
+        id = "assistant_captured",
+        role = "assistant",
+        sessionID = session.id,
+        parentID = job.user_message_id,
+        structured = {
+          version = 1,
+          path = "file.lua",
+          base_sha256 = base_sha256,
+          scope = { start_byte = 0, end_byte = #base_text },
+          replacement = "two",
+          summary = "replace",
+        },
+      },
+    },
+  })
+  runtime.client = {
+    session_status = function()
+      return Promise.resolve({ [session.id] = "idle" })
+    end,
+    messages = function()
+      return Promise.reject({ error_class = "http", status = 400, endpoint = "/session/message" })
+    end,
+    questions = function()
+      return Promise.resolve({})
+    end,
+    permissions = function()
+      return Promise.resolve({})
+    end,
+  }
+  runtime:route_event({ type = "session.error", properties = { sessionID = session.id } })
+  local settled = vim.wait(500, function()
+    return job.state == "pending_apply" and runtime.reconciling == false
+  end)
+
+  eq(settled, true)
+  eq({ job.state, job.error_class, job.completion_count, job.structured_assistant_message_id }, {
+    "pending_apply",
+    nil,
+    1,
+    "assistant_captured",
+  })
+  eq(job.proposal.replacement, "two")
+  eq(runtime:prompt_blocker(), nil)
 end
 
 return T
