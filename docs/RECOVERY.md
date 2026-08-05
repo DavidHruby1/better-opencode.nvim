@@ -9,6 +9,7 @@ Run `:checkhealth opencode` first. Health passively scans OpenCode config, reads
 - Enable `snacks.input` and `snacks.picker`.
 - Install the Tree-sitter parser for the active language if function scope is needed. Lua, Python, JavaScript, JSX, TypeScript, and TSX have built-in scope adapters; without a matching adapter or parser, file scope remains available.
 - Fix write permission for Neovim `stdpath("state")`; private Runtime manifests and temporary merge inputs live below `opencode.nvim/`.
+- If `ambiguous_lsp_root` appears, multiple active LSP workspaces contain the file; align their `root_dir` or `workspace_folders`, disable the extra client, and retry.
 - For an unsupported option, use the source scope and type reported by health, then consult `docs/CONFIGURATION.md`.
 
 ## OpenCode config

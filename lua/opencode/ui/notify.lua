@@ -12,6 +12,7 @@ local levels = {
 local safe_classes = {
   agent_conflict = true,
   agent_unavailable = true,
+  ambiguous_lsp_root = true,
   apply_error = true,
   assistant_message_count = true,
   command_unsupported = true,
@@ -73,6 +74,7 @@ local safe_classes = {
 
 local actionable_messages = {
   agent_unavailable = "agent_unavailable: OpenCode must provide the primary build agent",
+  ambiguous_lsp_root = "ambiguous_lsp_root: multiple active LSP workspaces contain this file; align their roots or disable the extra client (see docs/RECOVERY.md)",
   config_parse = "config_parse: OpenCode config is invalid; fix it or use a clean config (see docs/RECOVERY.md)",
   custom_tool = "custom_tool: custom OpenCode tools are blocked; use a clean config (see docs/RECOVERY.md)",
   decode = "decode: OpenCode returned an invalid response; restart the owned runtime (see docs/RECOVERY.md)",

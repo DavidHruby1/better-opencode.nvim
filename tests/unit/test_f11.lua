@@ -83,6 +83,7 @@ T["structured startup notifications keep only safe actionable transport details"
   local ok, failure = xpcall(function()
     local cases = {
       { error_class = "custom_tool", expected = "custom OpenCode tools are blocked" },
+      { error_class = "ambiguous_lsp_root", expected = "multiple active LSP workspaces contain this file" },
       { error_class = "config_parse", expected = "OpenCode config is invalid" },
       {
         error_class = "http",
